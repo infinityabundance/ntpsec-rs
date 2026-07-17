@@ -1,0 +1,9 @@
+[package]
+name = "ntpsec-rs-time"
+description = "NTP kernel time management — forensic Rust reconstruction of ntptime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs-keygen"
+description = "NTP key generator — forensic Rust reconstruction of ntpkeygen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }

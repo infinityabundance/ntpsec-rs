@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs-dig"
+description = "NTP query tool — forensic Rust reconstruction of ntpdig"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }

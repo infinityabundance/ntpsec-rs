@@ -1,0 +1,12 @@
+/target
+.pytest_cache
+__pycache__
+*.pyc
+*.swp
+*.swo
+*~
+\#*\#
+.DS_Store
+*.orig
+*.rej
+/ntpsec-oracle/

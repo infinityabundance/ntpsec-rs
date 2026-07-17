@@ -1,0 +1,11 @@
+[package]
+name = "ntpsec-rs-query"
+description = "NTP query client — forensic Rust reconstruction of ntpq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"

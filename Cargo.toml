@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ntpsec-rs-core",
+    "crates/ntpsec-rs-io",
+    "crates/ntpsec-rs",
+    "crates/ntpsec-rs-d",
+    "crates/ntpsec-rs-query",
+    "crates/ntpsec-rs-dig",
+    "crates/ntpsec-rs-keygen",
+    "crates/ntpsec-rs-leapfetch",
+    "crates/ntpsec-rs-mon",
+    "crates/ntpsec-rs-trace",
+    "crates/ntpsec-rs-wait",
+    "crates/ntpsec-rs-viz",
+    "crates/ntpsec-rs-frob",
+    "crates/ntpsec-rs-snmpd",
+    "crates/ntpsec-rs-time",
+    "crates/ntpsec-rs-sweep",
+    "crates/ntpsec-rs-loggps",
+    "crates/ntpsec-rs-logtemp",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

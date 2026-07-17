@@ -1,0 +1,11 @@
+[package]
+name = "ntpsec-rs-leapfetch"
+description = "NTP leap second fetcher — forensic Rust reconstruction of ntpleapfetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }
+ureq = "2"

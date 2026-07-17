@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs-io"
+description = "Real OS I/O layer for ntpsec-rs — clock, sockets, filesystem, privileges"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+libc = "0.2"

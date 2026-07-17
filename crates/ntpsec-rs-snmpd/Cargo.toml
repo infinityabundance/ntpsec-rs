@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs-snmpd"
+description = "NTP SNMP daemon — forensic Rust reconstruction of ntpsnmpd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }

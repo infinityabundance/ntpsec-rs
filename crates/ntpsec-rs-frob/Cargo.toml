@@ -1,0 +1,9 @@
+[package]
+name = "ntpsec-rs-frob"
+description = "NTP frob tools — forensic Rust reconstruction of ntpfrob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

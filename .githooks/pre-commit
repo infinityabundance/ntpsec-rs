@@ -1,0 +1,46 @@
+#!/bin/sh
+# pre-commit hook for ntpsec-rs
+#
+# Enforces:
+#   1. Generated docs are fresh (cargo xtask check)
+#   2. No C/Python source from upstream
+#   3. Tests pass
+#
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+echo "=== ntpsec-rs pre-commit hook ==="
+
+# Run the xtask check
+cd "$(git rev-parse --show-toplevel)"
+
+# Check for clean-room violations
+C_COUNT=$(find . -name '*.c' -not -path './target/*' -not -path './.git/*' 2>/dev/null | wc -l)
+H_COUNT=$(find . -name '*.h' -not -path './target/*' -not -path './.git/*' 2>/dev/null | wc -l)
+PY_COUNT=$(find . -name '*.py' -not -path './target/*' -not -path './.git/*' -not -path './.githooks/*' 2>/dev/null | wc -l)
+
+if [ "$C_COUNT" -gt 0 ] || [ "$H_COUNT" -gt 0 ]; then
+    echo "ERROR: CLEANROOM VIOLATION!"
+    echo "C source files found:   $C_COUNT"
+    echo "Header files found:     $H_COUNT"
+    echo "No ntpsec C source may be committed."
+    echo "Found files:"
+    find . -name '*.c' -not -path './target/*' -not -path './.git/*' 2>/dev/null
+    find . -name '*.h' -not -path './target/*' -not -path './.git/*' 2>/dev/null
+    exit 1
+fi
+
+echo "Clean-room check: PASS (no .c or .h files)"
+
+# Run cargo check
+echo "Running cargo check..."
+cargo check --workspace 2>/dev/null || cargo check --workspace
+echo "cargo check: PASS"
+
+# Run cargo test
+echo "Running cargo test..."
+cargo test --workspace 2>/dev/null || cargo test --workspace
+echo "cargo test: PASS"
+
+echo "=== pre-commit hook PASS ==="

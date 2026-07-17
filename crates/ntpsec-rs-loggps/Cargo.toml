@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs-loggps"
+description = "NTP GPS logger — forensic Rust reconstruction of ntploggps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }

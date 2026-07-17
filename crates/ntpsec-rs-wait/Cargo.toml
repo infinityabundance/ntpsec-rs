@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs-wait"
+description = "NTP wait tool — forensic Rust reconstruction of ntpwait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+clap = { version = "4", features = ["derive"] }

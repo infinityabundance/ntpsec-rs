@@ -1,0 +1,10 @@
+[package]
+name = "ntpsec-rs"
+description = "Umbrella facade crate for ntpsec-rs — re-exports ntpsec-rs-core as the public API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ntpsec-rs-core = { path = "../ntpsec-rs-core" }
+ntpsec-rs-io = { path = "../ntpsec-rs-io" }
