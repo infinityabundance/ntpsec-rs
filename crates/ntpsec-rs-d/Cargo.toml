@@ -6,8 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ntpsec-rs-core = { path = "../ntpsec-rs-core" }
-ntpsec-rs-io = { path = "../ntpsec-rs-io" }
+ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.1.0" }
+ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.1.0" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 tracing = "0.1"
