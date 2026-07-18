@@ -9,3 +9,13 @@ license.workspace = true
 bitflags = "2"
 libc = "0.2"
 thiserror = "2"
+
+# Phase 2: Real crypto (replaces Phase 1 stubs)
+md-5 = "0.10"
+sha-1 = "0.10"
+sha2 = "0.10"
+aes = "0.8"
+cmac = "0.7"
+cipher = "0.4"
+hex-literal = "0.4"
+digest = "0.10"

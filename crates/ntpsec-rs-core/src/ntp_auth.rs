@@ -88,16 +88,60 @@ impl NtpAuthKey {
     }
 
     /// Compute the MAC for a given packet buffer.
-    ///
-    /// Phase 1 stub: crypto unavailable — always returns None.
-    /// Phase 2 will add md-5, sha-1, aes-gcm crate dependencies.
-    pub fn mac(&self, _pkt: &[u8]) -> Option<Vec<u8>> {
-        None // fail closed — no authentication until crypto is wired
+    /// Real implementation using md-5, sha-1, aes crates.
+    pub fn mac(&self, pkt: &[u8]) -> Option<Vec<u8>> {
+        use digest::{Digest, FixedOutput};
+        let digest_len = self.digest.digest_length();
+        if digest_len == 0 {
+            return None;
+        }
+
+        match self.digest {
+            DigestType::Md5 => {
+                // Keyed MD5: MD5(key || packet || key) as ntpsec does
+                let mut ctx = md5::Md5::default();
+                Digest::update(&mut ctx, &self.key_data);
+                Digest::update(&mut ctx, pkt);
+                Digest::update(&mut ctx, &self.key_data);
+                let hash = ctx.finalize_fixed();
+                Some(hash[..digest_len].to_vec())
+            }
+            DigestType::Sha1 => {
+                // Keyed SHA1: SHA1(key || packet || key) as ntpsec does
+                let mut ctx = sha1::Sha1::default();
+                Digest::update(&mut ctx, &self.key_data);
+                Digest::update(&mut ctx, pkt);
+                Digest::update(&mut ctx, &self.key_data);
+                let hash = ctx.finalize_fixed();
+                Some(hash[..digest_len].to_vec())
+            }
+            DigestType::Aes128Cmac => {
+                // AES-128-CMAC (RFC 4493) via cmac + aes crates
+                if self.key_data.len() < 16 {
+                    return None;
+                }
+                use aes::Aes128;
+                use cmac::{Cmac, Mac};
+                let mut mac = Cmac::<Aes128>::new_from_slice(&self.key_data[..16]).ok()?;
+                mac.update(pkt);
+                let result = mac.finalize();
+                let bytes = result.into_bytes();
+                Some(bytes.to_vec())
+            }
+            DigestType::None => None,
+        }
     }
 
-    /// Verify a MAC against a packet.
-    pub fn verify_mac(&self, _pkt: &[u8], _expected_mac: &[u8]) -> bool {
-        false // fail closed
+    /// Verify a MAC against a packet (constant-time comparison).
+    pub fn verify_mac(&self, pkt: &[u8], expected_mac: &[u8]) -> bool {
+        self.mac(pkt).map_or(false, |computed| {
+            computed.len() == expected_mac.len()
+                && computed
+                    .iter()
+                    .zip(expected_mac.iter())
+                    .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                    == 0
+        })
     }
 }
 
@@ -246,34 +290,7 @@ impl AuthKeyStore {
 
 // ──── Crypto stubs (Phase 2: replace with proper md-5, sha-1, aes-siv crates)
 
-/// Stub MD5 context.
-pub struct Md5Ctx;
-pub fn md5_ctx() -> Md5Ctx {
-    Md5Ctx
-}
-impl Md5Ctx {
-    pub fn update(&mut self, _data: &[u8]) {}
-    pub fn finalize(&mut self) -> [u8; 16] {
-        [0u8; 16]
-    }
-}
-
-/// Stub SHA1 context.
-pub struct Sha1Ctx;
-pub fn sha1_ctx() -> Sha1Ctx {
-    Sha1Ctx
-}
-impl Sha1Ctx {
-    pub fn update(&mut self, _data: &[u8]) {}
-    pub fn finalize(&mut self) -> [u8; 20] {
-        [0u8; 20]
-    }
-}
-
-/// AES-128-CMAC stub — returns correct-length MAC.
-pub fn aes_128_cmac(_key: &[u8], _message: &[u8]) -> Vec<u8> {
-    panic!("AES-128-CMAC not yet implemented — Phase 2") // fail closed
-}
+/// Real
 
 // ──── Hex Encoding/Decoding ───────────────────────────────────────────
 
@@ -348,15 +365,49 @@ mod tests {
     }
 
     #[test]
-    fn test_mac_returns_none_stub() {
-        // Phase 1 stub: MAC returns None (fail closed).
-        // Phase 2 will restore with proper crypto.
-        let key = NtpAuthKey::new(1, DigestType::Md5, b"k".to_vec());
-        assert!(key.mac(b"t").is_none(), "stub MAC should return None");
-        assert!(
-            !key.verify_mac(b"t", &[0u8; 16]),
-            "stub verify should return false"
-        );
+    fn test_mac_md5_roundtrip() {
+        let key = NtpAuthKey::new(1, DigestType::Md5, b"password".to_vec());
+        let mac = key.mac(b"test packet").unwrap();
+        assert_eq!(mac.len(), 16);
+        assert!(key.verify_mac(b"test packet", &mac));
+        assert!(!key.verify_mac(b"wrong packet", &mac));
+    }
+
+    #[test]
+    fn test_mac_sha1_roundtrip() {
+        let key = NtpAuthKey::new(1, DigestType::Sha1, b"password".to_vec());
+        let mac = key.mac(b"test packet").unwrap();
+        assert_eq!(mac.len(), 20);
+        assert!(key.verify_mac(b"test packet", &mac));
+    }
+
+    #[test]
+    fn test_mac_aes128cmac_roundtrip() {
+        let key = NtpAuthKey::new(1, DigestType::Aes128Cmac, b"0123456789abcdef".to_vec());
+        let mac = key.mac(b"test packet").unwrap();
+        assert_eq!(mac.len(), 16);
+        assert!(key.verify_mac(b"test packet", &mac));
+        assert!(!key.verify_mac(b"wrong packet", &mac));
+    }
+
+    #[test]
+    fn test_md5_known_vector() {
+        use digest::{Digest, FixedOutput};
+        use hex_literal::hex;
+        let result = md5::Md5::default().finalize_fixed();
+        let expected = hex!("d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(result[..], expected);
+    }
+
+    #[test]
+    fn test_sha1_known_vector() {
+        use digest::{Digest, FixedOutput};
+        use hex_literal::hex;
+        let mut ctx = sha1::Sha1::default();
+        Digest::update(&mut ctx, b"abc");
+        let result = ctx.finalize_fixed();
+        let expected = hex!("a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(result[..], expected);
     }
 
     #[test]

@@ -48,7 +48,7 @@ struct Cli {
     numeric: bool,
 
     /// Output in key=value format (for scripting)
-    #[arg(short = 'k', long)]
+    #[arg(short = 'K', long)]
     key_value: bool,
 
     /// Debug level
