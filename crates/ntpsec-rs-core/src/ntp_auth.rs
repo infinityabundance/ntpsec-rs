@@ -89,29 +89,15 @@ impl NtpAuthKey {
 
     /// Compute the MAC for a given packet buffer.
     ///
-    /// Phase 1 stub: returns a zero-filled MAC of the correct length.
-    /// Phase 2 will replace with proper crypto crate (md-5, sha-1, aes-gcm).
-    pub fn mac(&self, pkt: &[u8]) -> Option<Vec<u8>> {
-        let digest_len = self.digest.digest_length();
-        if digest_len == 0 {
-            return None;
-        }
-        // Stub: return zero-filled MAC of correct length
-        // Real crypto will be added when we add crypto crate dependencies
-        Some(vec![0u8; digest_len])
+    /// Phase 1 stub: crypto unavailable — always returns None.
+    /// Phase 2 will add md-5, sha-1, aes-gcm crate dependencies.
+    pub fn mac(&self, _pkt: &[u8]) -> Option<Vec<u8>> {
+        None // fail closed — no authentication until crypto is wired
     }
 
     /// Verify a MAC against a packet.
-    pub fn verify_mac(&self, pkt: &[u8], expected_mac: &[u8]) -> bool {
-        self.mac(pkt).map_or(false, |computed| {
-            // Constant-time comparison to avoid timing side-channels
-            computed.len() == expected_mac.len()
-                && computed
-                    .iter()
-                    .zip(expected_mac.iter())
-                    .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                    == 0
-        })
+    pub fn verify_mac(&self, _pkt: &[u8], _expected_mac: &[u8]) -> bool {
+        false // fail closed
     }
 }
 
@@ -286,7 +272,7 @@ impl Sha1Ctx {
 
 /// AES-128-CMAC stub — returns correct-length MAC.
 pub fn aes_128_cmac(_key: &[u8], _message: &[u8]) -> Vec<u8> {
-    vec![0u8; 16]
+    panic!("AES-128-CMAC not yet implemented — Phase 2") // fail closed
 }
 
 // ──── Hex Encoding/Decoding ───────────────────────────────────────────
@@ -362,11 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mac_digest_lengths() {
-        let md5_key = NtpAuthKey::new(1, DigestType::Md5, b"k".to_vec());
-        let sha1_key = NtpAuthKey::new(1, DigestType::Sha1, b"k".to_vec());
-        assert_eq!(md5_key.mac(b"t").unwrap().len(), 16);
-        assert_eq!(sha1_key.mac(b"t").unwrap().len(), 20);
+    fn test_mac_returns_none_stub() {
+        // Phase 1 stub: MAC returns None (fail closed).
+        // Phase 2 will restore with proper crypto.
+        let key = NtpAuthKey::new(1, DigestType::Md5, b"k".to_vec());
+        assert!(key.mac(b"t").is_none(), "stub MAC should return None");
+        assert!(
+            !key.verify_mac(b"t", &[0u8; 16]),
+            "stub verify should return false"
+        );
     }
 
     #[test]

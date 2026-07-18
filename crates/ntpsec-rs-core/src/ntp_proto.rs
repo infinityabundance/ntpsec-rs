@@ -332,53 +332,13 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
         return 0;
     }
 
-    // Build sorted list of (value, is_upper) pairs
-    let mut endpts: Vec<(f64, bool)> = Vec::with_capacity(n * 2);
-    for peer in peers.iter() {
-        let rd = root_distance(peer, now);
-        endpts.push((peer.offset - rd, false)); // lower
-        endpts.push((peer.offset + rd, true)); // upper
-    }
-    endpts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Find the intersection using the DTS algorithm (as used by ntpsec).
-    // Scan endpoints: lower opens a peer, upper closes it.
-    // Find the interval where the most peers are open.
-    let _best_low: f64 = 0.0;
-    let _best_high: f64 = 0.0;
-    let mut best_count = 0usize;
-
-    for i in 0..endpts.len() {
-        let mut count = 0usize;
-        for j in 0..endpts.len() {
-            if j == i {
-                continue;
-            }
-            // Count how many intervals contain this endpoint
-            let (val, _) = endpts[j];
-            let (ref_val, _) = endpts[i];
-            // Count peers whose interval includes ref_val
-            // We peek into the intervals: for each peer, check if ref_val
-            // is between its lower and upper bounds
-            'peer_loop: for peer in peers.iter() {
-                let rd = root_distance(peer, now);
-                let lo = peer.offset - rd;
-                let hi = peer.offset + rd;
-                if ref_val >= lo && ref_val <= hi {
-                    count += 1;
-                }
-            }
-            if count > best_count {
-                best_count = count;
-            }
-        }
-    }
-
     // A falseticker is a peer whose interval doesn't overlap with the majority.
     let mut survivors = 0;
-    let majority = n / 2 + 1;
+    // Majority is ceil(n/2) — at least half the peers must agree.
+    // Each peer is trivially counted as overlapping with itself.
+    let majority = (n + 1) / 2;
 
-    // Precompute root distances to avoid borrow conflicts
+    // Precompute (offset, root_dist, lo) tuples to avoid borrow conflicts
     let meta: Vec<(f64, f64, f64)> = peers
         .iter()
         .map(|p| {
@@ -391,11 +351,9 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
         let (offset, rd, lo) = meta[i];
         let hi = offset + rd;
 
+        // Count ALL peers that overlap with this peer (including itself)
         let mut overlaps = 0usize;
         for k in 0..meta.len() {
-            if k == i {
-                continue;
-            }
             let (jb, jrd, jlo) = meta[k];
             let jhi = jb + jrd;
             if hi >= jlo && lo <= jhi {
@@ -986,33 +944,34 @@ mod tests {
         assert!(rd >= 0.005 + 0.005 + 0.005);
     }
 
-    #[test]
-    fn test_clock_select_basic() {
+        #[test]
+    fn test_clock_select_outlier_pruned() {
         let now = ntp_fp::ts_to_ntp(1000, 0);
         let mut peers = vec![
             make_peer(0.001, 0.005, 0.001, true),
-            make_peer(10.0, 0.005, 0.001, true), // outlier
-        ];
-        for p in &mut peers {
-            p.flash = FlashBits::PASS.bits();
-        }
-
-        // Intersection should exclude the outlier
-        let n = clock_intersection(&mut peers, now);
-        let outlier_flash = FlashBits::from_bits_truncate(peers[1].flash);
-        if n >= 1 {
-            assert!(n >= 1, "expected survivors");
-        }
-        // Clustering should still work even with just good peers
-        let mut good_peers = vec![
-            make_peer(0.001, 0.005, 0.001, true),
             make_peer(0.002, 0.005, 0.001, true),
             make_peer(0.003, 0.005, 0.001, true),
+            make_peer(10.0, 0.005, 0.001, true),
         ];
-        let survivors = clock_cluster(&mut good_peers, now);
-        assert!(survivors.len() >= 2, "cluster should keep >= 2 survivors");
-    }
+        for (i, p) in peers.iter_mut().enumerate() {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;  // must set so root_distance is small
+        }
 
+        let survivors = clock_intersection(&mut peers, now);
+
+        let outlier_flash = FlashBits::from_bits_truncate(peers[3].flash);
+        assert!(outlier_flash.contains(FlashBits::TEST5),
+            "outlier should be marked TEST5, flash={:?}", outlier_flash);
+
+        for i in 0..3 {
+            let f = FlashBits::from_bits_truncate(peers[i].flash);
+            assert!(!f.contains(FlashBits::TEST5),
+                "good peer {} should not be TEST5, flash={:?}", i, f);
+        }
+
+        assert!(survivors >= 2, "expected >=2 survivors, got {}", survivors);
+    }
     #[test]
     fn test_clock_combine() {
         let now = ntp_fp::ts_to_ntp(1000, 0);

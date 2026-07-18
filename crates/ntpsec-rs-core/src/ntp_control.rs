@@ -142,9 +142,10 @@ pub mod sys_status {
     }
 }
 
-/// Control message header (24 bytes on wire).
+/// Control message header — 12 bytes on wire, all big-endian.
+/// Instead of #[repr(packed)] (which caused OOB reads), we use
+/// explicit encode/decode with to_be_bytes/from_be_bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C, packed)]
 pub struct ControlMessage {
     pub li_vn_mode: u8,
     pub opcode: u8,
@@ -156,7 +157,8 @@ pub struct ControlMessage {
 }
 
 impl ControlMessage {
-    pub const SIZE: usize = 24;
+    /// Wire size: 12 bytes (7 fields, packed, no padding).
+    pub const SIZE: usize = 12;
 
     pub fn zeroed() -> Self {
         Self {
@@ -170,6 +172,36 @@ impl ControlMessage {
         }
     }
 
+    /// Encode to 12-byte big-endian wire format.
+    pub fn encode(&self) -> [u8; 12] {
+        let mut buf = [0u8; 12];
+        buf[0] = self.li_vn_mode;
+        buf[1] = self.opcode;
+        buf[2..4].copy_from_slice(&self.sequence.to_be_bytes());
+        buf[4..6].copy_from_slice(&self.status.to_be_bytes());
+        buf[6..8].copy_from_slice(&self.associd.to_be_bytes());
+        buf[8..10].copy_from_slice(&self.offset.to_be_bytes());
+        buf[10..12].copy_from_slice(&self.count.to_be_bytes());
+        buf
+    }
+
+    /// Decode from 12-byte big-endian wire format.  Returns None if too short.
+    pub fn decode(data: &[u8]) -> Option<(Self, &[u8])> {
+        if data.len() < 12 {
+            return None;
+        }
+        let msg = Self {
+            li_vn_mode: data[0],
+            opcode: data[1],
+            sequence: u16::from_be_bytes([data[2], data[3]]),
+            status: u16::from_be_bytes([data[4], data[5]]),
+            associd: u16::from_be_bytes([data[6], data[7]]),
+            offset: u16::from_be_bytes([data[8], data[9]]),
+            count: u16::from_be_bytes([data[10], data[11]]),
+        };
+        Some((msg, &data[12..]))
+    }
+
     pub fn version(&self) -> NtpVersion {
         NtpVersion::from_bits(self.li_vn_mode >> 3)
     }
@@ -178,16 +210,8 @@ impl ControlMessage {
         NtpMode::from_bits(self.li_vn_mode)
     }
 
-    pub fn set_li_vn_mode(li: LeapIndicator, vn: NtpVersion, mode: NtpMode) -> u8 {
-        (li.to_bits() << 6) | (vn.to_bits() << 3) | mode.to_bits()
-    }
-
     pub fn decode_opcode(&self) -> ControlOpcode {
         ControlOpcode::from_u8(self.opcode)
-    }
-
-    pub fn encode_opcode(&mut self, oc: ControlOpcode) {
-        self.opcode = oc.to_u8();
     }
 }
 
@@ -201,38 +225,30 @@ pub struct ControlExchange {
 }
 
 impl ControlExchange {
-    /// Parse a control message from raw bytes.
+    /// Parse a control message from raw bytes using safe big-endian decode.
     pub fn parse(data: &[u8]) -> Result<(Self, &[u8]), String> {
-        if data.len() < ControlMessage::SIZE {
-            return Err(format!(
-                "packet too short: {} < {}",
-                data.len(),
-                ControlMessage::SIZE
-            ));
-        }
-
-        let msg = unsafe { std::ptr::read_unaligned(data.as_ptr() as *const ControlMessage) };
+        let (msg, after_header) = ControlMessage::decode(data)
+            .ok_or_else(|| format!("packet too short: {} < 12", data.len()))?;
 
         let payload_len = msg.count as usize;
         let offset = msg.offset as usize;
 
-        let payload_start = ControlMessage::SIZE + offset;
+        let payload_start = offset;
         let payload_end = payload_start + payload_len;
-        if payload_end > data.len() {
+        if payload_end > after_header.len() {
             return Err(format!(
                 "payload exceeds packet: {} > {}",
                 payload_end,
-                data.len()
+                after_header.len()
             ));
         }
 
-        let payload = data[payload_start..payload_end].to_vec();
-        let remaining = &data[payload_end..];
+        let payload = after_header[payload_start..payload_end].to_vec();
+        let remaining = &after_header[payload_end..];
 
-        // Parse authentication if present
         let mut auth_keyid = None;
         let mut auth_data = Vec::new();
-        if !remaining.is_empty() && remaining.len() >= 8 {
+        if remaining.len() >= 8 {
             auth_keyid = Some(u32::from_be_bytes([
                 remaining[0],
                 remaining[1],
@@ -253,7 +269,7 @@ impl ControlExchange {
         ))
     }
 
-    /// Build a response message.
+    /// Build a response message using safe big-endian encode.
     pub fn build_response(
         req: &ControlMessage,
         resp_data: &[u8],
@@ -261,13 +277,10 @@ impl ControlExchange {
         status: u16,
         auth_key: Option<&NtpAuthKey>,
     ) -> Vec<u8> {
-        let max_payload = 468; // ntpsec max response data per packet
-        let mut buf = Vec::with_capacity(ControlMessage::SIZE + max_payload + 24);
-
-        // Build response header
+        let max_payload = 468;
         let oc = ControlOpcode::from_u8(req.opcode);
         let resp_header = ControlMessage {
-            li_vn_mode: req.li_vn_mode, // same LI, VN, Mode
+            li_vn_mode: req.li_vn_mode,
             opcode: ControlOpcode::new(
                 true,
                 false,
@@ -275,29 +288,23 @@ impl ControlExchange {
                 oc.op,
             )
             .to_u8(),
-            sequence: sequence,
-            status: status,
+            sequence,
+            status,
             associd: req.associd,
             offset: 0,
             count: resp_data.len().min(max_payload) as u16,
         };
 
-        unsafe {
-            let ptr = &resp_header as *const ControlMessage as *const u8;
-            buf.extend_from_slice(std::slice::from_raw_parts(ptr, ControlMessage::SIZE));
-        }
-
+        let mut buf = Vec::with_capacity(ControlMessage::SIZE + max_payload + 24);
+        buf.extend_from_slice(&resp_header.encode());
         buf.extend_from_slice(&resp_data[..resp_data.len().min(max_payload)]);
 
-        // Add authentication if requested
         if let Some(key) = auth_key {
             if let Some(mac) = key.mac(&buf) {
-                let keyid_bytes = key.id.to_be_bytes();
-                buf.extend_from_slice(&keyid_bytes);
+                buf.extend_from_slice(&key.id.to_be_bytes());
                 buf.extend_from_slice(&mac);
             }
         }
-
         buf
     }
 
@@ -414,12 +421,33 @@ mod tests {
     }
 
     #[test]
-    fn test_control_message_header_size() {
-        // ControlMessage is packed with #[repr(C, packed)], so its size is
-        // ControlMessage is #[repr(C, packed)] with 7 fields:
-        // u8, u8, u16, u16, u16, u16, u16 = 12 bytes
-        // The ntpsec wire format has a 24-byte header with 4 extra bytes
-        assert_eq!(core::mem::size_of::<ControlMessage>(), 12);
+    fn test_control_message_header_encode_decode() {
+        let msg = ControlMessage {
+            li_vn_mode: 0x1c, // LI=0, VN=3, Mode=6
+            opcode: 0x82,     // R=1, E=0, M=0, Op=2 (READVAR)
+            sequence: 0x0001,
+            status: 0x0622,
+            associd: 0xc0a7,
+            offset: 0,
+            count: 8,
+        };
+        let encoded = msg.encode();
+        assert_eq!(encoded.len(), 12);
+        let (decoded, remaining) = ControlMessage::decode(&encoded).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(decoded.li_vn_mode, msg.li_vn_mode);
+        assert_eq!(decoded.opcode, msg.opcode);
+        assert_eq!(decoded.sequence, 1);
+        assert_eq!(decoded.status, 0x0622);
+        assert_eq!(decoded.associd, 0xc0a7);
+        assert_eq!(decoded.offset, 0);
+        assert_eq!(decoded.count, 8);
+    }
+
+    #[test]
+    fn test_control_message_decode_rejects_short() {
+        assert!(ControlMessage::decode(&[0u8; 11]).is_none());
+        assert!(ControlMessage::decode(&[0u8; 12]).is_some());
     }
 
     #[test]

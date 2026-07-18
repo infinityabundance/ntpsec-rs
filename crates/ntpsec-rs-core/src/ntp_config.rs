@@ -88,16 +88,10 @@ impl ConfigScanner {
                 return Token::String(self.read_quoted());
             }
 
-            if c.is_ascii_digit() {
-                return self.read_number_or_hostname();
-            }
-            // '-' and '+' only treated as numbers if next char is a digit
-            // and the digit is followed by more digits (a genuine number)
-            if (c == '-' || c == '+')
+            if (c.is_ascii_digit() || c == '-' || c == '+')
                 && self.pos + 1 < self.input.len()
-                && self.input.as_bytes()[self.pos + 1].is_ascii_digit()
+                && (c.is_ascii_digit() || self.input.as_bytes()[self.pos + 1].is_ascii_digit())
             {
-                self.pos += 1; // consume the sign
                 return self.read_number_or_hostname();
             }
 
@@ -143,7 +137,15 @@ impl ConfigScanner {
 
     fn read_number_or_hostname(&mut self) -> Token {
         let saved = self.pos;
-        let start = self.pos;
+        // Optional leading sign
+        let start = if self.pos < self.input.len()
+            && (self.input.as_bytes()[self.pos] == b'-' || self.input.as_bytes()[self.pos] == b'+')
+        {
+            self.pos += 1; // consume sign
+            saved
+        } else {
+            self.pos
+        };
         let mut is_float = false;
         while self.pos < self.input.len() {
             let c = self.input.as_bytes()[self.pos];
@@ -164,10 +166,16 @@ impl ConfigScanner {
                 break;
             }
         }
-        // If there's a '.' remaining, read as hostname
+        // If there's a '.' remaining (not consumed as float), read as hostname
         if self.pos < self.input.len() && self.input.as_bytes()[self.pos] == b'.' {
             self.pos = saved;
             return Token::String(self.read_ident());
+        }
+        // If nothing was consumed (just a bare sign with no digits),
+        // re-read from original position as a string identifier.
+        if self.pos == saved {
+            let ident = self.read_ident();
+            return Token::String(ident);
         }
         let s = self.input[start..self.pos].to_string();
         self.col += s.len();
@@ -211,32 +219,61 @@ pub const RECOGNIZED_DIRECTIVES: &[&str] = &[
     "calldelay",
     "ceiling",
     "clockstats",
+    "compatibility",
     "controlkey",
+    "crypto",
+    "decodetimestamp",
     "disable",
     "discard",
     "driftfile",
     "dscp",
     "enable",
+    "epeer",
     "filegen",
     "fudge",
+    "hostname",
+    "ident",
+    "ignore",
     "includefile",
     "interface",
+    "io",
     "keys",
+    "ipv4",
+    "ipv6",
     "kod",
     "leapfile",
     "leapsmearinterval",
+    "limit",
+    "link",
+    "listen",
     "logconfig",
     "logfile",
+    "loopinfo",
+    "lowlimit",
     "manycastclient",
     "manycastserver",
+    "mask",
     "maxclock",
+    "maxdist",
     "maxpoll",
+    "maxskew",
     "minclock",
+    "mindist",
     "minpoll",
     "minsane",
+    "mintc",
     "mode",
+    "mode7",
     "monitor",
     "mruterlist",
+    "msldap",
+    "mssntp",
+    "nice",
+    "nomodify",
+    "nonvolatile",
+    "nopeer",
+    "notrap",
+    "notrust",
     "ntpsigndsocket",
     "orphan",
     "peer",
@@ -244,29 +281,38 @@ pub const RECOGNIZED_DIRECTIVES: &[&str] = &[
     "pidfile",
     "pool",
     "prefer",
+    "pps",
+    "provider",
+    "pw",
+    "random",
     "refclock",
     "refid",
     "requestkey",
     "restrict",
+    "revoke",
     "server",
     "setvar",
-    "trustedkey",
-    "controlkey",
     "statistics",
     "statsdir",
     "step",
     "stepback",
     "stepforward",
     "stepout",
+    "struggle",
+    "sysinfo",
+    "syslog",
+    "timer",
     "tinker",
     "tos",
     "trap",
+    "true",
     "trustedkey",
     "ttl",
     "type",
     "unconfig",
     "unpeer",
     "version",
+    "xleave",
 ];
 
 pub fn is_recognized_directive(s: &str) -> bool {
