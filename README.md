@@ -57,7 +57,7 @@ crates/
   ntpsec-rs-sweep      network sweep tool
   ntpsec-rs-loggps     GPS logging daemon
   ntpsec-rs-logtemp    temperature logging daemon
-xtask                  doc generation + freshness gating (cargo xtask gen|check)
+xtask                  doc generation, freshness gating, publish, push (cargo xtask gen|check|publish|push)
 ```
 
 Host mutation (clock, sockets, privileges) is kept behind narrow trait/closure

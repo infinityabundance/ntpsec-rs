@@ -664,6 +664,27 @@ pub fn build_response(
     resp
 }
 
+/// Build an NTP client request packet.  Matching ntpsec's `transmit()` for client mode.
+pub fn build_request(peer: &Peer, system: &SystemState, now: NtpTs64, precision: i8) -> NtpPacket {
+    let mut pkt = NtpPacket::zeroed();
+    pkt.li_vn_mode = NtpPacket::set_li_vn_mode(
+        system.leap,
+        peer.version,
+        if peer.hmode == NtpMode::SymActive {
+            NtpMode::SymActive
+        } else {
+            NtpMode::Client
+        },
+    );
+    pkt.stratum = system.stratum;
+    pkt.poll = peer.hpoll;
+    pkt.precision = precision;
+    // The transmit timestamp is the only one we set; the rest are zero
+    // (which tells the server this is a request, not a response).
+    pkt.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(now);
+    pkt
+}
+
 // ──── System State ─────────────────────────────────────────────────────
 
 /// Global NTP system state — matches ntpsec's `sys_*` globals.
@@ -727,8 +748,14 @@ impl SystemState {
         // 2. Run intersection algorithm
         let n_survivors = clock_intersection(peers, now);
         if n_survivors == 0 {
-            // No survivors — keep unsynchronized
+            // No survivors — fully reset to unsynchronized state
             self.leap = LeapIndicator::Alarm;
+            self.stratum = NTP_MAXSTRAT;
+            self.peer_count = 0;
+            self.sys_offset = 0.0;
+            self.sys_jitter = 0.0;
+            self.sys_rootdist = f64::INFINITY;
+            self.reference_id = 0;
             return;
         }
 
@@ -736,6 +763,12 @@ impl SystemState {
         let survivors = clock_cluster(peers, now);
         if survivors.is_empty() {
             self.leap = LeapIndicator::Alarm;
+            self.stratum = NTP_MAXSTRAT;
+            self.peer_count = 0;
+            self.sys_offset = 0.0;
+            self.sys_jitter = 0.0;
+            self.sys_rootdist = f64::INFINITY;
+            self.reference_id = 0;
             return;
         }
 
@@ -944,7 +977,7 @@ mod tests {
         assert!(rd >= 0.005 + 0.005 + 0.005);
     }
 
-        #[test]
+    #[test]
     fn test_clock_select_outlier_pruned() {
         let now = ntp_fp::ts_to_ntp(1000, 0);
         let mut peers = vec![
@@ -955,19 +988,26 @@ mod tests {
         ];
         for (i, p) in peers.iter_mut().enumerate() {
             p.flash = FlashBits::PASS.bits();
-            p.reference_time = now;  // must set so root_distance is small
+            p.reference_time = now; // must set so root_distance is small
         }
 
         let survivors = clock_intersection(&mut peers, now);
 
         let outlier_flash = FlashBits::from_bits_truncate(peers[3].flash);
-        assert!(outlier_flash.contains(FlashBits::TEST5),
-            "outlier should be marked TEST5, flash={:?}", outlier_flash);
+        assert!(
+            outlier_flash.contains(FlashBits::TEST5),
+            "outlier should be marked TEST5, flash={:?}",
+            outlier_flash
+        );
 
         for i in 0..3 {
             let f = FlashBits::from_bits_truncate(peers[i].flash);
-            assert!(!f.contains(FlashBits::TEST5),
-                "good peer {} should not be TEST5, flash={:?}", i, f);
+            assert!(
+                !f.contains(FlashBits::TEST5),
+                "good peer {} should not be TEST5, flash={:?}",
+                i,
+                f
+            );
         }
 
         assert!(survivors >= 2, "expected >=2 survivors, got {}", survivors);

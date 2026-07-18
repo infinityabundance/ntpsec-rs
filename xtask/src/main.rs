@@ -24,13 +24,15 @@ fn main() -> anyhow::Result<()> {
         Some("versions") => cmd_versions(),
         Some("parity") => cmd_parity(),
         Some("courts") => cmd_courts(),
+        Some("publish") => cmd_publish(),
+        Some("push") => cmd_push(),
         Some(other) => {
             eprintln!("xtask: unknown command '{other}'");
-            eprintln!("Usage: cargo xtask <gen|check|versions|parity|courts>");
+            eprintln!("Usage: cargo xtask <gen|check|versions|parity|courts|publish|push>");
             process::exit(1);
         }
         None => {
-            eprintln!("Usage: cargo xtask <gen|check|versions|parity|courts>");
+            eprintln!("Usage: cargo xtask <gen|check|versions|parity|courts|publish|push>");
             process::exit(1);
         }
     }
@@ -172,6 +174,135 @@ fn cmd_parity() -> anyhow::Result<()> {
         println!("Port-parity matrix not yet generated. Run `cargo xtask gen` first.");
     }
 
+    Ok(())
+}
+
+/// Verify that all court claims have passing tests.
+/// Publish all crates to crates.io in dependency order.
+/// Waits for crate index propagation between publishes.
+fn cmd_publish() -> anyhow::Result<()> {
+    let workspace = workspace_root();
+
+    // Dependency-ordered publish list (core first, then io, then binaries)
+    let crates = [
+        "ntpsec-rs-core",
+        "ntpsec-rs-io",
+        "ntpsec-rs",
+        "ntpsec-rs-d",
+        "ntpsec-rs-query",
+        "ntpsec-rs-dig",
+        "ntpsec-rs-keygen",
+        "ntpsec-rs-leapfetch",
+        "ntpsec-rs-mon",
+        "ntpsec-rs-trace",
+        "ntpsec-rs-wait",
+        "ntpsec-rs-viz",
+        "ntpsec-rs-frob",
+        "ntpsec-rs-snmpd",
+        "ntpsec-rs-time",
+        "ntpsec-rs-sweep",
+        "ntpsec-rs-loggps",
+        "ntpsec-rs-logtemp",
+    ];
+
+    println!("xtask: publishing {} crates to crates.io...", crates.len());
+
+    for (i, name) in crates.iter().enumerate() {
+        let crate_path = workspace.join("crates").join(name);
+        if !crate_path.join("Cargo.toml").exists() {
+            println!("  SKIP {}: no Cargo.toml", name);
+            continue;
+        }
+
+        println!("  [{}/{}] Publishing {}...", i + 1, crates.len(), name);
+
+        let status = Command::new("cargo")
+            .args(["publish", "-p", name])
+            .current_dir(&workspace)
+            .status()
+            .map_err(|e| anyhow::anyhow!("cargo publish {name} failed: {e}"))?;
+
+        if !status.success() {
+            anyhow::bail!("cargo publish {name} failed");
+        }
+
+        println!("  [{}/{}] Published {}", i + 1, crates.len(), name);
+
+        // Wait for crates.io index to propagate (rate limit)
+        if i < crates.len() - 1 {
+            let wait_secs = 45;
+            println!(
+                "  Waiting {}s for index propagation before next publish...",
+                wait_secs
+            );
+            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+        }
+    }
+
+    println!("xtask: all crates published successfully");
+    Ok(())
+}
+
+/// Push to GitHub.
+fn cmd_push() -> anyhow::Result<()> {
+    let workspace = workspace_root();
+
+    // Check git status first
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&workspace)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git status failed: {e}"))?;
+
+    let output = String::from_utf8_lossy(&status.stdout);
+    if !output.trim().is_empty() {
+        println!("Uncommitted changes:");
+        for line in output.lines() {
+            println!("  {}", line);
+        }
+        println!();
+
+        // Stage all changes
+        let add = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace)
+            .status()
+            .map_err(|e| anyhow::anyhow!("git add failed: {e}"))?;
+
+        if !add.success() {
+            anyhow::bail!("git add failed");
+        }
+
+        // Commit with a descriptive message
+        let commit_msg = format!(
+            "ntpsec-rs v{} — Phase 2.3C kernel timestamps + Mode 6 control",
+            env!("CARGO_PKG_VERSION")
+        );
+        let commit = Command::new("git")
+            .args(["commit", "-m", &commit_msg])
+            .current_dir(&workspace)
+            .status()
+            .map_err(|e| anyhow::anyhow!("git commit failed: {e}"))?;
+
+        if !commit.success() {
+            anyhow::bail!("git commit failed (check git config)");
+        }
+        println!("Committed all changes.");
+    }
+
+    // Push to origin
+    println!("Pushing to GitHub...");
+    let push = Command::new("git")
+        .args(["push", "origin", "main"])
+        .current_dir(&workspace)
+        .status()
+        .map_err(|e| anyhow::anyhow!("git push failed: {e}"))?;
+
+    if !push.success() {
+        anyhow::bail!("git push failed — check remote and permissions");
+    }
+
+    println!("Pushed to GitHub successfully.");
     Ok(())
 }
 

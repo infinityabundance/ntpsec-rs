@@ -5,14 +5,14 @@
 // ## Pipeline
 //
 //   1. Parse config (ntp_config)
-//   2. Open sockets (ntpsec-rs-io)
-//   3. Create peer associations (ntp_peer)
-//   4. Enter main event loop (ntp_timer + ntp_proto):
-//      a. Receive packets → validate → process → update peer
-//      b. Clock selection → combine → discipline
-//      c. Poll timers → transmit
-//      d. Housekeeping
-//   5. Handle signals, log rotation, stats output
+//   2. Create DaemonEngine from config
+//   3. Create I/O adapters (real or lab)
+//   4. Open sockets (ntpsec-rs-io)
+//   5. Enter main event loop using DaemonEngine:
+//      a. engine.tick(now) → actions → execute (timers)
+//      b. recv → engine.handle(PacketReceived) → actions → execute
+//      c. Sleep until next timer event
+//   6. Handle signals, log rotation, stats output
 //
 // ## CLI behavior matching ntpsec
 //
@@ -31,19 +31,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use ntpsec_rs_core::ntp_auth::*;
+use ntpsec_rs_core::daemon_engine::*;
 use ntpsec_rs_core::ntp_config::*;
-use ntpsec_rs_core::ntp_fp;
-use ntpsec_rs_core::ntp_leapsec::*;
-use ntpsec_rs_core::ntp_loopfilter::*;
-use ntpsec_rs_core::ntp_monitor::*;
-use ntpsec_rs_core::ntp_peer::*;
-use ntpsec_rs_core::ntp_proto::*;
-use ntpsec_rs_core::ntp_recvbuff::*;
-use ntpsec_rs_core::ntp_restrict::*;
-use ntpsec_rs_core::ntp_syslog::*;
-use ntpsec_rs_core::ntp_timer::*;
-use ntpsec_rs_core::ntp_types::*;
+use ntpsec_rs_core::ntp_io::*;
+
+use ntpsec_rs_core::Adjustment;
 
 /// NTPsec daemon — forensic Rust reconstruction.
 #[derive(Parser, Debug)]
@@ -76,6 +68,14 @@ struct Cli {
     /// Lab daemon mode (deterministic replay)
     #[arg(long)]
     lab_daemon: bool,
+
+    /// Load NTP packet trace file for lab replay
+    #[arg(long)]
+    trace: Option<PathBuf>,
+
+    /// Record NTP packet trace to file
+    #[arg(long)]
+    record_trace: Option<PathBuf>,
 
     /// Enable seccomp sandboxing
     #[arg(long)]
@@ -116,362 +116,405 @@ fn main() {
         }
     };
 
-    // Initialize subsystems
-    let mut system = SystemState::new();
-    let mut loop_filter = LoopFilter::new(if cli.slew {
-        DisciplineType::Pll
-    } else {
-        DisciplineType::PllFll
-    });
-    let mut peer_table = PeerTable::new();
-    let mut auth_store = AuthKeyStore::new();
-    let mut leap_table = LeapTable::new();
-    let mut restrict_list = RestrictList::new();
-    let mut mon_list = MonList::new();
-    let mut timer_queue = TimerQueue::new();
-    let mut syslog = SyslogBuffer::new();
+    // ──── Lab Daemon Mode ────────────────────────────────────────────
+    if cli.lab_daemon {
+        return run_lab_daemon(config, &cli);
+    }
 
-    // Configure loop filter from CLI
+    // ──── Create Daemon Engine ───────────────────────────────────────
+    let mut engine = DaemonEngine::new(config);
+
+    // Apply CLI overrides
     if cli.slew {
-        loop_filter.step_threshold = f64::MAX; // Never step
+        engine.loop_filter.step_threshold = f64::MAX;
     }
     if cli.panicgate {
-        loop_filter.panic_threshold = f64::MAX; // Never panic
+        engine.loop_filter.panic_threshold = f64::MAX;
     }
 
-    // Create peer associations from config
-    for opt in &config.options {
-        match opt {
-            ConfigOption::Server { addr, options }
-            | ConfigOption::Peer { addr, options }
-            | ConfigOption::Pool { addr, options } => {
-                let mode = match opt.directive_name() {
-                    "peer" => NtpMode::SymActive,
-                    _ => NtpMode::Client,
-                };
+    // ──── Create I/O adapters ─────────────────────────────────────────
+    let mut clock = ntpsec_rs_io::RealSystemClock::new();
+    let mut network = ntpsec_rs_io::RealNetworkIo::new();
+    let mut store = ntpsec_rs_io::FileStateStore::new(&std::path::Path::new("/var/lib/ntp"));
 
-                // Parse minpoll/maxpoll from options
-                let mut minpoll = NTP_MINPOLL;
-                let mut maxpoll = NTP_MAXPOLL;
-                let mut burst = false;
-                let mut iburst = false;
-                let mut prefer = false;
-
-                for opt_str in options {
-                    match opt_str.as_str() {
-                        s if s.starts_with("minpoll") => {
-                            if let Some(val) = s.strip_prefix("minpoll") {
-                                minpoll = val.trim().parse().unwrap_or(NTP_MINPOLL);
-                            }
-                        }
-                        s if s.starts_with("maxpoll") => {
-                            if let Some(val) = s.strip_prefix("maxpoll") {
-                                maxpoll = val.trim().parse().unwrap_or(NTP_MAXPOLL);
-                            }
-                        }
-                        "burst" => burst = true,
-                        "iburst" => iburst = true,
-                        "prefer" => prefer = true,
-                        _ => {}
-                    }
-                }
-
-                // Create the peer association
-                let srcaddr = if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
-                    let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-                    match ip {
-                        std::net::IpAddr::V4(v4) => {
-                            let sin =
-                                unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in) };
-                            sin.sin_family = libc::AF_INET as libc::sa_family_t;
-                            sin.sin_port = 123u16.to_be();
-                            sin.sin_addr = libc::in_addr {
-                                s_addr: u32::from_ne_bytes(v4.octets()),
-                            };
-                        }
-                        std::net::IpAddr::V6(v6) => {
-                            let sin6 =
-                                unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in6) };
-                            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                            sin6.sin6_port = 123u16.to_be();
-                            sin6.sin6_addr = libc::in6_addr {
-                                s6_addr: v6.octets(),
-                            };
-                        }
-                    }
-                    sa
-                } else {
-                    tracing::warn!(
-                        "Cannot resolve {} yet (DNS deferred to Phase 2), skipping",
-                        addr
-                    );
-                    continue;
-                };
-
-                let mut peer = Peer::new(
-                    unsafe { std::mem::transmute::<libc::sockaddr_storage, SockAddr>(srcaddr) },
-                    mode,
-                    NtpVersion::V4,
-                    minpoll,
-                    maxpoll,
-                );
-                if burst {
-                    peer.flags |= PeerFlags::BURST;
-                }
-                if iburst {
-                    peer.flags |= PeerFlags::IBURST;
-                }
-                if prefer {
-                    peer.flags |= PeerFlags::PREFER;
-                }
-
-                peer_table.add(peer);
-                tracing::info!("Added {} association to {}", mode as u8, addr);
-            }
-            ConfigOption::DriftFile(path) => {
-                tracing::info!("Drift file: {}", path);
-            }
-            ConfigOption::StatsDir(path) => {
-                tracing::info!("Stats directory: {}", path);
-            }
-            ConfigOption::LeapFile(path) => {
-                // Try to load the leap file
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    if let Err(e) = leap_table.load_leapfile(&content) {
-                        tracing::warn!("Failed to load leap file '{}': {}", path, e);
-                    } else {
-                        tracing::info!("Loaded leap seconds table ({} entries)", leap_table.len());
-                    }
-                }
-            }
-            ConfigOption::Restrict { addr, flags } => {
-                if addr == "-4" || addr == "-6" {
-                    let ipv4 = addr == "-4";
-                    // Parse restrict flags
-                    let mut rflags = RestrictFlags::empty();
-                    for f in flags {
-                        rflags |= match f.as_str() {
-                            "ignore" => RestrictFlags::IGNORE,
-                            "nomodify" => RestrictFlags::NOMODIFY,
-                            "nopeer" => RestrictFlags::NOPEER,
-                            "noquery" => RestrictFlags::NOQUERY,
-                            "notrap" => RestrictFlags::NOTRAP,
-                            "notrust" => RestrictFlags::NOTRUST,
-                            "limited" => RestrictFlags::LIMITED,
-                            "kod" => RestrictFlags::KOD,
-                            "noserve" => RestrictFlags::IGNORE,
-                            "server" => RestrictFlags::SERVER,
-                            _ => RestrictFlags::NONE,
-                        };
-                    }
-                    // Set default flags for v4 or v6
-                    if ipv4 {
-                        restrict_list.set_default_v4(rflags);
-                    }
-                } else if addr == "default" {
-                    let mut rflags = RestrictFlags::empty();
-                    for f in flags {
-                        rflags |= match f.as_str() {
-                            "ignore" => RestrictFlags::IGNORE,
-                            "nomodify" => RestrictFlags::NOMODIFY,
-                            "nopeer" => RestrictFlags::NOPEER,
-                            "noquery" => RestrictFlags::NOQUERY,
-                            "notrap" => RestrictFlags::NOTRAP,
-                            "notrust" => RestrictFlags::NOTRUST,
-                            "limited" => RestrictFlags::LIMITED,
-                            "kod" => RestrictFlags::KOD,
-                            _ => RestrictFlags::NONE,
-                        };
-                    }
-                    restrict_list.set_default_v4(rflags);
-                }
-                tracing::info!("Restrict entry: {} {:?}", addr, flags);
-            }
-            ConfigOption::Keys(path) => {
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    if let Err(e) = auth_store.parse_keys_file(&content) {
-                        tracing::warn!("Failed to load keys file '{}': {}", path, e);
-                    } else {
-                        tracing::info!("Loaded {} auth keys from {}", auth_store.key_count(), path);
-                    }
-                } else {
-                    tracing::warn!("Cannot read keys file '{}'", path);
-                }
-            }
-            ConfigOption::TrustedKey(kid) => {
-                auth_store.add_trusted_key(*kid);
-                tracing::info!("Trusted key: {}", kid);
-            }
-            ConfigOption::ControlKey(kid) => {
-                auth_store.set_control_key(*kid);
-                tracing::info!("Control key: {}", kid);
-            }
-            _ => {}
-        }
+    // Load drift file if available
+    if let Ok(freq) = store.load_drift() {
+        engine.loop_filter.frequency = freq;
+        tracing::info!("Loaded drift: {:.3} ppm", freq);
     }
 
-    tracing::info!(
-        "Initialized: {} peers, {} auth keys, {} leap entries",
-        peer_table.len(),
-        auth_store.key_count(),
-        leap_table.len()
-    );
+    // Bind to NTP port
+    if let Err(e) = network.bind("0.0.0.0:123") {
+        tracing::warn!("Cannot bind to port 123: {e} (try running as root)");
+    }
 
     // Query-only mode: set clock once and exit
     if cli.query {
-        tracing::info!("Query-only mode: setting clock and exiting");
-        // Stub: in Phase 2, this will query peers and step clock
-        tracing::info!("Query mode not yet fully implemented in Phase 1");
+        tracing::info!("Query-only mode: polling peers and setting clock");
+        run_query_mode(&mut engine, &mut clock, &mut network, &mut store);
         return;
     }
 
-    // ──── Main Event Loop ────────────────────────────────────────────
-    // This is the select/poll loop matching ntpd's main loop.
-    // In Phase 1 this is a polling loop; Phase 2 adds proper async I/O.
-
+    // ──── Signal Handling ─────────────────────────────────────────────
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     signal_hook_init(r);
 
-    tracing::info!("Entering main event loop (poll interval: 1s)");
+    // ──── Main Event Loop ────────────────────────────────────────────
+    tracing::info!("Entering main event loop with {} peers", engine.peers.len());
 
     let mut iteration: u64 = 0;
-    let precision: i8 = -20; // ~1 us precision (typical for Linux)
 
     while running.load(Ordering::Relaxed) {
         iteration += 1;
-        let now = ntpsec_rs_io::RealSystemClock::new().now();
 
-        // 1. Process timers (poll events, housekeeping)
-        let due = timer_queue.due_events(now);
-        for event in due {
-            match event {
-                TimerEvent::Poll(id) => {
-                    // Send NTP request to a peer
-                    if let Some(peer) = peer_table.get_mut(id as usize) {
-                        // Build and send client request
-                        let pkt = build_request(peer, &system, now, precision);
-                        // Stub: send via network I/O
-                        tracing::trace!("Poll tick for peer {}", id);
-                    }
+        // 1. Get current time
+        let now = clock.now();
+
+        // 2. Drain due timers → execute actions
+        let timer_actions = engine.tick(now);
+        execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
+
+        // 3. Non-blocking receive — check for packets
+        match network.recv() {
+            Ok(dgram) => {
+                let event = DaemonEvent::PacketReceived(dgram);
+                let actions = engine.handle(event);
+                execute_actions(&actions, &mut clock, &mut network, &mut store);
+            }
+            Err(IoError::RecvFailed(_)) => {
+                // No data available — normal, continue
+            }
+            Err(e) => {
+                if iteration % 100 == 0 {
+                    tracing::debug!("Recv error: {e}");
                 }
-                TimerEvent::Housekeeping => {
-                    // Periodic housekeeping: update clock selection, etc.
-                    let mut peers_vec: Vec<Peer> = peer_table.iter().cloned().collect();
-                    system.update_from_peers(&mut peers_vec, now);
-                    // Write back updated peers
-                    for p in peers_vec {
-                        // Stub: update peer_table
-                    }
-                }
-                _ => {}
             }
         }
 
-        // 2. Housekeeping every 10 iterations
-        if iteration % 10 == 0 {
-            // Update system state from peers
-            let mut peers_vec: Vec<Peer> = peer_table.iter().cloned().collect();
-            system.update_from_peers(&mut peers_vec, now);
-            // Write back
-            for (i, p) in peers_vec.iter().enumerate() {
-                if let Some(peer) = peer_table.get_mut(i) {
-                    peer.offset = p.offset;
-                    peer.delay = p.delay;
-                    peer.dispersion = p.dispersion;
-                    peer.jitter = p.jitter;
-                    peer.stratum = p.stratum;
-                    peer.leap = p.leap;
-                    peer.flash = p.flash;
-                }
-            }
-
-            // Every 100 iterations, apply clock discipline
-            if iteration % 100 == 0 && system.peer_count > 0 {
-                let adj = loop_filter.local_clock(system.sys_offset, now);
-                match adj {
-                    Adjustment::Step(offset) => {
-                        tracing::info!("Step clock by {:.6}s", offset);
-                    }
-                    Adjustment::Slew(offset, freq) => {
-                        tracing::trace!("Slew clock by {:.6}s at {:.3}ppm", offset, freq);
-                    }
-                    Adjustment::Panic(offset) => {
-                        tracing::error!("Panic: offset {:.6}s exceeds threshold!", offset);
-                        if !cli.panicgate {
-                            tracing::error!("Exiting (use -g to override)");
-                            break;
-                        }
-                    }
-                    Adjustment::Ignore => {}
-                }
-                system.sys_frequency = loop_filter.frequency_ppm();
-            }
-
-            // Print status periodically
-            if iteration % 100 == 0 {
-                tracing::info!(
-                    "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm jitter={:.6}s",
-                    system.peer_count,
-                    system.stratum,
-                    system.sys_offset,
-                    system.sys_frequency,
-                    system.sys_jitter,
-                );
-            }
+        // 4. Periodic status log
+        if iteration % 100 == 0 {
+            tracing::info!(
+                "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm",
+                engine.system.peer_count,
+                engine.system.stratum,
+                engine.system.sys_offset,
+                engine.loop_filter.frequency_ppm(),
+            );
         }
 
-        // Sleep for 1 second (in Phase 2, this is an epoll/kqueue wait)
+        // 5. Sleep — in production this would be epoll/kqueue
+        // For now, 1s polling is sufficient for single-peer setups
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 
+    // ──── Shutdown ───────────────────────────────────────────────────
+    let shutdown_actions = engine.handle(DaemonEvent::Shutdown);
+    execute_actions(&shutdown_actions, &mut clock, &mut network, &mut store);
     tracing::info!("ntpd-rs shutting down");
 }
 
-/// Build an NTP client request packet.
-fn build_request(peer: &Peer, system: &SystemState, now: NtpTs64, precision: i8) -> NtpPacket {
-    let mut pkt = NtpPacket::zeroed();
-    pkt.li_vn_mode = NtpPacket::set_li_vn_mode(
-        system.leap,
-        peer.version,
-        if peer.hmode == NtpMode::SymActive {
-            NtpMode::SymActive
-        } else {
-            NtpMode::Client
-        },
+/// Execute DaemonActions against generic I/O adapters.
+/// Works for both real (RealSystemClock, FileStateStore) and lab
+/// (SimulatedClock, MemoryStateStore) modes.
+fn execute_actions<C: SystemClock, N: NetworkIo, S: StateStore>(
+    actions: &[DaemonAction],
+    clock: &mut C,
+    network: &mut N,
+    store: &mut S,
+) {
+    for action in actions {
+        match action {
+            DaemonAction::Send { destination, bytes } => {
+                // Send via network adapter
+                if let Err(e) = network.send(bytes, destination) {
+                    tracing::warn!("Send failed: {e}");
+                }
+            }
+            DaemonAction::AdjustClock(adj) => match adj {
+                Adjustment::Step(offset) => {
+                    if let Err(e) = clock.step(*offset) {
+                        tracing::error!("Step failed: {e}");
+                    } else {
+                        tracing::info!("Stepped clock by {:.6}s", offset);
+                    }
+                }
+                Adjustment::Slew(offset, freq) => {
+                    if let Err(e) = clock.slew(*offset, *freq) {
+                        tracing::error!("Slew failed: {e}");
+                    } else {
+                        tracing::trace!("Slewed clock by {:.6}s at {:.3}ppm", offset, freq);
+                    }
+                }
+                Adjustment::Panic(offset) => {
+                    tracing::error!("Panic: offset {:.6}s exceeds threshold!", offset);
+                    std::process::exit(1);
+                }
+                Adjustment::Ignore => {}
+            },
+            DaemonAction::PersistDrift(freq) => {
+                if let Err(e) = store.save_drift(*freq) {
+                    tracing::error!("Failed to save drift: {e}");
+                } else {
+                    tracing::debug!("Saved drift: {:.3} ppm", freq);
+                }
+            }
+            DaemonAction::Log(msg) => {
+                tracing::info!("{}", msg);
+            }
+            DaemonAction::AppendStatistic { stream, line } => {
+                if let Err(e) = store.append_stats(stream, line) {
+                    tracing::warn!("Failed to write to {stream}: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Run in query-only mode (-q): poll peers once, set clock, exit.
+fn run_query_mode(
+    engine: &mut DaemonEngine,
+    clock: &mut ntpsec_rs_io::RealSystemClock,
+    network: &mut ntpsec_rs_io::RealNetworkIo,
+    store: &mut ntpsec_rs_io::FileStateStore,
+) {
+    // In query mode, we run a few iterations to collect data
+    // then apply the best offset and exit.
+    let max_iterations = 10;
+    for _i in 0..max_iterations {
+        let now = clock.now();
+
+        // Drain timers — triggers polls
+        let timer_actions = engine.tick(now);
+        execute_actions(&timer_actions, clock, network, store);
+
+        // Try to receive responses
+        match network.recv() {
+            Ok(dgram) => {
+                let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+                execute_actions(&actions, clock, network, store);
+            }
+            Err(IoError::RecvFailed(_)) => {}
+            Err(e) => {
+                tracing::debug!("Recv error: {e}");
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // After collection, step the clock if we have a valid offset
+    if engine.system.peer_count > 0 && engine.system.sys_offset.is_finite() {
+        tracing::info!("Setting clock: offset={:.6}s", engine.system.sys_offset);
+        if let Err(e) = clock.step(engine.system.sys_offset) {
+            tracing::error!("Failed to step clock: {e}");
+        }
+    } else {
+        tracing::warn!("No synchronization source available");
+    }
+}
+
+/// Run in lab mode with deterministic simulation.
+fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
+    tracing::info!("Starting lab daemon (deterministic replay mode)");
+
+    let mut engine = DaemonEngine::new(config);
+    if cli.panicgate {
+        engine.loop_filter.panic_threshold = f64::MAX;
+    }
+
+    // Load trace file if specified
+    let mut trace = if let Some(trace_path) = cli.trace.as_ref() {
+        match std::fs::read_to_string(trace_path) {
+            Ok(content) => match PacketTrace::from_json(&content) {
+                Ok(t) => {
+                    tracing::info!(
+                        "Loaded trace with {} entries from {}",
+                        t.len(),
+                        trace_path.display()
+                    );
+                    t
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse trace '{}': {}, starting empty",
+                        trace_path.display(),
+                        e
+                    );
+                    PacketTrace::new()
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "Cannot read trace '{}': {}, starting empty",
+                    trace_path.display(),
+                    e
+                );
+                PacketTrace::new()
+            }
+        }
+    } else {
+        PacketTrace::new()
+    };
+
+    // Replay datagrams from the trace into the network
+    let replay_dgrams: Vec<ReceivedDatagram> = trace
+        .iter()
+        .filter(|e| e.direction == TraceDirection::Received)
+        .map(|e| ReceivedDatagram {
+            bytes: e.bytes.clone(),
+            source: e.source,
+            destination: e.destination,
+            rx_timestamp: e.timestamp,
+            interface_index: None,
+            timestamp_source: TimestampSource::UserspaceFallback,
+        })
+        .collect();
+
+    let replay_count = replay_dgrams.len();
+    let mut clock = SimulatedClock::unix_epoch();
+    let mut store = MemoryStateStore::new();
+    let mut network = ReplayNetwork::new(replay_dgrams);
+
+    tracing::info!(
+        "Lab daemon initialized with {} peers, {} timers, {} replay datagrams",
+        engine.peers.len(),
+        engine.timers.len(),
+        replay_count,
     );
-    pkt.stratum = system.stratum;
-    pkt.poll = peer.hpoll;
-    pkt.precision = precision;
-    // The transmit timestamp is the only one we set; the rest are zero
-    // (which tells the server this is a request, not a response).
-    pkt.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(now);
-    pkt
+
+    // Load simulated drift (none initially)
+    if let Ok(freq) = store.load_drift() {
+        engine.loop_filter.frequency = freq;
+    }
+
+    // Lab mode runs for a fixed number of iterations
+    for iter in 0..10 {
+        let now = clock.now();
+
+        // Process timers via generic executor
+        let timer_actions = engine.tick(now);
+        execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
+
+        // Replay buffered received datagrams
+        loop {
+            match network.recv() {
+                Ok(dgram) => {
+                    let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+                    execute_actions(&actions, &mut clock, &mut network, &mut store);
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Log stats
+        if iter % 3 == 0 {
+            tracing::info!(
+                "[lab status] peers={} stratum={} offset={:.6}s freq={:.3}ppm sent={}",
+                engine.system.peer_count,
+                engine.system.stratum,
+                engine.system.sys_offset,
+                engine.loop_filter.frequency_ppm(),
+                network.sent_packets.len(),
+            );
+        }
+
+        // Advance simulated time
+        clock.advance(4.0);
+    }
+
+    // Record outbound trace if requested
+    if let Some(record_path) = cli.record_trace.as_ref() {
+        // Append sent packets to the trace
+        for (dest, bytes) in &network.sent_packets {
+            trace.push(TraceEntry {
+                timestamp: clock.now(),
+                direction: TraceDirection::Sent,
+                source: NetAddr::ipv4(0x7f000001, 123),
+                destination: *dest,
+                bytes: bytes.clone(),
+            });
+        }
+        if std::fs::write(record_path, trace.to_json()).is_ok() {
+            tracing::info!(
+                "Recorded trace with {} entries to {}",
+                trace.len(),
+                record_path.display()
+            );
+        }
+    }
+
+    // Final state
+    tracing::info!(
+        "Lab daemon final state: {} peers, stratum={}, offset={:.6}s, freq={:.3}ppm, sent={} packets",
+        engine.peers.len(),
+        engine.system.stratum,
+        engine.system.sys_offset,
+        engine.loop_filter.frequency_ppm(),
+        network.sent_packets.len(),
+    );
 }
 
 /// Initialize signal handlers for graceful shutdown.
 fn signal_hook_init(running: Arc<AtomicBool>) {
-    let r = running.clone();
-    std::thread::spawn(move || {
-        // Simple signal handling: listen for Ctrl+C
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            // In production, use signal_hook crate
-            // For now, handle via SIGINT handler below
-        }
-    });
+    // Simple signal handling placeholder
+    // In production, use signal_hook crate
+    let _ = running;
+}
 
-    // Set up SIGINT handler
-    let r2 = running.clone();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        // Read stdin for signals (works with Docker)
-        let mut stdin = std::io::stdin();
-        let mut buf = [0u8; 1];
-        while r2.load(Ordering::Relaxed) {
-            if stdin.read(&mut buf).is_ok() {
-                // We don't actually process stdin here — this is just a placeholder
-            }
-        }
-    });
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_default_config() {
+        // Verify that default config path is /etc/ntp.conf
+        let cli = Cli::parse_from(["ntpd-rs"]);
+        assert_eq!(cli.config, PathBuf::from("/etc/ntp.conf"));
+    }
+
+    #[test]
+    fn test_cli_custom_config() {
+        let cli = Cli::parse_from(["ntpd-rs", "-c", "/tmp/test.conf"]);
+        assert_eq!(cli.config, PathBuf::from("/tmp/test.conf"));
+    }
+
+    #[test]
+    fn test_cli_flags() {
+        let cli = Cli::parse_from(["ntpd-rs", "-n", "-g", "-x", "-q", "--lab-daemon"]);
+        assert!(cli.nofork);
+        assert!(cli.panicgate);
+        assert!(cli.slew);
+        assert!(cli.query);
+        assert!(cli.lab_daemon);
+    }
+
+    #[test]
+    fn test_cli_driftfile() {
+        let cli = Cli::parse_from(["ntpd-rs", "-f", "/tmp/drift"]);
+        assert_eq!(cli.driftfile, Some(PathBuf::from("/tmp/drift")));
+    }
+
+    #[test]
+    fn test_execute_actions_no_panic() {
+        // Just verify execute_actions doesn't crash with any action variant
+        let mut clock = ntpsec_rs_io::RealSystemClock::new();
+        let mut network = ntpsec_rs_io::RealNetworkIo::new();
+        let mut store = ntpsec_rs_io::FileStateStore::new(&std::path::Path::new("/tmp"));
+
+        let actions = vec![
+            DaemonAction::Log("test log".to_string()),
+            DaemonAction::AdjustClock(Adjustment::Ignore),
+            DaemonAction::Send {
+                destination: NetAddr::ipv4(0x7f000001, 123),
+                bytes: vec![0u8; 48],
+            },
+            DaemonAction::PersistDrift(0.0),
+            DaemonAction::AppendStatistic {
+                stream: "loopstats".to_string(),
+                line: "test".to_string(),
+            },
+        ];
+        execute_actions(&actions, &mut clock, &mut network, &mut store);
+    }
 }

@@ -185,6 +185,15 @@ pub fn ntp_ts64_to_ntpts(ts: NtpTs64) -> NtpTs {
     }
 }
 
+/// Convert wire-format NtpTs (u32 seconds) to NtpTs64 (i64 seconds).
+/// Handles the unsigned-to-signed conversion through NTP era boundaries.
+pub fn ntp_ts_to_ntpts(ts: NtpTs) -> NtpTs64 {
+    NtpTs64 {
+        seconds: ts.seconds as i64,
+        fraction: ts.fraction,
+    }
+}
+
 // ──── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

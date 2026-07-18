@@ -305,16 +305,6 @@ impl Adjustment {
     }
 }
 
-/// System clock interface trait — implemented by ntpsec-rs-io for real
-/// clock access and by the replay harness for deterministic testing.
-pub trait SystemClock {
-    fn now(&self) -> NtpTs64;
-    fn step(&mut self, offset: f64) -> Result<(), String>;
-    fn slew(&mut self, offset: f64, freq_ppm: f64) -> Result<(), String>;
-    fn read_frequency(&self) -> f64;
-    fn set_frequency(&mut self, freq_ppm: f64) -> Result<(), String>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

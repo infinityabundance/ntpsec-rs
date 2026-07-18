@@ -28,6 +28,7 @@
 // The facade crate re-exports the public API.  Here we just define it.
 
 pub mod binio;
+pub mod daemon_engine;
 pub mod gpstolfp;
 pub mod ieee754io;
 pub mod ntp_assert;
@@ -91,6 +92,7 @@ pub mod ntpdig_proto;
 pub use binio::*;
 pub use control_client::*;
 pub use control_client::*;
+pub use daemon_engine::*;
 pub use gpstolfp::*;
 pub use ieee754io::*;
 pub use leap_query::*;

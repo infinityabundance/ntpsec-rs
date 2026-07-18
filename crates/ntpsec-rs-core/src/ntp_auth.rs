@@ -98,20 +98,18 @@ impl NtpAuthKey {
 
         match self.digest {
             DigestType::Md5 => {
-                // Keyed MD5: MD5(key || packet || key) as ntpsec does
+                // Keyed MD5 as ntpsec's digest_encrypt: MD5(key || packet)
                 let mut ctx = md5::Md5::default();
                 Digest::update(&mut ctx, &self.key_data);
                 Digest::update(&mut ctx, pkt);
-                Digest::update(&mut ctx, &self.key_data);
                 let hash = ctx.finalize_fixed();
                 Some(hash[..digest_len].to_vec())
             }
             DigestType::Sha1 => {
-                // Keyed SHA1: SHA1(key || packet || key) as ntpsec does
+                // Keyed SHA1 as ntpsec's digest_encrypt: SHA1(key || packet)
                 let mut ctx = sha1::Sha1::default();
                 Digest::update(&mut ctx, &self.key_data);
                 Digest::update(&mut ctx, pkt);
-                Digest::update(&mut ctx, &self.key_data);
                 let hash = ctx.finalize_fixed();
                 Some(hash[..digest_len].to_vec())
             }

@@ -86,8 +86,6 @@ compile_error!("ntpsec-rs-core requires a Unix-like OS");
 
 /// Maximum NTP packet size (RFC 5905).
 pub const NTP_MAX_PACKET_SIZE: usize = 512;
-/// Standard NTP packet header size (no extensions).
-pub const NTP_HEADER_SIZE: usize = 48;
 
 /// NTP leap indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,39 +190,43 @@ pub enum NtpAssociationState {
     Bcast = 4,
 }
 
+// ──── Kiss Codes ────────────────────────────────────────────────────────────
+
+/// Kiss codes sent as stratum 0 in server responses.
+pub mod kiss_codes {
+    /// Deny — server denies client access.
+    pub const DENY: u32 = u32::from_be_bytes(*b"DENY");
+    /// Rate — server is rate-limiting the client.
+    pub const RATE: u32 = u32::from_be_bytes(*b"RATE");
+    /// Restart — server suggests client restart.
+    pub const RSTR: u32 = u32::from_be_bytes(*b"RSTR");
+    /// Step — server stepped, client should re-sync.
+    pub const STEP: u32 = u32::from_be_bytes(*b"STEP");
+}
+
 // ──── NTP Packet Header ─────────────────────────────────────────────────────
 
-/// The on-wire NTP packet header (RFC 5905 §6).
-/// This is the 48-byte request/response header.
+/// NTP packet header (RFC 5905 §6), 48 bytes big-endian.
+/// Use encode_header()/decode_header() for safe wire serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C, packed)]
 pub struct NtpPacket {
-    /// Leap Version Mode (LVM): 2-bit LI, 3-bit VN, 3-bit Mode
     pub li_vn_mode: u8,
-    /// Stratum: 0 (kiss), 1 (primary), 2–15 (secondary), 16 (unspec)
     pub stratum: u8,
-    /// Maximum interval between successive messages in log2 seconds
     pub poll: u8,
-    /// Clock precision in log2 seconds
     pub precision: i8,
-    /// Root delay (short format)
     pub root_delay: u32,
-    /// Root dispersion (short format)
     pub root_dispersion: u32,
-    /// Reference clock identifier
     pub reference_id: u32,
-    /// Reference timestamp
     pub reference_ts: NtpTs,
-    /// Originate timestamp (T1 — client transmit)
     pub originate_ts: NtpTs,
-    /// Receive timestamp (T2 — server receive)
     pub receive_ts: NtpTs,
-    /// Transmit timestamp (T3 — server transmit)
     pub transmit_ts: NtpTs,
 }
 
+/// NTP packet header size in bytes (RFC 5905).
+pub const NTP_HEADER_SIZE: usize = 48;
+
 impl NtpPacket {
-    /// Create a zeroed-out NTP packet.
     pub fn zeroed() -> Self {
         Self {
             li_vn_mode: 0,
@@ -253,61 +255,75 @@ impl NtpPacket {
         }
     }
 
-    /// Decode LI from LI_VN_MODE byte.
+    /// Encode the 48-byte NTP header in big-endian wire format.
+    pub fn encode_header(&self) -> [u8; 48] {
+        let mut b = [0u8; 48];
+        b[0] = self.li_vn_mode;
+        b[1] = self.stratum;
+        b[2] = self.poll;
+        b[3] = self.precision as u8;
+        b[4..8].copy_from_slice(&self.root_delay.to_be_bytes());
+        b[8..12].copy_from_slice(&self.root_dispersion.to_be_bytes());
+        b[12..16].copy_from_slice(&self.reference_id.to_be_bytes());
+        b[16..20].copy_from_slice(&self.reference_ts.seconds.to_be_bytes());
+        b[20..24].copy_from_slice(&self.reference_ts.fraction.to_be_bytes());
+        b[24..28].copy_from_slice(&self.originate_ts.seconds.to_be_bytes());
+        b[28..32].copy_from_slice(&self.originate_ts.fraction.to_be_bytes());
+        b[32..36].copy_from_slice(&self.receive_ts.seconds.to_be_bytes());
+        b[36..40].copy_from_slice(&self.receive_ts.fraction.to_be_bytes());
+        b[40..44].copy_from_slice(&self.transmit_ts.seconds.to_be_bytes());
+        b[44..48].copy_from_slice(&self.transmit_ts.fraction.to_be_bytes());
+        b
+    }
+
+    /// Decode a 48-byte NTP header from big-endian wire format.
+    pub fn decode_header(bytes: &[u8]) -> Result<Self, &'static str> {
+        if bytes.len() < 48 {
+            return Err("NTP header too short");
+        }
+        Ok(Self {
+            li_vn_mode: bytes[0],
+            stratum: bytes[1],
+            poll: bytes[2],
+            precision: bytes[3] as i8,
+            root_delay: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            root_dispersion: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            reference_id: u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            reference_ts: NtpTs {
+                seconds: u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+                fraction: u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+            },
+            originate_ts: NtpTs {
+                seconds: u32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+                fraction: u32::from_be_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]),
+            },
+            receive_ts: NtpTs {
+                seconds: u32::from_be_bytes([bytes[32], bytes[33], bytes[34], bytes[35]]),
+                fraction: u32::from_be_bytes([bytes[36], bytes[37], bytes[38], bytes[39]]),
+            },
+            transmit_ts: NtpTs {
+                seconds: u32::from_be_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]),
+                fraction: u32::from_be_bytes([bytes[44], bytes[45], bytes[46], bytes[47]]),
+            },
+        })
+    }
+
     pub fn leap_indicator(&self) -> LeapIndicator {
         LeapIndicator::from_bits(self.li_vn_mode >> 6)
     }
 
-    /// Decode VN from LI_VN_MODE byte.
     pub fn version(&self) -> NtpVersion {
         NtpVersion::from_bits(self.li_vn_mode >> 3)
     }
 
-    /// Decode Mode from LI_VN_MODE byte.
     pub fn mode(&self) -> NtpMode {
         NtpMode::from_bits(self.li_vn_mode)
     }
 
-    /// Encode LI + VN + Mode into a single byte.
     pub fn set_li_vn_mode(li: LeapIndicator, vn: NtpVersion, mode: NtpMode) -> u8 {
         (li.to_bits() << 6) | (vn.to_bits() << 3) | mode.to_bits()
     }
 }
-
-// ──── Kiss Codes ────────────────────────────────────────────────────────────
-
-/// Kiss codes sent as stratum 0 in server responses.
-pub mod kiss_codes {
-    /// Deny — server denies client access.
-    pub const DENY: u32 = u32::from_be_bytes(*b"DENY");
-    /// Rate — server is rate-limiting the client.
-    pub const RATE: u32 = u32::from_be_bytes(*b"RATE");
-    /// Restart — server suggests client restart.
-    pub const RSTR: u32 = u32::from_be_bytes(*b"RSTR");
-    /// Step — server stepped, client should re-sync.
-    pub const STEP: u32 = u32::from_be_bytes(*b"STEP");
-}
-
-// ──── Stratum constants ─────────────────────────────────────────────────────
-
-/// Kiss-o'-Death / unspecified.
-pub const STRATUM_UNSPEC: u8 = 0;
-/// Primary reference (e.g., GPS, atomic clock).
-pub const STRATUM_PRIMARY: u8 = 1;
-/// Secondary reference (NTP server).
-pub const STRATUM_SECONDARY_MIN: u8 = 2;
-pub const STRATUM_SECONDARY_MAX: u8 = 15;
-/// Maximum valid stratum.
-pub const STRATUM_MAX: u8 = 15;
-/// Unsynchronized / invalid.
-pub const STRATUM_UNSYNC: u8 = 16;
-
-// ──── NTP port ──────────────────────────────────────────────────────────────
-
-pub const NTP_PORT: u16 = 123;
-
-// ──── Tests ─────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;

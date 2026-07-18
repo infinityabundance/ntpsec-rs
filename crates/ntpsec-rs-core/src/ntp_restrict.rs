@@ -9,6 +9,7 @@
 //   - ntpsec include/ntp.h (restrict flags)
 // =============================================================================
 
+use crate::ntp_io::NetAddr;
 use crate::ntp_types::*;
 
 bitflags::bitflags! {
@@ -92,7 +93,7 @@ impl RestrictList {
         self.default_v6_flags = flags;
     }
 
-    /// Evaluate restrictions for a given source address.
+    /// Evaluate restrictions for a given source address (SockAddr).
     pub fn evaluate(&self, addr: &SockAddr) -> RestrictFlags {
         let mut flags = RestrictFlags::empty();
         for entry in &self.entries {
@@ -100,11 +101,36 @@ impl RestrictList {
                 flags |= entry.flags;
             }
         }
-        // If no default entry matched, use default
+        // If no default entry matched, use family-appropriate default
         if flags.is_empty() {
-            flags = self.default_v4_flags;
+            flags = match addr.ss_family as libc::c_int {
+                libc::AF_INET6 => self.default_v6_flags,
+                _ => self.default_v4_flags,
+            };
         }
         flags
+    }
+
+    /// Evaluate restrictions for a NetAddr (from daemon_engine).
+    /// Returns the action to take and the matching flags.
+    /// NOQUERY is applied contextually based on packet mode:
+    ///   - Mode 6 (NtpControl) and Mode 7 (Private) → Discard
+    ///   - All other modes (Client, Server, SymActive, etc.) → Accept
+    pub fn check(&self, addr: &NetAddr, mode: NtpMode) -> (RestrictAction, RestrictFlags) {
+        let flags = self.evaluate(&netaddr_to_sockaddr(addr));
+
+        if flags.contains(RestrictFlags::IGNORE) {
+            return (RestrictAction::Ignore, flags);
+        }
+        if flags.contains(RestrictFlags::NOQUERY)
+            && matches!(mode, NtpMode::NtpControl | NtpMode::Private)
+        {
+            return (RestrictAction::Discard, flags);
+        }
+        if flags.contains(RestrictFlags::KOD) {
+            return (RestrictAction::SendKod, flags);
+        }
+        (RestrictAction::Accept, flags)
     }
 
     /// Does an address match a restrict entry with the given mask?
@@ -136,5 +162,144 @@ impl RestrictList {
                 _ => false,
             }
         }
+    }
+}
+
+/// Actions the restrict system can take on a packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestrictAction {
+    /// Accept the packet for normal processing.
+    Accept,
+    /// Silently discard the packet.
+    Discard,
+    /// Discard with Kiss-o'-Death response.
+    SendKod,
+    /// Ignore completely (no response, no log).
+    Ignore,
+}
+
+/// Convert a NetAddr to a libc sockaddr_storage for restrict evaluation.
+pub fn netaddr_to_sockaddr(addr: &NetAddr) -> SockAddr {
+    let mut ss: SockAddr = unsafe { std::mem::zeroed() };
+    match addr.family {
+        4 => {
+            let sin = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in) };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = addr.port.to_be();
+            let octets = [addr.addr[0], addr.addr[1], addr.addr[2], addr.addr[3]];
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from_ne_bytes(octets),
+            };
+        }
+        6 => {
+            let sin6 = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in6) };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = addr.port.to_be();
+            sin6.sin6_addr = libc::in6_addr { s6_addr: addr.addr };
+        }
+        _ => {}
+    }
+    ss
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ntp_io::NetAddr;
+
+    #[test]
+    fn test_restrict_default_v6_ignored_ipv6_accepted() {
+        // Set default-v6 to IGNORE, default-v4 to empty (accept)
+        let mut list = RestrictList::new();
+        list.set_default_v6(RestrictFlags::IGNORE);
+        list.set_default_v4(RestrictFlags::empty());
+
+        // IPv6 address should be IGNORE'd
+        let ipv6 = NetAddr::ipv6(
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            123,
+        );
+        let (action, _) = list.check(&ipv6, NtpMode::Client);
+        assert_eq!(
+            action,
+            RestrictAction::Ignore,
+            "IPv6 should be ignored with default-v6"
+        );
+
+        // IPv4 should be ACCEPT'd (default-v4 is empty)
+        let ipv4 = NetAddr::ipv4(0x7f000001, 123);
+        let (action, _) = list.check(&ipv4, NtpMode::Client);
+        assert_eq!(
+            action,
+            RestrictAction::Accept,
+            "IPv4 should be accepted with default-v4 empty"
+        );
+    }
+
+    #[test]
+    fn test_restrict_default_v4_ignored_ipv4_rejected() {
+        let mut list = RestrictList::new();
+        list.set_default_v4(RestrictFlags::IGNORE);
+        list.set_default_v6(RestrictFlags::empty());
+
+        // IPv4 should be IGNORE'd
+        let ipv4 = NetAddr::ipv4(0x7f000001, 123);
+        let (action, _) = list.check(&ipv4, NtpMode::Client);
+        assert_eq!(
+            action,
+            RestrictAction::Ignore,
+            "IPv4 should be ignored with default-v4"
+        );
+
+        // IPv6 should be ACCEPT'd
+        let ipv6 = NetAddr::ipv6(
+            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            123,
+        );
+        let (action, _) = list.check(&ipv6, NtpMode::Client);
+        assert_eq!(
+            action,
+            RestrictAction::Accept,
+            "IPv6 should be accepted with default-v6 empty"
+        );
+    }
+
+    #[test]
+    fn test_restrict_noquery_context() {
+        let mut list = RestrictList::new();
+        list.set_default_v4(RestrictFlags::NOQUERY);
+        let addr = NetAddr::ipv4(0x7f000001, 123);
+
+        // Mode 3 (Client) — normal time service, should be ACCEPTed
+        let (action, _) = list.check(&addr, NtpMode::Client);
+        assert_eq!(
+            action,
+            RestrictAction::Accept,
+            "mode 3 Client with NOQUERY should be accepted"
+        );
+
+        // Mode 4 (Server) — normal time service, should be ACCEPTed
+        let (action, _) = list.check(&addr, NtpMode::Server);
+        assert_eq!(
+            action,
+            RestrictAction::Accept,
+            "mode 4 Server with NOQUERY should be accepted"
+        );
+
+        // Mode 6 (NtpControl) — control query, should be DISCARDed
+        let (action, _) = list.check(&addr, NtpMode::NtpControl);
+        assert_eq!(
+            action,
+            RestrictAction::Discard,
+            "mode 6 NtpControl with NOQUERY should be discarded"
+        );
+
+        // Mode 7 (Private) — private query, should be DISCARDed
+        let (action, _) = list.check(&addr, NtpMode::Private);
+        assert_eq!(
+            action,
+            RestrictAction::Discard,
+            "mode 7 Private with NOQUERY should be discarded"
+        );
     }
 }

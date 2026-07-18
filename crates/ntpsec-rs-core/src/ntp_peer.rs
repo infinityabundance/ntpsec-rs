@@ -9,8 +9,8 @@
 //   - ntpsec include/ntp.h (peer struct)
 // =============================================================================
 
-use crate::ntp_types::*;
 use crate::ntp_proto::{ClockFilter, Reachability};
+use crate::ntp_types::*;
 
 /// A peer association (matches ntpsec's `struct peer`).
 #[derive(Debug, Clone)]
@@ -18,8 +18,8 @@ pub struct Peer {
     pub srcaddr: SockAddr,
     pub dstadr: Option<SockAddr>,
 
-    pub hmode: NtpMode,           // host mode
-    pub pmode: NtpMode,           // peer mode
+    pub hmode: NtpMode, // host mode
+    pub pmode: NtpMode, // peer mode
     pub version: NtpVersion,
     pub stratum: u8,
     pub poll_interval: u8,
@@ -34,9 +34,9 @@ pub struct Peer {
     pub dispersion: f64,
     pub jitter: f64,
 
-    pub hpoll: u8,       // current poll exponent
-    pub ppoll: u8,       // peer's poll exponent
-    pub flash: u32,      // flash bits
+    pub hpoll: u8,  // current poll exponent
+    pub ppoll: u8,  // peer's poll exponent
+    pub flash: u32, // flash bits
     pub leap: LeapIndicator,
     pub precision: i8,
     pub root_delay: f64,
@@ -68,7 +68,13 @@ bitflags::bitflags! {
 }
 
 impl Peer {
-    pub fn new(srcaddr: SockAddr, hmode: NtpMode, version: NtpVersion, minpoll: u8, maxpoll: u8) -> Self {
+    pub fn new(
+        srcaddr: SockAddr,
+        hmode: NtpMode,
+        version: NtpVersion,
+        minpoll: u8,
+        maxpoll: u8,
+    ) -> Self {
         Self {
             srcaddr,
             dstadr: None,
@@ -93,10 +99,22 @@ impl Peer {
             root_delay: 0.0,
             root_dispersion: 0.0,
             reference_id: 0,
-            reference_time: NtpTs64 { seconds: 0, fraction: 0 },
-            originate_time: NtpTs64 { seconds: 0, fraction: 0 },
-            receive_time: NtpTs64 { seconds: 0, fraction: 0 },
-            transmit_time: NtpTs64 { seconds: 0, fraction: 0 },
+            reference_time: NtpTs64 {
+                seconds: 0,
+                fraction: 0,
+            },
+            originate_time: NtpTs64 {
+                seconds: 0,
+                fraction: 0,
+            },
+            receive_time: NtpTs64 {
+                seconds: 0,
+                fraction: 0,
+            },
+            transmit_time: NtpTs64 {
+                seconds: 0,
+                fraction: 0,
+            },
             keyid: 0,
             flags: PeerFlags::NONE,
         }
@@ -154,12 +172,15 @@ impl PeerTable {
         self.peers.iter()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Peer> {
+        self.peers.iter_mut()
+    }
+
     /// Find a peer by source address.
     pub fn find_by_addr(&self, addr: &SockAddr) -> Option<&Peer> {
-        self.peers.iter().find(|p| {
-            unsafe {
-                p.srcaddr.ss_family == addr.ss_family &&
-                match addr.ss_family as libc::c_int {
+        self.peers.iter().find(|p| unsafe {
+            p.srcaddr.ss_family == addr.ss_family
+                && match addr.ss_family as libc::c_int {
                     libc::AF_INET => {
                         let a = &*(&p.srcaddr as *const _ as *const libc::sockaddr_in);
                         let b = &*(addr as *const _ as *const libc::sockaddr_in);
@@ -172,7 +193,6 @@ impl PeerTable {
                     }
                     _ => false,
                 }
-            }
         })
     }
 }

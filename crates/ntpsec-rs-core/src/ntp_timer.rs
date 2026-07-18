@@ -3,18 +3,8 @@
 //
 // NTP timer event system — manages poll timers, reachability updates,
 // housekeeping, and periodic statistics output.
-//
-// ## Event types (matching ntpsec)
-//
-//   Poll:           Send NTP request to a peer
-//   Reachability:   Update reachability registers (every poll cycle)
-//   Housekeeping:   Clock selection, combining, loop filter update
-//   LeapFileReload: Periodically reload leap second file
-//   StatsWrite:     Write statistics to filegen files
-//
 // =============================================================================
 
-use crate::ntp_proto::*;
 use crate::ntp_types::*;
 
 /// Timer event types — matching ntpsec's timer event system.
@@ -36,8 +26,10 @@ pub enum TimerEvent {
 #[derive(Debug, Clone)]
 pub struct TimerEntry {
     pub event: TimerEvent,
-    pub due: i64,      // Absolute NTP seconds when this fires
-    pub interval: u32, // Repeating interval in seconds
+    /// Absolute NTP seconds when this fires.
+    pub due: i64,
+    /// Repeating interval in seconds. 0 = one-shot.
+    pub interval: u32,
 }
 
 impl TimerEntry {
@@ -49,9 +41,15 @@ impl TimerEntry {
         }
     }
 
-    /// Reschedule for the next interval.
-    pub fn reschedule(&mut self) {
-        self.due += self.interval as i64;
+    /// Advance this entry to the next due time strictly after `now`.
+    /// Returns the number of missed intervals (0 if none).
+    pub fn advance_past(&mut self, now: i64) -> u64 {
+        if self.interval == 0 || self.due > now {
+            return 0;
+        }
+        let missed = ((now - self.due) / self.interval as i64 + 1) as u64;
+        self.due += missed as i64 * self.interval as i64;
+        missed
     }
 }
 
@@ -77,7 +75,7 @@ impl TimerQueue {
         self.entries.retain(|e| !predicate(&e.event));
     }
 
-    /// Schedule a poll for a peer.
+    /// Schedule a poll for a peer (repeating).
     pub fn schedule_poll(&mut self, peer_id: usize, now: i64, interval: u32) {
         self.add(TimerEntry::new(
             TimerEvent::Poll(peer_id),
@@ -86,36 +84,32 @@ impl TimerQueue {
         ));
     }
 
-    /// Schedule the periodic housekeeping timer.
-    pub fn schedule_housekeeping(&mut self, now: i64) {
-        self.add(TimerEntry::new(TimerEvent::Housekeeping, now + 64, 64));
+    /// Schedule a single one-shot poll for a peer (interval=0, dropped after firing).
+    pub fn schedule_poll_once(&mut self, peer_id: usize, due: i64) {
+        self.add(TimerEntry::new(TimerEvent::Poll(peer_id), due, 0));
     }
 
-    /// Schedule reachability update.
-    pub fn schedule_reachability(&mut self, now: i64) {
-        self.add(TimerEntry::new(TimerEvent::Reachability, now + 64, 64));
-    }
-
-    /// Get all events due at a given NTP time, sorted by due time.
-    pub fn due_events(&mut self, now: NtpTs64) -> Vec<TimerEvent> {
+    /// Pop all due events, advancing repeating entries past `now`.
+    /// Returns the events that fired.
+    pub fn pop_due(&mut self, now: NtpTs64) -> Vec<TimerEvent> {
         let now_secs = now.seconds;
-        let mut due = Vec::new();
+        let mut fired = Vec::new();
+        let mut keep = Vec::new();
 
-        self.entries.retain(|entry| {
+        for mut entry in self.entries.drain(..) {
             if entry.due <= now_secs {
-                due.push(entry.event);
-                // Re-add repeating events by rescheduling
-                // For repeating events: keep the entry, update its due time
-                // We'll handle this by re-adding below
-                false // Remove, then re-add if repeating
+                fired.push(entry.event);
+                if entry.interval > 0 {
+                    entry.advance_past(now_secs);
+                    keep.push(entry);
+                }
+                // one-shot entries (interval==0) are dropped
             } else {
-                true
+                keep.push(entry);
             }
-        });
-
-        // Re-add repeating events with updated intervals
-        // (In the full implementation, we track intervals separately)
-        due.clone()
+        }
+        self.entries = keep;
+        fired
     }
 
     /// Get the number of entries.
@@ -126,18 +120,9 @@ impl TimerQueue {
         self.entries.is_empty()
     }
 
-    /// Get the time until the next event (in seconds).
-    pub fn next_event_in(&self, now: NtpTs64) -> u32 {
-        self.entries
-            .iter()
-            .map(|e| (e.due - now.seconds).max(1) as u32)
-            .min()
-            .unwrap_or(3600) // default: 1 hour
-    }
-
-    /// Clear all timers.
-    pub fn clear(&mut self) {
-        self.entries.clear();
+    /// Iterate over all entries.
+    pub fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
+        self.entries.iter()
     }
 }
 
@@ -153,38 +138,42 @@ mod tests {
     }
 
     #[test]
-    fn test_timer_reschedule() {
+    fn test_timer_advance_past() {
         let mut entry = TimerEntry::new(TimerEvent::Poll(0), 1000, 64);
-        entry.reschedule();
-        assert_eq!(entry.due, 1064);
+        let missed = entry.advance_past(1100);
+        assert!(missed >= 1);
+        assert!(entry.due > 1100);
     }
 
     #[test]
-    fn test_timer_queue_due() {
+    fn test_timer_queue_pop_due() {
         let mut queue = TimerQueue::new();
         queue.add(TimerEntry::new(TimerEvent::Poll(0), 100, 64));
-        queue.add(TimerEntry::new(TimerEvent::Housekeeping, 200, 64));
+        queue.add(TimerEntry::new(TimerEvent::Housekeeping, 200, 128));
 
         let now = NtpTs64 {
             seconds: 150,
             fraction: 0,
         };
-        let due = queue.due_events(now);
-        assert_eq!(due.len(), 1); // Only the poll at time 100 should fire
-        assert!(matches!(due[0], TimerEvent::Poll(0)));
+        let fired = queue.pop_due(now);
+        assert_eq!(fired.len(), 1);
+        assert!(matches!(fired[0], TimerEvent::Poll(0)));
+
+        // Entry should have been re-added for the next interval
+        assert_eq!(queue.len(), 2);
     }
 
     #[test]
-    fn test_timer_queue_no_due() {
+    fn test_timer_one_shot_dropped() {
         let mut queue = TimerQueue::new();
-        queue.add(TimerEntry::new(TimerEvent::Poll(0), 200, 64));
-
+        queue.add(TimerEntry::new(TimerEvent::Poll(0), 100, 0)); // one-shot
         let now = NtpTs64 {
-            seconds: 100,
+            seconds: 200,
             fraction: 0,
         };
-        let due = queue.due_events(now);
-        assert!(due.is_empty());
+        let fired = queue.pop_due(now);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(queue.len(), 0); // should be removed
     }
 
     #[test]
@@ -192,16 +181,5 @@ mod tests {
         let mut queue = TimerQueue::new();
         queue.schedule_poll(0, 1000, 64);
         assert_eq!(queue.len(), 1);
-    }
-
-    #[test]
-    fn test_next_event_in() {
-        let mut queue = TimerQueue::new();
-        let now = NtpTs64 {
-            seconds: 100,
-            fraction: 0,
-        };
-        queue.add(TimerEntry::new(TimerEvent::Poll(0), 200, 64));
-        assert_eq!(queue.next_event_in(now), 100);
     }
 }
