@@ -107,51 +107,69 @@ impl ControlOpcode {
     }
 }
 
-/// Control message opcode values matching ntpsec (ntpd/ntp_control.c).
+/// Control message opcode values matching NTPsec (ntp_control.h) and RFC 9327 §3.1.
 pub mod opcodes {
-    /// Read system variables (ntpq -c rv). Does not require authentication.
-    pub const OP_READVAR: u8 = 2;
-    /// Read variables asynchronously.
-    pub const OP_READVAR_ASYNCH: u8 = 3;
-    /// Write one system variable.
-    pub const OP_WRITEVAR: u8 = 4;
-    /// Read clock variables.
-    pub const OP_READCLOCK: u8 = 5;
-    /// Write clock variables.
-    pub const OP_WRITECLOCK: u8 = 6;
-    /// Set trap for async messages.
-    pub const OP_SETTRAP: u8 = 7;
-    /// Async message delivery.
-    pub const OP_ASYNCMSG: u8 = 8;
-    /// Read associations (ntpq -c as). Returns binary associd/status pairs.
+    /// Read associations (ntpq -c as). Binary associd/status pairs.
     pub const OP_READSTAT: u8 = 1;
-    /// Write multiple variables.
-    pub const OP_CONFIGURE: u8 = 10;
-    /// Read variables (authenticated).
-    pub const OP_READ_ORDLIST_A: u8 = 12;
+    /// Read system/peer variables (ntpq -c rv, -c pe, -c rl).
+    pub const OP_READVAR: u8 = 2;
+    /// Write one variable.
+    pub const OP_WRITEVAR: u8 = 3;
+    /// Read clock variables.
+    pub const OP_READCLOCK: u8 = 4;
+    /// Write clock variables.
+    pub const OP_WRITECLOCK: u8 = 5;
+    /// Set trap for async notifications.
+    pub const OP_SETTRAP: u8 = 6;
+    /// Async message delivery.
+    pub const OP_ASYNCMSG: u8 = 7;
+    /// Configure (write multiple variables/restrict). Requires auth.
+    pub const OP_CONFIGURE: u8 = 8;
     /// Read MRU list.
-    pub const OP_READ_MRU: u8 = 13;
+    pub const OP_READ_MRU: u8 = 10;
+    /// Read variables (authenticated ordered list). Requires auth.
+    pub const OP_READ_ORDLIST_A: u8 = 11;
+    /// Request nonce.
+    pub const OP_REQ_NONCE: u8 = 12;
 }
 
-/// System status word bits (matching ntpsec's `sys_status`).
+/// System status word encoding matching NTPsec (ntp_control.h) and RFC 9327 §5.
+///
+/// Bit layout:
+///   15-14: leap indicator (LI)
+///   13-8:  clock source
+///   7-4:   event count
+///   3-0:   event code
 pub mod sys_status {
-    pub const LEAP_NOWARNING: u16 = 0x0000;
-    pub const LEAP_ADDSECOND: u16 = 0x0040;
-    pub const LEAP_DELSECOND: u16 = 0x0080;
-    pub const LEAP_ALARM: u16 = 0x00C0;
-    pub const LEAP_MASK: u16 = 0x00C0;
+    // Leap indicator values (shifted to bits 15-14)
+    pub const LI_SHIFT: u16 = 14;
+    pub const LEAP_NOWARNING: u16 = 0 << LI_SHIFT;
+    pub const LEAP_ADDSECOND: u16 = 1 << LI_SHIFT;
+    pub const LEAP_DELSECOND: u16 = 2 << LI_SHIFT;
+    pub const LEAP_ALARM: u16 = 3 << LI_SHIFT;
 
-    pub const SYNC_NONE: u16 = 0x0000;
-    pub const SYNC_LCL: u16 = 0x0010;
-    pub const SYNC_PPS: u16 = 0x0020;
-    pub const SYNC_NTP: u16 = 0x0030;
-    pub const SYNC_MASK: u16 = 0x0030;
+    // Clock source values (shifted to bits 13-8)
+    pub const CS_SHIFT: u16 = 8;
+    pub const CS_SYNC_NONE: u16 = 0 << CS_SHIFT;
+    pub const CS_SYNC_LCL: u16 = 1 << CS_SHIFT;
+    pub const CS_SYNC_PPS: u16 = 2 << CS_SHIFT;
+    pub const CS_SYNC_NTP: u16 = 3 << CS_SHIFT;
 
-    pub const EVENT_UNSPEC: u16 = 0x0000;
-    pub const EVENT_MASK: u16 = 0x000F;
+    // Event count in bits 7-4, event code in bits 3-0
+    pub const EVENT_COUNT_SHIFT: u16 = 4;
+    pub const EVENT_CODE_MASK: u16 = 0x0F;
 
-    pub fn make(leap: u16, sync: u16, event: u16) -> u16 {
-        leap | sync | event
+    /// Build a system status word from semantic values (0-3 for each).
+    pub fn make(li: u16, source: u16, event_count: u16, event_code: u16) -> u16 {
+        ((li & 0x03) << LI_SHIFT)
+            | ((source & 0x3F) << CS_SHIFT)
+            | ((event_count & 0x0F) << EVENT_COUNT_SHIFT)
+            | (event_code & EVENT_CODE_MASK)
+    }
+
+    /// Decode leap indicator from a status word.
+    pub fn decode_li(status: u16) -> u16 {
+        (status >> LI_SHIFT) & 0x03
     }
 }
 
@@ -239,6 +257,7 @@ pub struct ControlExchange {
 
 impl ControlExchange {
     /// Parse a control message from raw bytes using safe big-endian decode.
+    /// Handles Mode 6 padding: data is padded to 32-bit boundary, MAC to 64-bit.
     pub fn parse(data: &[u8]) -> Result<(Self, &[u8]), String> {
         let (msg, after_header) = ControlMessage::decode(data)
             .ok_or_else(|| format!("packet too short: {} < 12", data.len()))?;
@@ -257,18 +276,28 @@ impl ControlExchange {
         }
 
         let payload = after_header[payload_start..payload_end].to_vec();
-        let remaining = &after_header[payload_end..];
+
+        // Mode 6 padding: payload is padded to 32-bit boundary.
+        // The padding bytes follow the count bytes and are NOT included in count.
+        let header_data_end = 12 + payload_len;
+        let padded32 = (header_data_end + 3) & !3;
+        let mac_search_start = padded32.min(after_header.len());
+
+        let remaining = &after_header[mac_search_start..];
 
         let mut auth_keyid = None;
         let mut auth_data = Vec::new();
-        if remaining.len() >= 8 {
+        if remaining.len() >= 4 {
+            // Skip padding zeros by checking for a non-zero key ID
             auth_keyid = Some(u32::from_be_bytes([
                 remaining[0],
                 remaining[1],
                 remaining[2],
                 remaining[3],
             ]));
-            auth_data = remaining[4..].to_vec();
+            if remaining.len() > 4 {
+                auth_data = remaining[4..].to_vec();
+            }
         }
 
         Ok((
@@ -313,6 +342,16 @@ impl ControlExchange {
         buf.extend_from_slice(&resp_data[..resp_data.len().min(max_payload)]);
 
         if let Some(key) = auth_key {
+            // Add Mode 6 padding to align MAC to 32-bit (then 64-bit) boundary.
+            // The MAC covers header + data + padding.
+            let data_end = buf.len();
+            let padded32 = (data_end + 3) & !3;
+            let padded64 = (padded32 + 7) & !7;
+            let pad_bytes = padded64 - data_end;
+            for _ in 0..pad_bytes {
+                buf.push(0);
+            }
+
             if let Some(mac) = key.mac(&buf) {
                 buf.extend_from_slice(&key.id.to_be_bytes());
                 buf.extend_from_slice(&mac);
@@ -322,13 +361,20 @@ impl ControlExchange {
     }
 
     /// Check if the MAC on this exchange is valid.
-    /// Uses the safe encode() method instead of unsafe pointer reads.
+    /// Rebuilds the authenticated portion: header + data + 32/64-bit padding.
     pub fn verify_mac(&self, key_store: &AuthKeyStore) -> bool {
         if let Some(keyid) = self.auth_keyid {
             if let Some(key) = key_store.get_key(keyid) {
-                // Rebuild the packet using the safe encode() method
                 let mut packet = self.request.encode().to_vec();
                 packet.extend_from_slice(&self.data);
+                // Add padding to match the authenticated portion
+                let data_end = packet.len();
+                let padded32 = (data_end + 3) & !3;
+                let padded64 = (padded32 + 7) & !7;
+                let pad_bytes = padded64 - data_end;
+                for _ in 0..pad_bytes {
+                    packet.push(0);
+                }
                 return key.verify_mac(&packet, &self.auth_data);
             }
         }

@@ -579,7 +579,7 @@ impl DaemonEngine {
                     req,
                     b"Authentication failure",
                     req.sequence,
-                    sys_status::make(sys_status::LEAP_ALARM, sys_status::SYNC_NONE, 0),
+                    sys_status::make(3, 0, 0, 0),
                     None,
                 );
                 return vec![DaemonAction::Send {
@@ -592,13 +592,48 @@ impl DaemonEngine {
             None
         };
 
+        // Check opcode-specific authentication requirements
+        // NTPsec: READSTAT, READVAR, READCLOCK, READ_MRU do not require auth;
+        // WRITEVAR, CONFIGURE, READ_ORDLIST_A do.
+        let requires_auth = matches!(
+            oc.op,
+            opcodes::OP_WRITEVAR | opcodes::OP_CONFIGURE | opcodes::OP_READ_ORDLIST_A
+        );
+        if requires_auth && auth_key.is_none() && self.auth.get_control_key().is_some() {
+            let err_resp = ControlExchange::build_response(
+                req,
+                b"Authentication required",
+                req.sequence,
+                sys_status::make(self.system.leap as u16, 3, 0, 2), // source=NTP, event=2=Auth
+                None,
+            );
+            return vec![DaemonAction::Send {
+                destination: source,
+                bytes: err_resp,
+            }];
+        }
+
         // Build the response data based on opcode
         let resp_data = match oc.op {
-            opcodes::OP_READVAR | opcodes::OP_READSTAT | opcodes::OP_READ_ORDLIST_A => {
-                // Produce system variables
-                let mut vars: Vec<(String, String)> = Vec::new();
+            // READSTAT: return binary associd/status pairs (ntpq associations)
+            opcodes::OP_READSTAT => {
+                let mut data = Vec::with_capacity(self.peers.len() * 4);
+                for i in 0..self.peers.len() {
+                    if let Some(peer) = self.peers.get(i) {
+                        // associd is 1-based
+                        let associd = (i + 1) as u16;
+                        data.extend_from_slice(&associd.to_be_bytes());
+                        data.extend_from_slice(
+                            &crate::ntp_control::peer_status(peer).to_be_bytes(),
+                        );
+                    }
+                }
+                data
+            }
 
-                // Add system variables
+            // READVAR, READ_ORDLIST_A: produce textual system/peer variables
+            opcodes::OP_READVAR | opcodes::OP_READ_ORDLIST_A => {
+                let mut vars: Vec<(String, String)> = Vec::new();
                 let sys_names = [
                     "version",
                     "processor",
@@ -623,9 +658,8 @@ impl DaemonEngine {
                     }
                 }
 
-                // If an association ID is specified, add peer variables
                 if req.associd != 0 && req.associd as usize <= self.peers.len() {
-                    let idx = req.associd as usize - 1; // associd is 1-based
+                    let idx = req.associd as usize - 1;
                     if let Some(peer) = self.peers.get(idx) {
                         let peer_names = [
                             "srcaddr",
@@ -661,6 +695,7 @@ impl DaemonEngine {
                 )
                 .into_bytes()
             }
+
             _ => {
                 // Unsupported opcode — return error
                 return vec![DaemonAction::Log(format!(
@@ -670,21 +705,19 @@ impl DaemonEngine {
             }
         };
 
-        // Build the response
-        let status = sys_status::make(
-            match self.system.leap {
-                LeapIndicator::NoWarning => sys_status::LEAP_NOWARNING,
-                LeapIndicator::AddLeapSecond => sys_status::LEAP_ADDSECOND,
-                LeapIndicator::RemoveLeapSecond => sys_status::LEAP_DELSECOND,
-                LeapIndicator::Alarm => sys_status::LEAP_ALARM,
-            },
-            if self.system.stratum < NTP_MAXSTRAT {
-                sys_status::SYNC_NTP
-            } else {
-                sys_status::SYNC_NONE
-            },
-            0,
-        );
+        // Build the response status word
+        let li = match self.system.leap {
+            LeapIndicator::NoWarning => 0,
+            LeapIndicator::AddLeapSecond => 1,
+            LeapIndicator::RemoveLeapSecond => 2,
+            LeapIndicator::Alarm => 3,
+        };
+        let clock_source = if self.system.stratum < NTP_MAXSTRAT {
+            3 // CS_SYNC_NTP
+        } else {
+            0 // CS_SYNC_NONE
+        };
+        let status = sys_status::make(li, clock_source, 0, 0);
 
         let response =
             ControlExchange::build_response(req, &resp_data, req.sequence, status, auth_key);

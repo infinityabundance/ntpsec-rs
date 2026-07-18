@@ -523,14 +523,15 @@ fn test_real_loopback_kernel_timestamp() {
     assert_eq!(dgram.bytes, vec![0u8; 48]);
     assert_eq!(dgram.source.addr[..4], [127, 0, 0, 1], "source loopback");
 
-    // Timestamp provenance: on Linux this should be KernelNanoseconds.
-    // We accept UserspaceFallback on platforms without SO_TIMESTAMPNS.
-    match dgram.timestamp_source {
-        TimestampSource::KernelNanoseconds => {}
-        TimestampSource::KernelMicroseconds => {}
-        TimestampSource::UserspaceFallback => {}
-        TimestampSource::AncillaryTruncated => {}
-    }
+    // Timestamp provenance: on Linux with SO_TIMESTAMPNS, this must be
+    // KernelNanoseconds for a loopback test. On platforms without
+    // SO_TIMESTAMPNS (macOS, BSD), it will be UserspaceFallback.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        dgram.timestamp_source,
+        TimestampSource::KernelNanoseconds,
+        "On Linux, loopback should produce SCM_TIMESTAMPNS"
+    );
 
     // Verify timestamp is bounded by before/after with nanosecond precision.
     // The kernel timestamp may be captured slightly before `before` if the
