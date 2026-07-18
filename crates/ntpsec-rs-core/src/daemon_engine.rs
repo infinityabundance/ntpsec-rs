@@ -160,6 +160,15 @@ impl DaemonEngine {
                 }
                 ConfigOption::DriftFile(_) => {}
                 ConfigOption::LeapFile(_path) => {}
+                ConfigOption::TrustedKey(kid) => {
+                    self.auth.add_trusted_key(*kid);
+                }
+                ConfigOption::ControlKey(kid) => {
+                    self.auth.set_control_key(*kid);
+                }
+                ConfigOption::Keys(_path) => {
+                    // Key file loading is done by the shell (main.rs).
+                }
                 ConfigOption::Restrict {
                     ref addr,
                     ref flags,
@@ -373,13 +382,32 @@ impl DaemonEngine {
 
     /// Handle a received NTP packet.
     fn handle_packet(&mut self, dgram: ReceivedDatagram) -> Vec<DaemonAction> {
-        // 1. Decode header
+        // 0. Extract mode from raw byte 0 BEFORE deciding which decoder to use.
+        // Mode 6 control protocol uses a 12-byte header, not 48-byte NTP.
+        if dgram.bytes.is_empty() {
+            return vec![DaemonAction::Log("empty packet".to_string())];
+        }
+        let mode = NtpMode::from_bits(dgram.bytes[0]);
+
+        // ─── Mode 6 control protocol (ntpq) — dispatch before NTP decode ──
+        if mode == NtpMode::NtpControl {
+            // Check restrictions first
+            let (restrict_action, _) = self.restrictions.check(&dgram.source, mode);
+            match restrict_action {
+                RestrictAction::Accept => {}
+                RestrictAction::Ignore | RestrictAction::Discard => return vec![],
+                RestrictAction::SendKod => {
+                    return vec![DaemonAction::Log("kod for control".to_string())];
+                }
+            }
+            return self.handle_control(&dgram.bytes, dgram.source);
+        }
+
+        // 1. Decode 48-byte NTP header for time protocol packets
         let pkt = match NtpPacket::decode_header(&dgram.bytes) {
             Ok(p) => p,
             Err(e) => return vec![DaemonAction::Log(format!("bad packet header: {e}"))],
         };
-
-        let mode = pkt.mode();
 
         // 2. Check restrictions — exhaustively match all actions.
         // NOQUERY is handled contextually inside check() based on packet mode.
@@ -415,7 +443,6 @@ impl DaemonEngine {
         match mode {
             // ─── Client request → respond as server ────────────────────────
             NtpMode::Client | NtpMode::SymActive => {
-                // Only respond if we have a valid reference
                 if self.system.stratum >= NTP_MAXSTRAT {
                     return vec![]; // Not synchronized yet
                 }
@@ -430,11 +457,6 @@ impl DaemonEngine {
             // ─── Server or SymPassive response → update matching peer ──
             NtpMode::Server | NtpMode::SymPassive => {
                 return self.handle_server_response(pkt, dgram);
-            }
-
-            // ─── Mode 6 control protocol (ntpq) ────────────────────────────
-            NtpMode::NtpControl => {
-                return self.handle_control(&dgram.bytes, dgram.source);
             }
 
             // ─── Unsupported modes ─────────────────────────────────────────
@@ -572,7 +594,7 @@ impl DaemonEngine {
 
         // Build the response data based on opcode
         let resp_data = match oc.op {
-            opcodes::OP_READVAR | opcodes::OP_READLIST | opcodes::OP_READ_ORDLIST_A => {
+            opcodes::OP_READVAR | opcodes::OP_READSTAT | opcodes::OP_READ_ORDLIST_A => {
                 // Produce system variables
                 let mut vars: Vec<(String, String)> = Vec::new();
 
@@ -1570,5 +1592,136 @@ mod tests {
             1,
             "exactly one packet should have been sent"
         );
+    }
+
+    /// End-to-end Mode 6 control request: send a literal 16-byte ntpq READVAR
+    /// request and verify the response matches ntpq expectations.
+    #[test]
+    fn test_engine_mode6_readvar() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        engine.system.stratum = 3;
+        engine.system.leap = LeapIndicator::NoWarning;
+        engine.system.sys_offset = 0.005;
+
+        // Build a literal Mode 6 READVAR request (16 bytes typical):
+        //   Bytes: LI=0 VN=4 Mode=6 = 0x26
+        //          Opcode: R=0 E=0 M=0 Op=2 (READVAR) = 0x02
+        //          Sequence: 0x0001
+        //          Status: 0x0000 (request, system status is ignored)
+        //          Assocation ID: 0x0000 (system, not peer)
+        //          Offset: 0x0000
+        //          Count: 0x0000 (no data)
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8();
+        msg.sequence = 1;
+        msg.associd = 0;
+        msg.count = 0;
+
+        let mut packet = msg.encode().to_vec();
+        // Zero-pad to 16 bytes (multiple of 8, typical for real ntpq)
+        packet.resize(16, 0);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // Should produce a Send action with the response
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, DaemonAction::Send { .. })),
+            "Mode 6 READVAR should produce a Send response"
+        );
+
+        // Decode the response
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            // Response must contain at least the 12-byte header
+            assert!(bytes.len() >= 12, "response must be >= 12 bytes");
+
+            let (resp_header, resp_data) =
+                ControlMessage::decode(bytes).expect("valid control response header");
+
+            // Verify response flags
+            let oc = resp_header.decode_opcode();
+            assert!(oc.response, "response bit should be set");
+            assert!(!oc.error, "error bit should not be set");
+            assert_eq!(oc.op, opcodes::OP_READVAR, "opcode should match");
+            assert_eq!(resp_header.sequence, 1, "sequence should match");
+            assert_eq!(resp_header.associd, 0, "association ID should match");
+
+            // Response data should contain system variables (text)
+            let data_str = String::from_utf8_lossy(resp_data);
+            assert!(
+                data_str.contains("version"),
+                "response should contain version"
+            );
+            assert!(
+                data_str.contains("stratum"),
+                "response should contain stratum"
+            );
+            assert!(
+                data_str.contains("offset"),
+                "response should contain offset"
+            );
+            assert!(
+                data_str.contains("3"),
+                "response should contain stratum value 3"
+            );
+        }
+    }
+
+    /// Test that a short Mode 6 packet (12 bytes, no padding) is accepted.
+    #[test]
+    fn test_engine_mode6_minimal() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        engine.system.stratum = 2;
+
+        // Build a 12-byte Mode 6 request (minimum valid)
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8();
+        msg.sequence = 42;
+        msg.associd = 0;
+        msg.count = 0;
+
+        let dgram = ReceivedDatagram::test(
+            msg.encode().to_vec(),
+            peer_netaddr([10, 0, 0, 55], 12345),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, DaemonAction::Send { .. })),
+            "12-byte Mode 6 request should be processed"
+        );
+
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (resp_header, _) = ControlMessage::decode(bytes).unwrap();
+            let oc = resp_header.decode_opcode();
+            assert!(oc.response);
+            assert_eq!(resp_header.sequence, 42);
+        }
     }
 }

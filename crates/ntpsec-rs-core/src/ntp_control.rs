@@ -107,17 +107,30 @@ impl ControlOpcode {
     }
 }
 
-/// Control message opcode values matching ntpsec.
+/// Control message opcode values matching ntpsec (ntpd/ntp_control.c).
 pub mod opcodes {
+    /// Read system variables (ntpq -c rv). Does not require authentication.
     pub const OP_READVAR: u8 = 2;
+    /// Read variables asynchronously.
     pub const OP_READVAR_ASYNCH: u8 = 3;
-    pub const OP_WRITEVAR: u8 = 6;
-    pub const OP_READLIST: u8 = 7;
-    pub const OP_READLIST_ASYNCH: u8 = 8;
-    pub const OP_WRITELIST: u8 = 9;
-    pub const OP_CONFIGURE: u8 = 11;
-    pub const OP_READ_ORDLIST_A: u8 = 14;
-    pub const OP_READ_MRU_LIST: u8 = 15;
+    /// Write one system variable.
+    pub const OP_WRITEVAR: u8 = 4;
+    /// Read clock variables.
+    pub const OP_READCLOCK: u8 = 5;
+    /// Write clock variables.
+    pub const OP_WRITECLOCK: u8 = 6;
+    /// Set trap for async messages.
+    pub const OP_SETTRAP: u8 = 7;
+    /// Async message delivery.
+    pub const OP_ASYNCMSG: u8 = 8;
+    /// Read associations (ntpq -c as). Returns binary associd/status pairs.
+    pub const OP_READSTAT: u8 = 1;
+    /// Write multiple variables.
+    pub const OP_CONFIGURE: u8 = 10;
+    /// Read variables (authenticated).
+    pub const OP_READ_ORDLIST_A: u8 = 12;
+    /// Read MRU list.
+    pub const OP_READ_MRU: u8 = 13;
 }
 
 /// System status word bits (matching ntpsec's `sys_status`).
@@ -309,20 +322,17 @@ impl ControlExchange {
     }
 
     /// Check if the MAC on this exchange is valid.
+    /// Uses the safe encode() method instead of unsafe pointer reads.
     pub fn verify_mac(&self, key_store: &AuthKeyStore) -> bool {
         if let Some(keyid) = self.auth_keyid {
             if let Some(key) = key_store.get_key(keyid) {
-                // Rebuild the packet without auth and verify
-                let msg_bytes = unsafe {
-                    let ptr = &self.request as *const ControlMessage as *const u8;
-                    std::slice::from_raw_parts(ptr, ControlMessage::SIZE)
-                };
-                let mut packet = msg_bytes.to_vec();
+                // Rebuild the packet using the safe encode() method
+                let mut packet = self.request.encode().to_vec();
                 packet.extend_from_slice(&self.data);
                 return key.verify_mac(&packet, &self.auth_data);
             }
         }
-        false // No auth to verify
+        false
     }
 }
 

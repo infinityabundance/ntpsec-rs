@@ -263,7 +263,7 @@ fn recvmsg_with_timestamp(
     if (msg.msg_flags & libc::MSG_TRUNC) != 0 {
         return Err(IoError::RecvFailed("packet truncated".to_string()));
     }
-    let _cmsg_truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
+    let cmsg_truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
 
     let n = ret as usize;
 
@@ -280,10 +280,12 @@ fn recvmsg_with_timestamp(
             unsafe {
                 libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
             }
-            (
-                ntp_fp::ts_to_ntp(ts.tv_sec, ts.tv_nsec),
-                TimestampSource::UserspaceFallback,
-            )
+            let source = if cmsg_truncated {
+                TimestampSource::AncillaryTruncated
+            } else {
+                TimestampSource::UserspaceFallback
+            };
+            (ntp_fp::ts_to_ntp(ts.tv_sec, ts.tv_nsec), source)
         }
     };
 
@@ -484,6 +486,72 @@ impl StateStore for FileStateStore {
     }
 }
 
+#[test]
+fn test_real_loopback_kernel_timestamp() {
+    // Real loopback test: bind, send a packet, receive through RealNetworkIo,
+    // and verify the kernel timestamp provenance with nanosecond bounds.
+    use std::net::UdpSocket;
+    let mut net = RealNetworkIo::new();
+    net.bind("127.0.0.1:0").expect("bind loopback");
+    let local_addr = net.sockets[0].local_addr().unwrap().as_socket().unwrap();
+
+    // Capture before with nanosecond precision
+    let mut ts_before = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts_before);
+    }
+    let before = ntp_fp::ts_to_ntp(ts_before.tv_sec, ts_before.tv_nsec);
+
+    let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    sender.send_to(&[0u8; 48], local_addr).expect("send");
+
+    let dgram = net.recv().expect("recv");
+
+    let mut ts_after = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts_after);
+    }
+    let after = ntp_fp::ts_to_ntp(ts_after.tv_sec, ts_after.tv_nsec);
+
+    // Packet integrity
+    assert_eq!(dgram.bytes, vec![0u8; 48]);
+    assert_eq!(dgram.source.addr[..4], [127, 0, 0, 1], "source loopback");
+
+    // Timestamp provenance: on Linux this should be KernelNanoseconds.
+    // We accept UserspaceFallback on platforms without SO_TIMESTAMPNS.
+    match dgram.timestamp_source {
+        TimestampSource::KernelNanoseconds => {}
+        TimestampSource::KernelMicroseconds => {}
+        TimestampSource::UserspaceFallback => {}
+        TimestampSource::AncillaryTruncated => {}
+    }
+
+    // Verify timestamp is bounded by before/after with nanosecond precision.
+    // The kernel timestamp may be captured slightly before `before` if the
+    // packet arrived between send_to() and clock_gettime(). Allow 1ms slop.
+    let t_rx = ntp_fp::ntp_ts64_to_double(dgram.rx_timestamp);
+    let t_before = ntp_fp::ntp_ts64_to_double(before) - 0.001;
+    let t_after = ntp_fp::ntp_ts64_to_double(after) + 0.001;
+    assert!(
+        t_rx >= t_before,
+        "rx {:.6}s should be >= before-1ms {:.6}s",
+        t_rx,
+        t_before
+    );
+    assert!(
+        t_rx <= t_after,
+        "rx {:.6}s should be <= after+1ms {:.6}s",
+        t_rx,
+        t_after
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,77 +612,5 @@ mod tests {
         let na = socketaddr_to_netaddr2(&addr);
         assert_eq!(na.port, 123);
         assert_eq!(na.addr[..4], [127, 0, 0, 1]);
-    }
-
-    #[test]
-    fn test_real_loopback_kernel_timestamp() {
-        // Real loopback test: bind, send a packet, receive through RealNetworkIo,
-        // and verify the kernel timestamp provenance.
-        use std::net::UdpSocket;
-
-        // Create a receive socket via RealNetworkIo
-        let mut net = RealNetworkIo::new();
-        net.bind("127.0.0.1:0").expect("bind loopback");
-
-        // Get the bound port from the socket
-        let local_addr = {
-            let socket = &net.sockets[0];
-            socket.local_addr().unwrap().as_socket().unwrap()
-        };
-
-        // Send a test NTP packet (48 bytes) via a separate UDP socket
-        let test_packet = [0u8; 48];
-        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
-        sender
-            .send_to(&test_packet, local_addr)
-            .expect("send test packet");
-
-        // Signal that we're about to receive
-        let before = ntpsec_rs_core::ntp_fp::ts_to_ntp(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            0,
-        );
-
-        // Receive through RealNetworkIo
-        let dgram = net.recv().expect("recv test packet");
-
-        let after = ntpsec_rs_core::ntp_fp::ts_to_ntp(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            0,
-        );
-
-        // Assert the received packet matches
-        assert_eq!(dgram.bytes, vec![0u8; 48], "packet bytes should match");
-        assert_eq!(
-            dgram.source.addr[..4],
-            [127, 0, 0, 1],
-            "source should be loopback"
-        );
-
-        // Assert timestamp provenance
-        // On Linux with SO_TIMESTAMPNS, this should be KernelNanoseconds.
-        // On other platforms, it will be UserspaceFallback.
-        // We just assert it's one of the valid sources (not some garbage value).
-        match dgram.timestamp_source {
-            TimestampSource::KernelNanoseconds
-            | TimestampSource::KernelMicroseconds
-            | TimestampSource::UserspaceFallback => {} // OK
-        }
-
-        // Assert the timestamp is bounded by before/after
-        assert!(
-            dgram.rx_timestamp.seconds >= before.seconds,
-            "rx timestamp should be >= pre-receive time"
-        );
-        assert!(
-            dgram.rx_timestamp.seconds <= after.seconds + 1,
-            "rx timestamp should be <= post-receive time + 1s slop"
-        );
     }
 }

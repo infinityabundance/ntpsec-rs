@@ -57,6 +57,8 @@ pub enum TimestampSource {
     KernelMicroseconds,
     /// Userspace `clock_gettime()` fallback.
     UserspaceFallback,
+    /// Ancillary data was truncated; timestamp is userspace fallback.
+    AncillaryTruncated,
 }
 
 /// A received NTP datagram with kernel timestamp.
