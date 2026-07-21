@@ -75,6 +75,9 @@ pub struct DaemonEngine {
     /// Minimum number of sane peers for the clock to synchronize.
     pub minsane: usize,
 
+    /// Index of the system peer (the selected synchronization source), or None.
+    pub system_peer_id: Option<usize>,
+
     /// Pending requests awaiting server responses.
     pending_requests: Vec<PendingRequest>,
 }
@@ -93,6 +96,7 @@ impl DaemonEngine {
             precision: -20, // ~1 us typical
             minsane: 1,
             config: ConfigTree::new(),
+            system_peer_id: None,
             pending_requests: Vec::new(),
         };
         engine.apply_config(config);
@@ -340,7 +344,14 @@ impl DaemonEngine {
         let mut peers_vec: Vec<Peer> = self.peers.iter().cloned().collect();
 
         // Run the full selection pipeline
-        self.system.update_from_peers(&mut peers_vec, now);
+        let sys_peer_idx = self.system.update_from_peers(&mut peers_vec, now);
+
+        // Track system peer
+        if sys_peer_idx < self.peers.len() {
+            self.system_peer_id = Some(sys_peer_idx);
+        } else {
+            self.system_peer_id = None;
+        }
 
         // Write updated peer state back
         for (i, p) in peers_vec.iter().enumerate() {
@@ -598,7 +609,7 @@ impl DaemonEngine {
                 li_vn_mode: req.li_vn_mode,
                 opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
                 sequence: req.sequence,
-                status: 0x0001, // Error code 1 = authentication failure
+                status: 0x0100, // Error code 1 in high byte = authentication failure
                 associd: req.associd,
                 offset: 0,
                 count: 0,
@@ -621,47 +632,75 @@ impl DaemonEngine {
                 let mut data = Vec::with_capacity(self.peers.len() * 4);
                 for i in 0..self.peers.len() {
                     if let Some(peer) = self.peers.get(i) {
-                        // associd is 1-based
                         let associd = (i + 1) as u16;
                         data.extend_from_slice(&associd.to_be_bytes());
+                        let is_sys = self.system_peer_id == Some(i);
                         data.extend_from_slice(
-                            &crate::ntp_control::peer_status(peer).to_be_bytes(),
+                            &crate::ntp_control::peer_status(peer, is_sys).to_be_bytes(),
                         );
                     }
                 }
                 data
             }
 
-            // READVAR, READ_ORDLIST_A: produce textual system/peer variables
+            // READVAR, READ_ORDLIST_A: associd==0 → system vars, else → peer vars
             opcodes::OP_READVAR | opcodes::OP_READ_ORDLIST_A => {
-                let mut vars: Vec<(String, String)> = Vec::new();
-                let sys_names = [
-                    "version",
-                    "processor",
-                    "system",
-                    "leap",
-                    "stratum",
-                    "precision",
-                    "rootdelay",
-                    "rootdisp",
-                    "refid",
-                    "reftime",
-                    "peer",
-                    "tc",
-                    "offset",
-                    "frequency",
-                    "sys_jitter",
-                    "rootdist",
-                ];
-                for name in &sys_names {
-                    if let Some(val) = get_system_variable(&self.system, name) {
-                        vars.push((name.to_string(), val));
+                if req.associd == 0 {
+                    // System variables
+                    let mut vars: Vec<(String, String)> = Vec::new();
+                    let sys_names = [
+                        "version",
+                        "processor",
+                        "system",
+                        "leap",
+                        "stratum",
+                        "precision",
+                        "rootdelay",
+                        "rootdisp",
+                        "refid",
+                        "reftime",
+                        "peer",
+                        "tc",
+                        "offset",
+                        "frequency",
+                        "sys_jitter",
+                        "rootdist",
+                    ];
+                    for name in &sys_names {
+                        if let Some(val) = get_system_variable(&self.system, name) {
+                            vars.push((name.to_string(), val));
+                        }
                     }
-                }
-
-                if req.associd != 0 && req.associd as usize <= self.peers.len() {
-                    let idx = req.associd as usize - 1;
-                    if let Some(peer) = self.peers.get(idx) {
+                    encode_var_list(
+                        &vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_bytes()
+                } else {
+                    // Peer variables for a specific association
+                    let idx = req.associd as usize;
+                    if idx == 0 || idx > self.peers.len() {
+                        // Invalid associd — return error
+                        let err_header = ControlMessage {
+                            li_vn_mode: req.li_vn_mode,
+                            opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
+                            sequence: req.sequence,
+                            status: 0x0400, // Error code 4 = NotFound
+                            associd: req.associd,
+                            offset: 0,
+                            count: 0,
+                        };
+                        return vec![DaemonAction::Send {
+                            destination: source,
+                            bytes: err_header.encode().to_vec(),
+                        }];
+                    }
+                    // associd is 1-based
+                    let peer_idx = idx - 1;
+                    if let Some(peer) = self.peers.get(peer_idx) {
+                        let mut vars: Vec<(String, String)> = Vec::new();
                         let peer_names = [
                             "srcaddr",
                             "stratum",
@@ -685,16 +724,17 @@ impl DaemonEngine {
                                 vars.push((name.to_string(), val));
                             }
                         }
+                        encode_var_list(
+                            &vars
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.as_str()))
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_bytes()
+                    } else {
+                        Vec::new()
                     }
                 }
-
-                encode_var_list(
-                    &vars
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                        .collect::<Vec<_>>(),
-                )
-                .into_bytes()
             }
 
             _ => {

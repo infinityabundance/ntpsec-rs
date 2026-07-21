@@ -116,13 +116,39 @@ fn main() {
         }
     };
 
-    // ──── Lab Daemon Mode ────────────────────────────────────────────
-    if cli.lab_daemon {
-        return run_lab_daemon(config, &cli);
-    }
+    // ──── Read key files before moving config into engine ───────────
+    let keys_paths: Vec<String> = config
+        .options
+        .iter()
+        .filter_map(|opt| {
+            if let ntpsec_rs_core::ntp_config::ConfigOption::Keys(p) = opt {
+                Some(p.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // ──── Create Daemon Engine ───────────────────────────────────────
+    let lab_config = config.clone();
     let mut engine = DaemonEngine::new(config);
+
+    // ──── Load Key Files into engine ─────────────────────────────────
+    for path in &keys_paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            match engine.auth.parse_keys_file(&content) {
+                Ok(count) => tracing::info!("Loaded {} keys from '{}'", count, path),
+                Err(e) => tracing::warn!("Failed to load keys from '{}': {}", path, e),
+            }
+        } else {
+            tracing::warn!("Cannot read key file '{}'", path);
+        }
+    }
+
+    // ──── Lab Daemon Mode ────────────────────────────────────────────
+    if cli.lab_daemon {
+        return run_lab_daemon(lab_config, &cli);
+    }
 
     // Apply CLI overrides
     if cli.slew {

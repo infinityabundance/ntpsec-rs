@@ -733,9 +733,9 @@ impl SystemState {
         Self::default()
     }
 
-    /// Update system state from a set of peers.  Matching ntpsec's
-    /// `clock_select()` + `clock_update()`.
-    pub fn update_from_peers(&mut self, peers: &mut [Peer], now: NtpTs64) {
+    /// Update system state from a set of peers.  Returns the index of the
+    /// selected system peer, or usize::MAX if no peer was selected.
+    pub fn update_from_peers(&mut self, peers: &mut [Peer], now: NtpTs64) -> usize {
         // 1. Mark unreachable peers as failed TEST9
         for peer in peers.iter_mut() {
             if !peer.reach.is_reachable() {
@@ -756,7 +756,7 @@ impl SystemState {
             self.sys_jitter = 0.0;
             self.sys_rootdist = f64::INFINITY;
             self.reference_id = 0;
-            return;
+            return usize::MAX;
         }
 
         // 3. Run clustering algorithm
@@ -769,7 +769,7 @@ impl SystemState {
             self.sys_jitter = 0.0;
             self.sys_rootdist = f64::INFINITY;
             self.reference_id = 0;
-            return;
+            return usize::MAX;
         }
 
         // 4. Run combining algorithm
@@ -789,6 +789,7 @@ impl SystemState {
         self.sys_offset = combined_offset;
         self.sys_rootdist = root_distance(sys_peer, now);
         self.peer_count = survivors.len() as u32;
+        survivors[0]
     }
 }
 

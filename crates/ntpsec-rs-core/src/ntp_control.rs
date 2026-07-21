@@ -277,11 +277,10 @@ impl ControlExchange {
 
         let payload = after_header[payload_start..payload_end].to_vec();
 
-        // Mode 6 padding: payload is padded to an 8-octet boundary before the MAC.
-        // `after_header` starts at byte 12 (already past the header).
-        // The data from offset=0 for count bytes is the real payload.
-        // Authenticator (key ID + MAC) starts at `align_up(payload_len, 8)` within after_header.
-        let auth_offset = (payload_len + 7) & !7;
+        // Mode 6 padding: payload padded to 4-octet boundary before authenticator.
+        // NTPsec MODE_SIX_ALIGNMENT = 4. `after_header` starts at byte 12.
+        // Authenticator (key ID + MAC) starts at align_up(payload_len, 4) within after_header.
+        let auth_offset = (payload_len + 3) & !3;
         let remaining = if auth_offset <= after_header.len() {
             &after_header[auth_offset..]
         } else {
@@ -345,16 +344,11 @@ impl ControlExchange {
         buf.extend_from_slice(&resp_data[..resp_data.len().min(max_payload)]);
 
         if let Some(key) = auth_key {
-            // Add Mode 6 padding to align MAC to 32-bit (then 64-bit) boundary.
-            // The MAC covers header + data + padding.
-            let data_end = buf.len();
-            let padded32 = (data_end + 3) & !3;
-            let padded64 = (padded32 + 7) & !7;
-            let pad_bytes = padded64 - data_end;
-            for _ in 0..pad_bytes {
+            // Pad to 4-octet boundary for MAC (per NTPsec MODE_SIX_ALIGNMENT=4).
+            let pad = (4 - (buf.len() & 3)) & 3;
+            for _ in 0..pad {
                 buf.push(0);
             }
-
             if let Some(mac) = key.mac(&buf) {
                 buf.extend_from_slice(&key.id.to_be_bytes());
                 buf.extend_from_slice(&mac);
@@ -364,18 +358,17 @@ impl ControlExchange {
     }
 
     /// Check if the MAC on this exchange is valid.
-    /// Rebuilds the authenticated portion: header + data + 32/64-bit padding.
+    /// Rebuilds the authenticated portion: header + data + 4-octet padding (per NTPsec).
     pub fn verify_mac(&self, key_store: &AuthKeyStore) -> bool {
         if let Some(keyid) = self.auth_keyid {
             if let Some(key) = key_store.get_key(keyid) {
-                let mut packet = self.request.encode().to_vec();
+                let header = self.request.encode();
+                let mut packet = Vec::with_capacity(header.len() + self.data.len() + 4);
+                packet.extend_from_slice(&header);
                 packet.extend_from_slice(&self.data);
-                // Add padding to match the authenticated portion
-                let data_end = packet.len();
-                let padded32 = (data_end + 3) & !3;
-                let padded64 = (padded32 + 7) & !7;
-                let pad_bytes = padded64 - data_end;
-                for _ in 0..pad_bytes {
+                // Pad to 4-octet boundary for MAC calculation
+                let pad = (4 - (packet.len() & 3)) & 3;
+                for _ in 0..pad {
                     packet.push(0);
                 }
                 return key.verify_mac(&packet, &self.auth_data);
@@ -455,12 +448,12 @@ fn format_refid(refid: u32) -> String {
 ///   Bit 4: reachable
 ///   Bit 3: broadcast
 ///   Bits 2-0: selection state (6 = sys.peer, 0 = rejected)
-pub fn peer_status(peer: &super::ntp_peer::Peer) -> u16 {
+pub fn peer_status(peer: &super::ntp_peer::Peer, is_system_peer: bool) -> u16 {
     let mut flags: u8 = 0;
 
-    // All peers loaded from config are configured
-    flags |= 0x80;
-
+    if peer.flags.contains(super::ntp_peer::PeerFlags::CONFIGURED) {
+        flags |= 0x80;
+    }
     if peer.flags.contains(super::ntp_peer::PeerFlags::AUTHENABLE) {
         flags |= 0x40;
     }
@@ -474,13 +467,14 @@ pub fn peer_status(peer: &super::ntp_peer::Peer) -> u16 {
         flags |= 0x08;
     }
 
-    // Selection state from flash bits (simplified: sys.peer=6 if reachable, else 0)
-    if peer.flash == 0 && peer.reach.is_reachable() {
-        flags |= 6; // sys.peer
+    // Selection state: 6 = system peer, 3 = survivor, 0 = rejected
+    if is_system_peer {
+        flags |= 6;
+    } else if peer.reach.is_reachable() && peer.stratum < 16 {
+        flags |= 3; // survivor
     }
 
     // Low byte: event count (bits 7-4) and event code (bits 3-0)
-    // For now, use 0 for both since we don't track events
     ((flags as u16) << 8) | 0x0000
 }
 
