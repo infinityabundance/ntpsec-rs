@@ -4,24 +4,16 @@
 // ntpsec Python ntpq — same CLI, same output format, same behavior at
 // the wire level.
 //
-// # Usage
+// ## Phase 2.4
+//   - ControlClient stack in ntpsec-rs-core
+//   - -c rv (read system variables)
+//   - -c associations (binary READSTAT)
+//   - -c peers (billboard)
 //
-//   ntpq-rs -c peers               # query localhost
-//   ntpq-rs -c peers <host>        # query remote host
-//   ntpq-rs -c rv <associd>       # read variables
-//   ntpq-rs -c associations       # list associations
-//   ntpq-rs -c mrulist            # MRU list
-//
-// ## Oracle
-//   - ntpsec ntpclients/ntpq.py (73K)
-//   - ntpsec ntpd/ntp_control.c (106K) — wire protocol
-//   - ntpsec include/ntp_control.h
-//
-// ## Court
-//   - docs/courts/ntpq.md — output format parity for every command
 // =============================================================================
 
 use clap::Parser;
+use ntpsec_rs_core::control_client::*;
 
 /// NTP query tool — forensic Rust reconstruction of ntpq.
 #[derive(Parser, Debug)]
@@ -95,46 +87,153 @@ pub mod ntpq_commands {
 fn main() {
     let cli = Cli::parse();
 
-    println!(
-        "ntpq-rs v{} — NTP query tool (Rust)",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("Querying {}:{}", cli.host, cli.port);
-
     if cli.command.is_empty() {
-        // Interactive mode (stub)
-        println!("Interactive mode (scaffold)");
-    } else {
-        // Command mode
-        for cmd in &cli.command {
-            match cmd.as_str() {
-                ntpq_commands::PEERS => {
-                    println!("     remote           refid      st t when poll reach   delay   offset  jitter");
-                    println!("==============================================================================");
-                    println!("*127.0.0.1       .LOCL.          10 u    -   64    1    0.000    0.000   0.001");
-                }
-                ntpq_commands::ASSOCIATIONS => {
-                    println!();
-                    println!("ind assid status  conf reach auth condition  last_event cnt");
-                    println!("===========================================================");
-                    println!("  1 49723  9614   yes   yes  none  sys.peer    sys_peer  1");
-                }
-                ntpq_commands::READVAR => {
-                    println!("associd=0 status=0622 leap_none, sync_ntp, 1 event, clock_sync,");
-                    println!(
-                        "version=\"ntpd-rs 1.3.3\", processor=\"x86_64\", system=\"Linux/5.15.0\","
-                    );
-                    println!("leap=00, stratum=1, precision=-24, rootdelay=0.000, rootdisp=0.001,");
-                    println!("refid=LOCL, reftime=12345678.000000000,");
-                    println!("clock=12345678.000000000, peer=0, tc=4, mintc=3, offset=0.000,");
-                    println!(
-                        "frequency=0.000, sys_jitter=0.000, clk_jitter=0.001, clk_wander=0.000"
-                    );
-                }
-                _ => {
-                    println!("Unknown command: {cmd}");
+        eprintln!("ntpq-rs: no command specified (use -c)");
+        std::process::exit(1);
+    }
+
+    let mut client = ControlClient::new(cli.timeout, 1);
+
+    for cmd in &cli.command {
+        let result = match cmd.as_str() {
+            ntpq_commands::READVAR => {
+                // Parse optional associd from "rv 12345" or "rv associd=12345"
+                let associd = parse_rv_associd(cmd);
+                if associd == 0 {
+                    match client.read_system_vars(&cli.host, cli.port) {
+                        Ok(sys) => {
+                            let mut ver = String::new();
+                            // First line: status header
+                            ver.push_str(&format!(
+                                "associd={} status={:04x} {}\n",
+                                sys.associd,
+                                sys.status,
+                                sys.leap_str()
+                            ));
+                            // Variables in key=value format
+                            let keys = [
+                                "version",
+                                "processor",
+                                "system",
+                                "leap",
+                                "stratum",
+                                "precision",
+                                "rootdelay",
+                                "rootdisp",
+                                "refid",
+                                "reftime",
+                                "peer",
+                                "tc",
+                                "offset",
+                                "frequency",
+                                "sys_jitter",
+                                "rootdist",
+                            ];
+                            for key in &keys {
+                                if let Some(val) = sys.get(key) {
+                                    // Quote version string values
+                                    if *key == "version" || *key == "processor" || *key == "system"
+                                    {
+                                        ver.push_str(&format!("{}=\"{}\", ", key, val));
+                                    } else {
+                                        ver.push_str(&format!("{}={}, ", key, val));
+                                    }
+                                }
+                            }
+                            ver.push('\n');
+                            Ok(ver)
+                        }
+                        Err(e) => Err(format!("{e}")),
+                    }
+                } else {
+                    // Peer-specific READVAR
+                    match client.read_peer_vars(&cli.host, cli.port, associd) {
+                        Ok(pv) => {
+                            let mut out =
+                                format!("associd={} status={:04x}\n", pv.associd, pv.status);
+                            let keys = [
+                                "srcaddr",
+                                "stratum",
+                                "offset",
+                                "delay",
+                                "dispersion",
+                                "jitter",
+                                "hpoll",
+                                "ppoll",
+                                "reach",
+                                "flash",
+                                "leap",
+                                "refid",
+                                "reftime",
+                                "hmode",
+                                "pmode",
+                                "precision",
+                            ];
+                            for key in &keys {
+                                if let Some(val) = pv.get(key) {
+                                    out.push_str(&format!("{}={}, ", key, val));
+                                }
+                            }
+                            out.push('\n');
+                            Ok(out)
+                        }
+                        Err(e) => Err(format!("{e}")),
+                    }
                 }
             }
+            ntpq_commands::ASSOCIATIONS => match client.read_associations(&cli.host, cli.port) {
+                Ok(assocs) => Ok(format_associations(&assocs)),
+                Err(e) => Err(format!("{e}")),
+            },
+            ntpq_commands::PEERS => {
+                // Peers = READSTAT + per-association READVAR
+                match client.read_associations(&cli.host, cli.port) {
+                    Ok(assocs) => {
+                        let mut rows = Vec::new();
+                        for a in &assocs {
+                            if !a.reachable {
+                                continue;
+                            }
+                            if let Ok(pv) = client.read_peer_vars(&cli.host, cli.port, a.associd) {
+                                let tally = a.tally_char();
+                                let remote = pv.get("srcaddr").unwrap_or("unknown").to_string();
+                                let refid = pv.get("refid").unwrap_or("").to_string();
+                                let stratum = pv.stratum();
+                                let delay =
+                                    pv.get("delay").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                let offset =
+                                    pv.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                let jitter =
+                                    pv.get("jitter").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                                rows.push((tally, remote, refid, stratum, delay, offset, jitter));
+                            }
+                        }
+                        Ok(format_peers(&rows))
+                    }
+                    Err(e) => Err(format!("{e}")),
+                }
+            }
+            _ => Err(format!("unknown command: {cmd}")),
+        };
+
+        match result {
+            Ok(output) => print!("{}", output),
+            Err(e) => eprintln!("{}", e),
         }
     }
+}
+
+/// Parse associd from "rv" or "rv 12345" or "rv associd=12345".
+fn parse_rv_associd(cmd: &str) -> u16 {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.len() < 2 {
+        return 0; // associd=0 = system
+    }
+    let arg = parts[1];
+    // Try "associd=12345" format
+    if let Some(val) = arg.strip_prefix("associd=") {
+        return val.parse().unwrap_or(0);
+    }
+    // Try bare number
+    arg.parse().unwrap_or(0)
 }
