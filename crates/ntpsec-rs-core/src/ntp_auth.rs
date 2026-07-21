@@ -114,13 +114,14 @@ impl NtpAuthKey {
                 Some(hash[..digest_len].to_vec())
             }
             DigestType::Aes128Cmac => {
-                // AES-128-CMAC (RFC 4493) via cmac + aes crates
-                if self.key_data.len() < 16 {
-                    return None;
-                }
+                // AES-128-CMAC (RFC 4493). NTPsec pads short keys with zeroes
+                // and truncates long keys to 16 bytes.
                 use aes::Aes128;
                 use cmac::{Cmac, Mac};
-                let mut mac = Cmac::<Aes128>::new_from_slice(&self.key_data[..16]).ok()?;
+                let mut aes_key = [0u8; 16];
+                let copy_len = self.key_data.len().min(16);
+                aes_key[..copy_len].copy_from_slice(&self.key_data[..copy_len]);
+                let mut mac = Cmac::<Aes128>::new_from_slice(&aes_key).ok()?;
                 mac.update(pkt);
                 let result = mac.finalize();
                 let bytes = result.into_bytes();

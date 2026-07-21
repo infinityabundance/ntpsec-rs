@@ -165,10 +165,8 @@ impl DaemonEngine {
                         if iburst {
                             peer.flags |= PeerFlags::IBURST;
                         }
-                        // Assign a unique monotonic association ID
-                        let associd = self.next_associd;
-                        self.next_associd = self.next_associd.wrapping_add(1).max(1);
-                        peer.associd = associd;
+                        // Assign a unique association ID (collision-free across wrap)
+                        peer.associd = Self::allocate_associd(&mut self.next_associd, &self.peers);
                         let peer_id = self.peers.len();
                         self.peers.add(peer);
                         // Schedule initial poll as one-shot (re-armed on transmit)
@@ -281,6 +279,25 @@ impl DaemonEngine {
             DaemonEvent::TimerFired(timer_id) => self.handle_timer(timer_id),
             DaemonEvent::PacketReceived(dgram) => self.handle_packet(dgram),
         }
+    }
+
+    /// Allocate a unique association ID for a new peer.
+    /// Scans active IDs on wrap to guarantee uniqueness.
+    /// Takes next counter and peers table by ref to avoid borrow conflicts.
+    fn allocate_associd(next: &mut u16, peers: &PeerTable) -> u16 {
+        for _ in 0..u16::MAX {
+            let c = *next;
+            let candidate = if c == 0 { 1 } else { c };
+            *next = if candidate == u16::MAX {
+                1
+            } else {
+                candidate + 1
+            };
+            if !peers.iter().any(|p| p.associd == candidate) {
+                return candidate;
+            }
+        }
+        0xFFFF
     }
 
     /// Drain all due timers and return their actions.
