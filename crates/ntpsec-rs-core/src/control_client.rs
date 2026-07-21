@@ -13,7 +13,8 @@
 
 use crate::ntp_control::*;
 use crate::ntp_types::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
 // ──── Errors ──────────────────────────────────────────────────────────
@@ -44,6 +45,156 @@ impl std::fmt::Display for QueryError {
 }
 
 impl std::error::Error for QueryError {}
+
+// ──── Fragment Collector ──────────────────────────────────────────────
+
+/// Pure fragment reassembly engine.  Collects fragments and validates
+/// that the assembled range is contiguous with no holes or overlaps.
+#[derive(Debug, Clone)]
+pub struct FragmentCollector {
+    /// Fragments keyed by offset. BTreeMap guarantees sorted iteration.
+    fragments: BTreeMap<u16, Vec<u8>>,
+    /// The end offset of the final fragment (set when `more == false`).
+    final_end: Option<u16>,
+    /// Status word from the first fragment.
+    pub status: Option<u16>,
+    /// Association ID from the first fragment.
+    pub associd: Option<u16>,
+}
+
+impl FragmentCollector {
+    pub fn new() -> Self {
+        Self {
+            fragments: BTreeMap::new(),
+            final_end: None,
+            status: None,
+            associd: None,
+        }
+    }
+
+    /// Add a fragment. Returns Ok(true) if the collection is complete.
+    /// Returns Err on holes, overlaps, or inconsistent headers.
+    pub fn add_fragment(
+        &mut self,
+        offset: u16,
+        count: u16,
+        data: &[u8],
+        more: bool,
+        status: u16,
+        associd: u16,
+    ) -> Result<bool, QueryError> {
+        // Validate fragment data length matches count
+        if data.len() < count as usize {
+            let data_end = offset as usize + data.len();
+            if data_end > offset as usize + count as usize {
+                return Err(QueryError::BadResponse(
+                    "fragment data exceeds declared count".to_string(),
+                ));
+            }
+        }
+
+        // Cap data to declared count
+        let payload = data[..(count as usize).min(data.len())].to_vec();
+
+        // Check for conflicting overlap with existing fragments
+        let frag_end = offset.saturating_add(count);
+        for (&existing_offset, existing_data) in &self.fragments {
+            let existing_end = existing_offset.saturating_add(existing_data.len() as u16);
+            // Check if ranges overlap non-trivially
+            if offset < existing_end && frag_end > existing_offset {
+                // They overlap — check for exact consistency
+                let overlap_start = offset.max(existing_offset);
+                let overlap_end = frag_end.min(existing_end);
+                if overlap_end > overlap_start {
+                    // Compare overlapping bytes
+                    let existing_slice = &existing_data[(overlap_start - existing_offset) as usize
+                        ..(overlap_end - existing_offset) as usize];
+                    let new_slice = &payload
+                        [(overlap_start - offset) as usize..(overlap_end - offset) as usize];
+                    if existing_slice != new_slice {
+                        return Err(QueryError::BadResponse(
+                            "conflicting fragment data at offset".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Store the fragment (or merge if offset already exists)
+        self.fragments.insert(offset, payload);
+
+        // Save first fragment header metadata
+        if self.status.is_none() {
+            self.status = Some(status);
+        }
+        if self.associd.is_none() {
+            self.associd = Some(associd);
+        }
+
+        // Track the final fragment extent
+        if !more {
+            let current_end = offset.saturating_add(count);
+            match self.final_end {
+                Some(existing) => {
+                    if current_end != existing {
+                        return Err(QueryError::BadResponse(
+                            "inconsistent final fragment extent".to_string(),
+                        ));
+                    }
+                }
+                None => self.final_end = Some(current_end),
+            }
+        }
+
+        // Check if collection is complete
+        Ok(self.is_complete())
+    }
+
+    /// Returns true if the collected fragments cover exactly `0..final_end`.
+    pub fn is_complete(&self) -> bool {
+        let final_end = match self.final_end {
+            Some(e) => e,
+            None => return false, // Haven't seen the final fragment yet
+        };
+        if final_end == 0 {
+            return true; // Empty response
+        }
+
+        let mut covered_end = 0u16;
+        for (&offset, data) in &self.fragments {
+            if offset > covered_end {
+                return false; // Hole detected
+            }
+            let frag_end = offset.saturating_add(data.len() as u16);
+            if frag_end > covered_end {
+                covered_end = frag_end;
+            }
+        }
+        covered_end >= final_end
+    }
+
+    /// Assemble the collected fragments into a contiguous byte vector.
+    pub fn assemble(&self) -> Result<Vec<u8>, QueryError> {
+        if !self.is_complete() {
+            return Err(QueryError::BadResponse(
+                "incomplete fragment set".to_string(),
+            ));
+        }
+        let final_end = self.final_end.unwrap_or(0) as usize;
+        let mut result = vec![0u8; final_end];
+        for (&offset, data) in &self.fragments {
+            let start = offset as usize;
+            let end = (start + data.len()).min(final_end);
+            result[start..end].copy_from_slice(&data[..end - start]);
+        }
+        Ok(result)
+    }
+
+    /// Number of fragments collected.
+    pub fn fragment_count(&self) -> usize {
+        self.fragments.len()
+    }
+}
 
 // ──── Association Status (from binary READSTAT) ───────────────────────
 
@@ -89,15 +240,73 @@ impl AssociationStatus {
 
     pub fn tally_char(&self) -> char {
         match self.selection {
-            6 => '*', // sys.peer
-            5 => '#', // backup
-            4 => '+', // candidate
-            3 => '-', // outlier
-            2 => 'x', // overflow discard
-            1 => 'x', // intersection discard
-            _ => ' ', // rejected
+            6 => '*',
+            5 => '#',
+            4 => '+',
+            3 => '-',
+            2 => 'x',
+            1 => 'x',
+            _ => ' ',
         }
     }
+}
+
+// ──── Mode 6 Variable Text Parser ────────────────────────────────────
+
+/// Parse Mode 6 key=value text with proper quote handling.
+/// Splits on `,` outside quotes; strips surrounding quotes from values.
+pub fn parse_mode6_vars(text: &str) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for ch in text.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            current.push(ch);
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            current.push(ch);
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if ch == ',' && !in_quotes {
+            // End of a variable
+            if let Some(eq) = current.find('=') {
+                let key = current[..eq].trim().to_string();
+                let mut raw_val = current[eq + 1..].trim().to_string();
+                // Strip surrounding quotes
+                if raw_val.len() >= 2 && raw_val.starts_with('"') && raw_val.ends_with('"') {
+                    raw_val = raw_val[1..raw_val.len() - 1].to_string();
+                }
+                vars.push((key, raw_val));
+            }
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+    }
+
+    // Last variable (no trailing comma)
+    if !current.is_empty() {
+        if let Some(eq) = current.find('=') {
+            let key = current[..eq].trim().to_string();
+            let mut raw_val = current[eq + 1..].trim().to_string();
+            if raw_val.len() >= 2 && raw_val.starts_with('"') && raw_val.ends_with('"') {
+                raw_val = raw_val[1..raw_val.len() - 1].to_string();
+            }
+            vars.push((key, raw_val));
+        }
+    }
+
+    vars
 }
 
 // ──── System Variables ────────────────────────────────────────────────
@@ -105,6 +314,7 @@ impl AssociationStatus {
 /// Typed system variables parsed from Mode 6 text response.
 #[derive(Debug, Clone, Default)]
 pub struct SystemVariables {
+    pub ordered_vars: Vec<(String, String)>,
     pub vars: HashMap<String, String>,
     pub associd: u16,
     pub status: u16,
@@ -112,15 +322,10 @@ pub struct SystemVariables {
 
 impl SystemVariables {
     pub fn from_text(data: &str, associd: u16, status: u16) -> Self {
-        let mut vars = HashMap::new();
-        for part in data.split(',') {
-            if let Some(eq) = part.find('=') {
-                let key = part[..eq].trim().to_string();
-                let val = part[eq + 1..].trim().to_string();
-                vars.insert(key, val);
-            }
-        }
+        let ordered_vars = parse_mode6_vars(data);
+        let vars: HashMap<String, String> = ordered_vars.iter().cloned().collect();
         Self {
+            ordered_vars,
             vars,
             associd,
             status,
@@ -146,6 +351,25 @@ impl SystemVariables {
             _ => "leap_unknown",
         }
     }
+
+    /// Status description matching ntpq output (e.g. "leap_none, sync_ntp").
+    pub fn status_description(&self) -> String {
+        let leap_desc = match self.get("leap") {
+            Some("00") => "leap_none",
+            Some("01") => "leap_add_sec",
+            Some("10") => "leap_del_sec",
+            Some("11") => "leap_alarm",
+            _ => "leap_unknown",
+        };
+        let sync_desc = match self.get("sync") {
+            Some("0") | Some("none") => "sync_unspec",
+            Some("1") | Some("lcl") => "sync_lcl",
+            Some("2") | Some("pps") => "sync_pps",
+            Some("3") | Some("ntp") => "sync_ntp",
+            _ => "sync_unspec",
+        };
+        format!("{leap_desc}, {sync_desc}")
+    }
 }
 
 // ──── Peer Variables ──────────────────────────────────────────────────
@@ -153,6 +377,7 @@ impl SystemVariables {
 /// Typed peer variables parsed from Mode 6 text response.
 #[derive(Debug, Clone, Default)]
 pub struct PeerVariables {
+    pub ordered_vars: Vec<(String, String)>,
     pub vars: HashMap<String, String>,
     pub associd: u16,
     pub status: u16,
@@ -160,15 +385,10 @@ pub struct PeerVariables {
 
 impl PeerVariables {
     pub fn from_text(data: &str, associd: u16, status: u16) -> Self {
-        let mut vars = HashMap::new();
-        for part in data.split(',') {
-            if let Some(eq) = part.find('=') {
-                let key = part[..eq].trim().to_string();
-                let val = part[eq + 1..].trim().to_string();
-                vars.insert(key, val);
-            }
-        }
+        let ordered_vars = parse_mode6_vars(data);
+        let vars: HashMap<String, String> = ordered_vars.iter().cloned().collect();
         Self {
+            ordered_vars,
             vars,
             associd,
             status,
@@ -188,12 +408,12 @@ impl PeerVariables {
 
 // ──── Control Client ──────────────────────────────────────────────────
 
-/// Mode 6 control protocol client.
+/// Mode 6 control protocol client with connected UDP, DNS resolution,
+/// fragment reassembly, and response validation.
 pub struct ControlClient {
     sequence: u16,
     timeout: Duration,
     retries: u8,
-    local_addr: std::net::SocketAddr,
 }
 
 impl ControlClient {
@@ -202,7 +422,6 @@ impl ControlClient {
             sequence: 0,
             timeout: Duration::from_secs(timeout_secs as u64),
             retries,
-            local_addr: "0.0.0.0:0".parse().unwrap(),
         }
     }
 
@@ -212,22 +431,54 @@ impl ControlClient {
         seq
     }
 
-    /// Send a Mode 6 request and collect the complete response (with fragment reassembly).
+    /// Resolve hostname to a SocketAddr, trying IPv4 first, then IPv6.
+    fn resolve(host: &str, port: u16) -> Result<SocketAddr, QueryError> {
+        // First try parsing as a numeric IP
+        if let Ok(addr) = format!("{host}:{port}").parse::<SocketAddr>() {
+            return Ok(addr);
+        }
+
+        // Try DNS resolution
+        let addrs: Vec<SocketAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|e| QueryError::Network(format!("DNS resolution failed for '{host}': {e}")))?
+            .collect();
+
+        // Prefer IPv4, fall back to IPv6
+        for addr in &addrs {
+            if addr.is_ipv4() {
+                return Ok(*addr);
+            }
+        }
+        addrs
+            .into_iter()
+            .next()
+            .ok_or_else(|| QueryError::Network(format!("no addresses found for '{host}'")))
+    }
+
+    /// Send a Mode 6 request using connected UDP and collect fragments.
     pub fn query(
         &mut self,
         host: &str,
         port: u16,
         msg: ControlMessage,
     ) -> Result<(Vec<u8>, u16, u16), QueryError> {
-        let addr: std::net::SocketAddr = format!("{host}:{port}")
-            .parse()
-            .map_err(|e| QueryError::Network(format!("addr: {e}")))?;
+        let addr = Self::resolve(host, port)?;
 
-        let socket = std::net::UdpSocket::bind(self.local_addr)
-            .map_err(|e| QueryError::Network(format!("bind: {e}")))?;
+        // Create and connect a UDP socket matching the address family
+        let local = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket =
+            UdpSocket::bind(local).map_err(|e| QueryError::Network(format!("bind: {e}")))?;
         socket
             .set_read_timeout(Some(self.timeout))
-            .map_err(|e| QueryError::Network(format!("timeout: {e}")))?;
+            .map_err(|e| QueryError::Network(format!("set timeout: {e}")))?;
+        socket
+            .connect(addr)
+            .map_err(|e| QueryError::Network(format!("connect: {e}")))?;
 
         let seq = self.next_sequence();
         let req = ControlMessage {
@@ -245,6 +496,7 @@ impl ControlClient {
         };
 
         let request_bytes = req.encode();
+        let expected_op = ControlOpcode::from_u8(msg.opcode).op;
 
         for attempt in 0..=self.retries {
             if attempt > 0 {
@@ -252,95 +504,105 @@ impl ControlClient {
             }
 
             socket
-                .send_to(&request_bytes, addr)
+                .send(&request_bytes)
                 .map_err(|e| QueryError::Network(format!("send: {e}")))?;
 
-            // Collect fragments
-            let mut fragments: Vec<(u16, u16, Vec<u8>)> = Vec::new();
-            let mut max_offset = 0u16;
-            // Save the first fragment header bytes for status/associd extraction
-            let mut first_hdr_saved: Option<[u8; 12]> = None;
+            // Collect fragments using the pure collector
+            let mut collector = FragmentCollector::new();
 
             loop {
                 let mut buf = vec![0u8; 512];
-                match socket.recv_from(&mut buf) {
-                    Ok((n, _src)) => {
-                        let resp_data = &buf[..n];
-                        let (resp, after_header) = ControlMessage::decode(resp_data)
+                match socket.recv(&mut buf) {
+                    Ok(n) => {
+                        let raw = &buf[..n];
+                        let (resp, after_header) = ControlMessage::decode(raw)
                             .ok_or_else(|| QueryError::BadResponse("short header".to_string()))?;
 
-                        // Save first header for status/associd
-                        if first_hdr_saved.is_none() && n >= 12 {
-                            let mut hdr = [0u8; 12];
-                            hdr.copy_from_slice(&buf[..12]);
-                            first_hdr_saved = Some(hdr);
-                        }
-
-                        // Verify this is a response to our request
+                        // === Response validation ===
+                        // 1. Sequence must match
                         if resp.sequence != seq {
                             continue;
                         }
-
                         let oc = resp.decode_opcode();
+                        // 2. Must be a response
                         if !oc.response {
                             continue;
                         }
+                        // 3. Source validated by connected socket
+                        // 4. Opcode must match request
+                        if oc.op != expected_op {
+                            continue;
+                        }
+                        // 5. Association ID must match (can be 0 for system)
+                        if resp.associd != msg.associd {
+                            continue;
+                        }
+                        // 6. Mode must be Mode 6 (NtpControl)
+                        if resp.mode() != NtpMode::NtpControl {
+                            continue;
+                        }
 
+                        // Handle error responses
                         if oc.error {
                             let err_code = (resp.status >> 8) as u8;
-                            let msg = format!("error code {}", err_code);
-                            // Map known errors
-                            if err_code == 1 {
-                                return Err(QueryError::AuthFailure);
-                            }
-                            if err_code == 4 {
-                                return Err(QueryError::NotFound);
-                            }
-                            return Err(QueryError::ProtocolError(msg));
+                            return match err_code {
+                                1 => Err(QueryError::AuthFailure),
+                                2 => Err(QueryError::ProtocolError("access denied".to_string())),
+                                3 => Err(QueryError::ProtocolError("format error".to_string())),
+                                4 => Err(QueryError::NotFound),
+                                5 => Err(QueryError::Timeout),
+                                _ => {
+                                    Err(QueryError::ProtocolError(format!("error code {err_code}")))
+                                }
+                            };
                         }
 
-                        let payload_end = resp.offset as usize + resp.count as usize;
-                        if payload_end > after_header.len() {
+                        // Add fragment to collector (uses offset/count from the header,
+                        // but the bytes start at 0 in after_header since each fragment
+                        // is self-contained)
+                        let count = resp.count as usize;
+                        let data = if count <= after_header.len() {
+                            after_header[..count].to_vec()
+                        } else {
                             return Err(QueryError::BadResponse(
-                                "payload exceeds data".to_string(),
+                                "fragment count exceeds datagram".to_string(),
                             ));
-                        }
-                        let payload = after_header[resp.offset as usize..payload_end].to_vec();
+                        };
 
-                        fragments.push((resp.offset, resp.count, payload));
+                        let complete = collector.add_fragment(
+                            resp.offset,
+                            resp.count,
+                            &data,
+                            !oc.more,
+                            resp.status,
+                            resp.associd,
+                        )?;
 
-                        if resp.offset + resp.count > max_offset {
-                            max_offset = resp.offset + resp.count;
-                        }
-
-                        if !oc.more {
-                            break; // Last fragment
+                        if complete {
+                            let assembled = collector.assemble()?;
+                            return Ok((
+                                assembled,
+                                collector.status.unwrap_or(0),
+                                collector.associd.unwrap_or(0),
+                            ));
                         }
                     }
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock
                             || e.kind() == std::io::ErrorKind::TimedOut
                         {
-                            if attempt < self.retries {
-                                break; // Retry
+                            if attempt < self.retries && collector.fragment_count() == 0 {
+                                break; // Retry from scratch
+                            }
+                            if collector.fragment_count() > 0 {
+                                // Partial collection with timeout = incomplete
+                                return Err(QueryError::BadResponse(
+                                    "incomplete fragment collection".to_string(),
+                                ));
                             }
                             return Err(QueryError::Timeout);
                         }
                         return Err(QueryError::Network(e.to_string()));
-                    }
-                }
-            }
-
-            if !fragments.is_empty() {
-                fragments.sort_by_key(|(offset, _, _)| *offset);
-                let mut assembled = Vec::with_capacity(max_offset as usize);
-                for (_, _, data) in &fragments {
-                    assembled.extend_from_slice(data);
-                }
-                // Status and associd from the first fragment header
-                if let Some(hdr_bytes) = first_hdr_saved {
-                    if let Some((first_hdr, _)) = ControlMessage::decode(&hdr_bytes) {
-                        return Ok((assembled, first_hdr.status, first_hdr.associd));
                     }
                 }
             }
@@ -410,7 +672,63 @@ impl ControlClient {
     }
 }
 
-// ──── Renderer ─────────────────────────────────────────────────────────
+// ──── Peer Row Model ──────────────────────────────────────────────────
+
+/// A single peer row for the peers billboard.
+#[derive(Debug, Clone)]
+pub struct PeerRow {
+    pub tally: char,
+    pub remote: String,
+    pub refid: String,
+    pub associd: u16,
+    pub stratum: u8,
+    pub peer_type: char,
+    pub when: Option<u64>,
+    pub poll: u64,
+    pub reach: u8,
+    pub delay: f64,
+    pub offset: f64,
+    pub jitter: f64,
+}
+
+impl PeerRow {
+    pub fn from_association(pv: &PeerVariables, assoc: &AssociationStatus) -> Self {
+        let tally = assoc.tally_char();
+        let remote = pv.get("srcaddr").unwrap_or("unknown").to_string();
+        let refid = pv.get("refid").unwrap_or("").to_string();
+        let stratum = pv.stratum();
+        let delay = pv.get("delay").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let offset = pv.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let jitter = pv.get("jitter").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let poll = pv
+            .get("hpoll")
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|p| 1u64 << p as u64)
+            .unwrap_or(64);
+        let reach = pv
+            .get("reach")
+            .and_then(|s| u8::from_str_radix(s, 16).ok())
+            .unwrap_or(0);
+        let when = None; // ntpq computes this client-side from last receive time
+
+        Self {
+            tally,
+            remote,
+            refid,
+            associd: assoc.associd,
+            stratum,
+            peer_type: if assoc.broadcast { 'b' } else { 'u' },
+            when,
+            poll,
+            reach,
+            delay,
+            offset,
+            jitter,
+        }
+    }
+}
+
+// ──── Renderers ───────────────────────────────────────────────────────
 
 /// Render system variables in ntpq-compatible format.
 pub fn format_readvar(sys: &SystemVariables) -> String {
@@ -419,12 +737,11 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         "associd={} status={:04x} {},\n",
         sys.associd,
         sys.status,
-        sys.leap_str()
+        sys.status_description(),
     ));
-    if let Some(ver) = sys.get("version") {
-        out.push_str(&format!("version=\"{}\",\n", ver));
-    }
-    for key in [
+    // Output in the order: version, processor, system, then the rest
+    let preferred_order = [
+        "version",
         "processor",
         "system",
         "leap",
@@ -440,18 +757,25 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         "frequency",
         "sys_jitter",
         "rootdist",
-    ] {
+    ];
+    for key in &preferred_order {
         if let Some(val) = sys.get(key) {
-            out.push_str(&format!("{}={},\n", key, val));
+            // Quote string values
+            if matches!(*key, "version" | "processor" | "system" | "refid") {
+                out.push_str(&format!("{}=\"{}\", ", key, val));
+            } else {
+                out.push_str(&format!("{}={}, ", key, val));
+            }
         }
     }
+    out.push('\n');
     out
 }
 
 /// Render associations table in ntpq-compatible format.
 pub fn format_associations(assocs: &[AssociationStatus]) -> String {
     let mut out = String::new();
-    out.push_str("\nind assid status  conf reach auth condition  last_event cnt\n");
+    out.push_str("ind assid status  conf reach auth condition  last_event cnt\n");
     out.push_str("===========================================================\n");
     for (i, assoc) in assocs.iter().enumerate() {
         let conf = if assoc.configured { "yes" } else { "no" };
@@ -473,7 +797,7 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
             _ => "rejected",
         };
         out.push_str(&format!(
-            "  {} {:5} {:04x}   {:3}  {:4}  {:4}  {:11}  {}  {}\n",
+            "  {} {:5} {:04x}   {:3}  {:4}  {:4}  {:11}\n",
             i + 1,
             assoc.associd,
             assoc.status,
@@ -481,16 +805,13 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
             reach,
             auth,
             cond,
-            "",
-            "",
         ));
     }
     out
 }
 
 /// Render peers billboard in ntpq-compatible format.
-pub fn format_peers(vars: &[(char, String, String, u8, f64, f64, f64)]) -> String {
-    // Each entry: (tally, remote, refid, stratum, delay, offset, jitter)
+pub fn format_peers(rows: &[PeerRow]) -> String {
     let mut out = String::new();
     out.push_str(
         "     remote           refid      st t when poll reach   delay   offset  jitter\n",
@@ -498,80 +819,197 @@ pub fn format_peers(vars: &[(char, String, String, u8, f64, f64, f64)]) -> Strin
     out.push_str(
         "==============================================================================\n",
     );
-    for (tally, remote, refid, stratum, delay, offset, jitter) in vars {
+    for row in rows {
+        let when_str = match row.when {
+            Some(s) if s < 1000 => format!("{}", s),
+            Some(s) if s < 3600 => format!("{}m", s / 60),
+            Some(s) => format!("{}h", s / 3600),
+            None => "-".to_string(),
+        };
+        let reach_str = format!("{:o}", row.reach); // Octal display
         out.push_str(&format!(
-            " {}{:16} {:12} {:2} u    -   64    1 {:7.3} {:8.3} {:7.3}\n",
-            tally, remote, refid, stratum, delay, offset, jitter,
+            " {}{:16} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            row.tally,
+            row.remote,
+            row.refid,
+            row.stratum,
+            row.peer_type,
+            when_str,
+            row.poll,
+            reach_str,
+            row.delay,
+            row.offset,
+            row.jitter,
         ));
     }
     out
 }
 
+// ──── Tests ───────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ──── Fragment Collector Courts ───────────────────────────────────
+
+    #[test]
+    fn test_fragment_single() {
+        let mut fc = FragmentCollector::new();
+        let done = fc
+            .add_fragment(0, 10, b"0123456789", false, 0x0622, 0)
+            .unwrap();
+        assert!(done);
+        let assembled = fc.assemble().unwrap();
+        assert_eq!(assembled, b"0123456789");
+    }
+
+    #[test]
+    fn test_fragment_two_parts_in_order() {
+        let mut fc = FragmentCollector::new();
+        let done = fc.add_fragment(0, 5, b"01234", true, 0x0622, 0).unwrap();
+        assert!(!done);
+        let done = fc.add_fragment(5, 5, b"56789", false, 0x0622, 0).unwrap();
+        assert!(done);
+        let assembled = fc.assemble().unwrap();
+        assert_eq!(assembled, b"0123456789");
+    }
+
+    #[test]
+    fn test_fragment_out_of_order() {
+        let mut fc = FragmentCollector::new();
+        let _ = fc.add_fragment(5, 5, b"56789", false, 0x0622, 0).unwrap();
+        assert!(!fc.is_complete());
+        let _ = fc.add_fragment(0, 5, b"01234", true, 0x0622, 0).unwrap();
+        assert!(fc.is_complete());
+        let assembled = fc.assemble().unwrap();
+        assert_eq!(assembled, b"0123456789");
+    }
+
+    #[test]
+    fn test_fragment_hole_detected() {
+        let mut fc = FragmentCollector::new();
+        let _ = fc.add_fragment(0, 5, b"01234", true, 0x0622, 0).unwrap();
+        let _ = fc.add_fragment(10, 5, b"56789", false, 0x0622, 0).unwrap();
+        assert!(!fc.is_complete()); // Hole at 5-10
+    }
+
+    #[test]
+    fn test_fragment_overlap_consistent() {
+        let mut fc = FragmentCollector::new();
+        let _ = fc.add_fragment(0, 6, b"012345", true, 0x0622, 0).unwrap();
+        // Overlapping consistent data
+        let r = fc.add_fragment(3, 6, b"345678", false, 0x0622, 0);
+        assert!(r.is_ok());
+        assert!(fc.is_complete());
+    }
+
+    #[test]
+    fn test_fragment_overlap_conflict() {
+        let mut fc = FragmentCollector::new();
+        let _ = fc.add_fragment(0, 5, b"01234", true, 0x0622, 0).unwrap();
+        // Overlapping INCONSISTENT data
+        let r = fc.add_fragment(2, 5, b"XXXXX", false, 0x0622, 0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_fragment_inconsistent_final_end() {
+        let mut fc = FragmentCollector::new();
+        let _ = fc.add_fragment(0, 5, b"01234", true, 0x0622, 0).unwrap();
+        // Second fragment claims more=false with different extent
+        let r = fc.add_fragment(5, 10, b"5678901234", true, 0x0622, 0);
+        assert!(r.is_ok()); // more=true doesn't set final_end
+                            // Now a third fragment with more=false at a different extent
+        let r = fc.add_fragment(5, 10, b"5678901234", false, 0x0622, 0);
+        assert!(r.is_err()); // Inconsistent final_end
+    }
+
+    #[test]
+    fn test_fragment_empty_response() {
+        let mut fc = FragmentCollector::new();
+        let done = fc.add_fragment(0, 0, b"", false, 0x0622, 0).unwrap();
+        assert!(done);
+        let assembled = fc.assemble().unwrap();
+        assert!(assembled.is_empty());
+    }
+
+    #[test]
+    fn test_fragment_three_parts() {
+        let mut fc = FragmentCollector::new();
+        let _ = fc.add_fragment(0, 3, b"012", true, 0x0622, 0).unwrap();
+        let _ = fc.add_fragment(3, 3, b"345", true, 0x0622, 0).unwrap();
+        let done = fc.add_fragment(6, 4, b"6789", false, 0x0622, 0).unwrap();
+        assert!(done);
+        assert_eq!(fc.assemble().unwrap(), b"0123456789");
+    }
+
+    // ──── Association Status Courts ───────────────────────────────────
+
     #[test]
     fn test_readstat_bytes_parsing() {
-        // Binary READSTAT response: 2 associations
         let data = vec![
-            0x00, 0x01, // associd=1
-            0x96, 0x14, // status = configured | reachable | sys.peer = 0x9614
-            0x00, 0x02, // associd=2
-            0x80, 0x10, // status = configured | reachable = 0x8010
+            0x00, 0x01, 0x96,
+            0x14, // associd=1, status=0x9614 (configured|reachable|sys.peer)
+            0x00, 0x02, 0x80, 0x10, // associd=2, status=0x8010 (configured|reachable)
         ];
         let assocs = AssociationStatus::from_bytes(&data).unwrap();
         assert_eq!(assocs.len(), 2);
         assert_eq!(assocs[0].associd, 1);
         assert!(assocs[0].configured);
         assert!(assocs[0].reachable);
-        assert_eq!(assocs[0].selection, 6); // sys.peer
+        assert_eq!(assocs[0].selection, 6);
         assert_eq!(assocs[0].tally_char(), '*');
-        assert_eq!(assocs[1].selection, 0); // rejected (no reachable bit in low bits)
+        assert_eq!(assocs[1].selection, 0);
         assert_eq!(assocs[1].tally_char(), ' ');
     }
 
     #[test]
+    fn test_wrong_length_rejected() {
+        assert!(AssociationStatus::from_bytes(&[0u8; 5]).is_err());
+    }
+
+    // ──── Variable Parser Courts ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_mode6_vars_simple() {
+        let vars = parse_mode6_vars("stratum=2,offset=0.005,leap=00");
+        assert_eq!(vars.len(), 3);
+        assert_eq!(vars[0], ("stratum".to_string(), "2".to_string()));
+        assert_eq!(vars[1], ("offset".to_string(), "0.005".to_string()));
+    }
+
+    #[test]
+    fn test_parse_mode6_vars_quoted() {
+        let vars = parse_mode6_vars(r#"version="ntpd 4.2.8",stratum=2"#);
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].0, "version");
+        // Quotes should be stripped
+        assert_eq!(vars[0].1, "ntpd 4.2.8");
+        assert_eq!(vars[1], ("stratum".to_string(), "2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_mode6_vars_quoted_comma() {
+        let vars = parse_mode6_vars(r#"name="a,b",value=42"#);
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].1, "a,b"); // Comma inside quotes preserved
+        assert_eq!(vars[1], ("value".to_string(), "42".to_string()));
+    }
+
+    // ──── System Variables Courts ─────────────────────────────────────
+
+    #[test]
     fn test_system_variables_parsing() {
-        let text = "version=\"ntpd 4.2.8\",stratum=2,offset=0.005,leap=00";
+        let text = r#"version="ntpd 4.2.8",stratum=2,offset=0.005,leap=00"#;
         let sv = SystemVariables::from_text(text, 0, 0x0622);
-        assert_eq!(sv.get("version"), Some("\"ntpd 4.2.8\""));
+        assert_eq!(sv.get("version"), Some("ntpd 4.2.8"));
         assert_eq!(sv.get("stratum"), Some("2"));
-        assert_eq!(sv.get("offset"), Some("0.005"));
         assert_eq!(sv.stratum(), 2);
         assert_eq!(sv.leap_str(), "leap_none");
     }
 
-    #[test]
-    fn test_peers_format() {
-        let rows = vec![
-            (
-                '*',
-                "127.0.0.1".to_string(),
-                ".LOCL.".to_string(),
-                1,
-                0.000,
-                0.000,
-                0.001,
-            ),
-            (
-                '+',
-                "192.168.1.1".to_string(),
-                "GPS".to_string(),
-                2,
-                1.234,
-                0.567,
-                2.345,
-            ),
-        ];
-        let out = format_peers(&rows);
-        assert!(out.contains("127.0.0.1"));
-        assert!(out.contains("*"));
-        assert!(out.contains("192.168.1.1"));
-        assert!(out.contains("+"));
-        assert!(out.contains("0.000"));
-        assert!(out.contains("1.234"));
-    }
+    // ──── Renderer Courts ─────────────────────────────────────────────
 
     #[test]
     fn test_associations_format() {
@@ -592,8 +1030,33 @@ mod tests {
     }
 
     #[test]
-    fn test_wrong_length_rejected() {
-        let data = vec![0u8; 5]; // Not a multiple of 4
-        assert!(AssociationStatus::from_bytes(&data).is_err());
+    fn test_peers_format_header() {
+        let rows = vec![PeerRow {
+            tally: '*',
+            remote: "127.0.0.1".to_string(),
+            refid: ".LOCL.".to_string(),
+            associd: 1,
+            stratum: 1,
+            peer_type: 'u',
+            when: None,
+            poll: 64,
+            reach: 0o17,
+            delay: 0.0,
+            offset: 0.0,
+            jitter: 0.001,
+        }];
+        let out = format_peers(&rows);
+        assert!(out.contains("127.0.0.1"));
+        assert!(out.contains("*.LOCL."));
+    }
+
+    #[test]
+    fn test_readvar_format() {
+        let text = r#"version="ntpd 4.2.8",stratum=2,offset=0.005"#;
+        let sv = SystemVariables::from_text(text, 0, 0x0622);
+        let out = format_readvar(&sv);
+        assert!(out.contains("associd=0"));
+        assert!(out.contains("leap_none, sync_unspec"));
+        assert!(out.contains("stratum=2"));
     }
 }
