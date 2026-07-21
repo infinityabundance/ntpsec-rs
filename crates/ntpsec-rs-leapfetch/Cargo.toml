@@ -6,6 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.8" }
+ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.9" }
 clap = { version = "4", features = ["derive"] }
 ureq = "2"
