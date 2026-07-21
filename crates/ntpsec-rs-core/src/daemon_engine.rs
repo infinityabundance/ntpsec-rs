@@ -157,10 +157,13 @@ impl DaemonEngine {
                         if iburst {
                             peer.flags |= PeerFlags::IBURST;
                         }
+                        // Assign an immutable association ID (1-based)
+                        let associd = (self.peers.len() + 1) as u16;
+                        peer.associd = associd;
                         let peer_id = self.peers.len();
                         self.peers.add(peer);
                         // Schedule initial poll as one-shot (re-armed on transmit)
-                        self.timers.schedule_poll(peer_id, 0, 0); // interval=0 = one-shot
+                        self.timers.schedule_poll(peer_id, 0, 0);
                     }
                 }
                 ConfigOption::DriftFile(_) => {}
@@ -632,7 +635,11 @@ impl DaemonEngine {
                 let mut data = Vec::with_capacity(self.peers.len() * 4);
                 for i in 0..self.peers.len() {
                     if let Some(peer) = self.peers.get(i) {
-                        let associd = (i + 1) as u16;
+                        let associd = if peer.associd > 0 {
+                            peer.associd
+                        } else {
+                            (i + 1) as u16
+                        };
                         data.extend_from_slice(&associd.to_be_bytes());
                         let is_sys = self.system_peer_id == Some(i);
                         data.extend_from_slice(
@@ -679,27 +686,9 @@ impl DaemonEngine {
                     )
                     .into_bytes()
                 } else {
-                    // Peer variables for a specific association
-                    let idx = req.associd as usize;
-                    if idx == 0 || idx > self.peers.len() {
-                        // Invalid associd — return error
-                        let err_header = ControlMessage {
-                            li_vn_mode: req.li_vn_mode,
-                            opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
-                            sequence: req.sequence,
-                            status: 0x0400, // Error code 4 = NotFound
-                            associd: req.associd,
-                            offset: 0,
-                            count: 0,
-                        };
-                        return vec![DaemonAction::Send {
-                            destination: source,
-                            bytes: err_header.encode().to_vec(),
-                        }];
-                    }
-                    // associd is 1-based
-                    let peer_idx = idx - 1;
-                    if let Some(peer) = self.peers.get(peer_idx) {
+                    // Peer variables for a specific association (look up by associd)
+                    let peer_opt = self.peers.iter().find(|p| p.associd == req.associd);
+                    if let Some(peer) = peer_opt {
                         let mut vars: Vec<(String, String)> = Vec::new();
                         let peer_names = [
                             "srcaddr",
@@ -732,33 +721,72 @@ impl DaemonEngine {
                         )
                         .into_bytes()
                     } else {
-                        Vec::new()
+                        // Peer not found — return error
+                        let err_header = ControlMessage {
+                            li_vn_mode: req.li_vn_mode,
+                            opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
+                            sequence: req.sequence,
+                            status: 0x0400, // Error code 4 = NotFound
+                            associd: req.associd,
+                            offset: 0,
+                            count: 0,
+                        };
+                        return vec![DaemonAction::Send {
+                            destination: source,
+                            bytes: err_header.encode().to_vec(),
+                        }];
                     }
                 }
             }
 
             _ => {
-                // Unsupported opcode — return error
-                return vec![DaemonAction::Log(format!(
-                    "unsupported control opcode: {}",
-                    oc.op
-                ))];
+                // Unsupported opcode — emit proper BADOP error
+                let err_header = ControlMessage {
+                    li_vn_mode: req.li_vn_mode,
+                    opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
+                    sequence: req.sequence,
+                    status: 0x0300, // Error code 3 = Format error / BADOP
+                    associd: req.associd,
+                    offset: 0,
+                    count: 0,
+                };
+                return vec![DaemonAction::Send {
+                    destination: source,
+                    bytes: err_header.encode().to_vec(),
+                }];
             }
         };
 
-        // Build the response status word
-        let li = match self.system.leap {
-            LeapIndicator::NoWarning => 0,
-            LeapIndicator::AddLeapSecond => 1,
-            LeapIndicator::RemoveLeapSecond => 2,
-            LeapIndicator::Alarm => 3,
-        };
-        let clock_source = if self.system.stratum < NTP_MAXSTRAT {
-            6 // CS_SYNC_NTP (RFC 9327: 6 = NTP)
+        // Build the response status word.
+        // For associd != 0 READVAR, use peer status; otherwise system status.
+        let status = if oc.op == opcodes::OP_READVAR && req.associd != 0 {
+            // Look up the peer for its status
+            if let Some(peer) = self.peers.iter().find(|p| p.associd == req.associd) {
+                let is_sys = Some(peer.associd as usize - 1) == self.system_peer_id
+                    || self.system_peer_id.map_or(false, |sp| {
+                        self.peers
+                            .get(sp)
+                            .map_or(false, |sp_peer| sp_peer.associd == peer.associd)
+                    });
+                peer_status(peer, is_sys)
+            } else {
+                // Peer not found — this shouldn't happen since we validated above
+                sys_status::make(3, 0, 0, 4) // Alarm, unsync, bad assoc
+            }
         } else {
-            0 // CS_SYNC_NONE
+            let li = match self.system.leap {
+                LeapIndicator::NoWarning => 0,
+                LeapIndicator::AddLeapSecond => 1,
+                LeapIndicator::RemoveLeapSecond => 2,
+                LeapIndicator::Alarm => 3,
+            };
+            let clock_source = if self.system.stratum < NTP_MAXSTRAT {
+                6
+            } else {
+                0
+            };
+            sys_status::make(li, clock_source, 0, 0)
         };
-        let status = sys_status::make(li, clock_source, 0, 0);
 
         // No MAC on responses (per NTPsec behavior for ordinary control requests)
         let response = ControlExchange::build_response(req, &resp_data, req.sequence, status, None);

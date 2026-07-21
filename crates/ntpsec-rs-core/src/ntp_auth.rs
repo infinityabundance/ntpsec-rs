@@ -238,16 +238,19 @@ impl AuthKeyStore {
             .map_err(|_| format!("invalid key ID '{}'", parts[0]))?;
         let digest = DigestType::from_str(parts[1])
             .ok_or_else(|| format!("unknown digest type '{}'", parts[1]))?;
-        let key_data = parts[2].as_bytes().to_vec();
+        // NTPsec rule (authreadkeys.c):
+        //   ≤ 20 characters → printable ASCII key (used as-is)
+        //   > 20 characters → hex-encoded binary key (decoded)
+        let key_data = if parts[2].len() > 20
+            && parts[2].chars().all(|c| c.is_ascii_hexdigit())
+            && parts[2].len() % 2 == 0
+        {
+            hex_decode(parts[2]).unwrap_or_else(|_| parts[2].as_bytes().to_vec())
+        } else {
+            parts[2].as_bytes().to_vec()
+        };
 
         let mut key = NtpAuthKey::new(id, digest, key_data);
-        // Store as hex or ASCII depending on ntpsec convention
-        // If the key data looks like hex (all hex chars), decode it.
-        if parts[2].chars().all(|c| c.is_ascii_hexdigit()) && parts[2].len() % 2 == 0 {
-            if let Ok(decoded) = hex_decode(parts[2]) {
-                key = NtpAuthKey::new(id, digest, decoded);
-            }
-        }
 
         self.add_key(key);
 

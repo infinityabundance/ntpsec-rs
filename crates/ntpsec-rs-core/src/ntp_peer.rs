@@ -49,6 +49,8 @@ pub struct Peer {
 
     pub keyid: u32,
     pub flags: PeerFlags,
+    /// Stable association ID (1-based, immutable after creation).
+    pub associd: u16,
 }
 
 bitflags::bitflags! {
@@ -118,6 +120,7 @@ impl Peer {
             },
             keyid: 0,
             flags: PeerFlags::NONE,
+            associd: 0,
         }
     }
 
