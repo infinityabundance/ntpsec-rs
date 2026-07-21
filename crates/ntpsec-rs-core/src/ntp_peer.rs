@@ -64,6 +64,7 @@ bitflags::bitflags! {
         const XLEAVE     = 1 << 5;  // interleaved mode
         const NOSYNC     = 1 << 6;  // not synchronized
         const PROBE      = 1 << 7;  // probe (manycast)
+        const CONFIGURED  = 1 << 8;  // configured via config file, not ephemeral
     }
 }
 

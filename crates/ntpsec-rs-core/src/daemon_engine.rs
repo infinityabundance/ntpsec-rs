@@ -149,6 +149,7 @@ impl DaemonEngine {
 
                     if let Some(sa) = srcaddr {
                         let mut peer = Peer::new(sa, mode, NtpVersion::V4, minpoll, maxpoll);
+                        peer.flags |= PeerFlags::CONFIGURED;
                         if iburst {
                             peer.flags |= PeerFlags::IBURST;
                         }
@@ -560,7 +561,6 @@ impl DaemonEngine {
     fn handle_control(&mut self, bytes: &[u8], source: NetAddr) -> Vec<DaemonAction> {
         use crate::ntp_control::*;
 
-        // Parse the control message
         let exchange = match ControlExchange::parse(bytes) {
             Ok((ex, _)) => ex,
             Err(e) => {
@@ -571,47 +571,48 @@ impl DaemonEngine {
         let req = &exchange.request;
         let oc = req.decode_opcode();
 
-        // Verify authentication if required
-        let auth_key = if self.auth.get_control_key().is_some() {
-            if !exchange.verify_mac(&self.auth) {
-                // Authentication required but missing or invalid
-                let err_resp = ControlExchange::build_response(
-                    req,
-                    b"Authentication failure",
-                    req.sequence,
-                    sys_status::make(3, 0, 0, 0),
-                    None,
-                );
-                return vec![DaemonAction::Send {
-                    destination: source,
-                    bytes: err_resp,
-                }];
-            }
-            exchange.auth_keyid.and_then(|k| self.auth.get_key(k))
-        } else {
-            None
-        };
-
-        // Check opcode-specific authentication requirements
+        // Determine which opcodes require authentication.
         // NTPsec: READSTAT, READVAR, READCLOCK, READ_MRU do not require auth;
         // WRITEVAR, CONFIGURE, READ_ORDLIST_A do.
         let requires_auth = matches!(
             oc.op,
             opcodes::OP_WRITEVAR | opcodes::OP_CONFIGURE | opcodes::OP_READ_ORDLIST_A
         );
-        if requires_auth && auth_key.is_none() && self.auth.get_control_key().is_some() {
-            let err_resp = ControlExchange::build_response(
-                req,
-                b"Authentication required",
-                req.sequence,
-                sys_status::make(self.system.leap as u16, 3, 0, 2), // source=NTP, event=2=Auth
-                None,
-            );
+
+        // Check authentication if a control key is configured.
+        // The key ID used MUST match the configured control key.
+        let configured_ckey = self.auth.get_control_key();
+        let auth_valid = configured_ckey.map_or(false, |ckey| {
+            // Verify key ID matches the configured control key
+            exchange.auth_keyid == Some(ckey)
+                // Verify the configured key exists in the store
+                && self.auth.get_key(ckey).is_some()
+                // Verify the MAC
+                && exchange.verify_mac(&self.auth)
+        });
+
+        // If auth is required and not valid, return error.
+        if requires_auth && !auth_valid {
+            // Build a proper control error response (error bit set, error code 1 = Auth)
+            let err_header = ControlMessage {
+                li_vn_mode: req.li_vn_mode,
+                opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
+                sequence: req.sequence,
+                status: 0x0001, // Error code 1 = authentication failure
+                associd: req.associd,
+                offset: 0,
+                count: 0,
+            };
             return vec![DaemonAction::Send {
                 destination: source,
-                bytes: err_resp,
+                bytes: err_header.encode().to_vec(),
             }];
         }
+
+        // For non-required ops, auth is optional but still verified if present.
+        // NTPsec does not authenticate responses for ordinary READVAR/READSTAT.
+        // We always pass None for auth_key to build_response (no MAC on responses).
+        let _auth_valid = auth_valid;
 
         // Build the response data based on opcode
         let resp_data = match oc.op {
@@ -713,14 +714,14 @@ impl DaemonEngine {
             LeapIndicator::Alarm => 3,
         };
         let clock_source = if self.system.stratum < NTP_MAXSTRAT {
-            3 // CS_SYNC_NTP
+            6 // CS_SYNC_NTP (RFC 9327: 6 = NTP)
         } else {
             0 // CS_SYNC_NONE
         };
         let status = sys_status::make(li, clock_source, 0, 0);
 
-        let response =
-            ControlExchange::build_response(req, &resp_data, req.sequence, status, auth_key);
+        // No MAC on responses (per NTPsec behavior for ordinary control requests)
+        let response = ControlExchange::build_response(req, &resp_data, req.sequence, status, None);
 
         vec![DaemonAction::Send {
             destination: source,

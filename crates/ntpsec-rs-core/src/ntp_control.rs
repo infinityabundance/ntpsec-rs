@@ -277,13 +277,16 @@ impl ControlExchange {
 
         let payload = after_header[payload_start..payload_end].to_vec();
 
-        // Mode 6 padding: payload is padded to 32-bit boundary.
-        // The padding bytes follow the count bytes and are NOT included in count.
-        let header_data_end = 12 + payload_len;
-        let padded32 = (header_data_end + 3) & !3;
-        let mac_search_start = padded32.min(after_header.len());
-
-        let remaining = &after_header[mac_search_start..];
+        // Mode 6 padding: payload is padded to an 8-octet boundary before the MAC.
+        // `after_header` starts at byte 12 (already past the header).
+        // The data from offset=0 for count bytes is the real payload.
+        // Authenticator (key ID + MAC) starts at `align_up(payload_len, 8)` within after_header.
+        let auth_offset = (payload_len + 7) & !7;
+        let remaining = if auth_offset <= after_header.len() {
+            &after_header[auth_offset..]
+        } else {
+            &[]
+        };
 
         let mut auth_keyid = None;
         let mut auth_data = Vec::new();
@@ -442,16 +445,43 @@ fn format_refid(refid: u32) -> String {
     }
 }
 
-/// Format the peer status word (matching ntpsec's `peer_status()`).
+/// Format the peer status word for Mode 6 READSTAT responses.
+/// Matching NTPsec's peer_status() and RFC 9327 §5.2.
+///
+/// High byte:
+///   Bit 7: configured
+///   Bit 6: authentication enabled
+///   Bit 5: authentication okay
+///   Bit 4: reachable
+///   Bit 3: broadcast
+///   Bits 2-0: selection state (6 = sys.peer, 0 = rejected)
 pub fn peer_status(peer: &super::ntp_peer::Peer) -> u16 {
-    let mut status: u16 = 0;
-    // Count of reachability bits
-    let reach = peer.reach.register();
-    if reach != 0 {
-        status |= (reach.trailing_zeros() as u16).min(0x0F);
+    let mut flags: u8 = 0;
+
+    // All peers loaded from config are configured
+    flags |= 0x80;
+
+    if peer.flags.contains(super::ntp_peer::PeerFlags::AUTHENABLE) {
+        flags |= 0x40;
     }
-    status |= (peer.flash as u16 & 0x03FF) << 4;
-    status
+    if peer.flags.contains(super::ntp_peer::PeerFlags::AUTHENTIC) {
+        flags |= 0x20;
+    }
+    if peer.reach.is_reachable() {
+        flags |= 0x10;
+    }
+    if peer.hmode == super::ntp_types::NtpMode::Broadcast {
+        flags |= 0x08;
+    }
+
+    // Selection state from flash bits (simplified: sys.peer=6 if reachable, else 0)
+    if peer.flash == 0 && peer.reach.is_reachable() {
+        flags |= 6; // sys.peer
+    }
+
+    // Low byte: event count (bits 7-4) and event code (bits 3-0)
+    // For now, use 0 for both since we don't track events
+    ((flags as u16) << 8) | 0x0000
 }
 
 /// Encode a list of variables in key=value format (matching ntpq output).
