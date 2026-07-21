@@ -70,51 +70,7 @@ fn main() {
                 } else {
                     client
                         .read_peer_vars(&cli.host, cli.port, associd)
-                        .map(|pv| {
-                            let mut out = String::new();
-                            out.push_str(&format!(
-                                "associd={} status={:04x} 1 event, {},\n",
-                                associd,
-                                pv.status,
-                                pv.get("srcaddr").unwrap_or("unknown"),
-                            ));
-                            // Also show peer status header
-                            let sel = pv
-                                .get("srcaddr")
-                                .map(|s| {
-                                    format!(
-                                        "associd={} status={:04x} 1 event, {}\n",
-                                        associd, pv.status, s
-                                    )
-                                })
-                                .unwrap_or_default();
-                            let mut out = sel;
-                            let keys = [
-                                "srcaddr",
-                                "stratum",
-                                "offset",
-                                "delay",
-                                "dispersion",
-                                "jitter",
-                                "hpoll",
-                                "ppoll",
-                                "reach",
-                                "flash",
-                                "leap",
-                                "refid",
-                                "reftime",
-                                "hmode",
-                                "pmode",
-                                "precision",
-                            ];
-                            for key in &keys {
-                                if let Some(val) = pv.get(key) {
-                                    out.push_str(&format!("{}={}, ", key, val));
-                                }
-                            }
-                            out.push('\n');
-                            out
-                        })
+                        .map(|pv| format_peer_readvar(&pv))
                         .map_err(|e| format!("{e}"))
                 }
             }

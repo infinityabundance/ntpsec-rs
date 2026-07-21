@@ -73,7 +73,7 @@ impl FragmentCollector {
     }
 
     /// Add a fragment. Returns Ok(true) if the collection is complete.
-    /// Returns Err on holes, overlaps, or inconsistent headers.
+    /// Returns Err on length mismatch, overlaps, holes, or inconsistent metadata.
     pub fn add_fragment(
         &mut self,
         offset: u16,
@@ -83,30 +83,44 @@ impl FragmentCollector {
         status: u16,
         associd: u16,
     ) -> Result<bool, QueryError> {
-        // Validate fragment data length matches count
-        if data.len() < count as usize {
-            let data_end = offset as usize + data.len();
-            if data_end > offset as usize + count as usize {
+        // Validate fragment data length matches declared count exactly
+        if data.len() != count as usize {
+            return Err(QueryError::BadResponse(format!(
+                "fragment count {} != payload length {}",
+                count,
+                data.len()
+            )));
+        }
+        let payload = data.to_vec();
+
+        // Enforce metadata consistency across all fragments
+        if let Some(existing_status) = self.status {
+            if status != existing_status {
                 return Err(QueryError::BadResponse(
-                    "fragment data exceeds declared count".to_string(),
+                    "inconsistent status across fragments".to_string(),
                 ));
             }
+        } else {
+            self.status = Some(status);
         }
-
-        // Cap data to declared count
-        let payload = data[..(count as usize).min(data.len())].to_vec();
+        if let Some(existing_associd) = self.associd {
+            if associd != existing_associd {
+                return Err(QueryError::BadResponse(
+                    "inconsistent associd across fragments".to_string(),
+                ));
+            }
+        } else {
+            self.associd = Some(associd);
+        }
 
         // Check for conflicting overlap with existing fragments
         let frag_end = offset.saturating_add(count);
         for (&existing_offset, existing_data) in &self.fragments {
             let existing_end = existing_offset.saturating_add(existing_data.len() as u16);
-            // Check if ranges overlap non-trivially
             if offset < existing_end && frag_end > existing_offset {
-                // They overlap — check for exact consistency
                 let overlap_start = offset.max(existing_offset);
                 let overlap_end = frag_end.min(existing_end);
                 if overlap_end > overlap_start {
-                    // Compare overlapping bytes
                     let existing_slice = &existing_data[(overlap_start - existing_offset) as usize
                         ..(overlap_end - existing_offset) as usize];
                     let new_slice = &payload
@@ -120,16 +134,7 @@ impl FragmentCollector {
             }
         }
 
-        // Store the fragment (or merge if offset already exists)
         self.fragments.insert(offset, payload);
-
-        // Save first fragment header metadata
-        if self.status.is_none() {
-            self.status = Some(status);
-        }
-        if self.associd.is_none() {
-            self.associd = Some(associd);
-        }
 
         // Track the final fragment extent
         if !more {
@@ -146,7 +151,6 @@ impl FragmentCollector {
             }
         }
 
-        // Check if collection is complete
         Ok(self.is_complete())
     }
 
@@ -240,13 +244,14 @@ impl AssociationStatus {
 
     pub fn tally_char(&self) -> char {
         match self.selection {
-            6 => '*',
-            5 => '#',
-            4 => '+',
-            3 => '-',
-            2 => 'x',
-            1 => 'x',
-            _ => ' ',
+            7 => 'o', // PPS peer
+            6 => '*', // system peer
+            5 => '#', // backup
+            4 => '+', // candidate
+            3 => '-', // outlier
+            2 => 'x', // excess
+            1 => 'x', // falsetick
+            _ => ' ', // rejected
         }
     }
 }
@@ -419,15 +424,20 @@ pub struct ControlClient {
 impl ControlClient {
     pub fn new(timeout_secs: u32, retries: u8) -> Self {
         Self {
-            sequence: 0,
+            sequence: 1,
             timeout: Duration::from_secs(timeout_secs as u64),
             retries,
         }
     }
 
     fn next_sequence(&mut self) -> u16 {
+        // RFC 9327: distinct nonzero sequence numbers
         let seq = self.sequence;
         self.sequence = self.sequence.wrapping_add(1);
+        // Skip zero if wrap occurs
+        if self.sequence == 0 {
+            self.sequence = 1;
+        }
         seq
     }
 
@@ -542,18 +552,25 @@ impl ControlClient {
                             continue;
                         }
 
-                        // Handle error responses
+                        // Handle error responses (RFC 9327 §5.6)
+                        // 1=Auth, 2=Format, 3=Opcode, 4=NotFound, 5=NotKnown, 6=BadValue, 7=Admin
                         if oc.error {
                             let err_code = (resp.status >> 8) as u8;
                             return match err_code {
                                 1 => Err(QueryError::AuthFailure),
-                                2 => Err(QueryError::ProtocolError("access denied".to_string())),
-                                3 => Err(QueryError::ProtocolError("format error".to_string())),
+                                2 => Err(QueryError::ProtocolError(
+                                    "invalid message format".to_string(),
+                                )),
+                                3 => Err(QueryError::NotSupported("invalid opcode".to_string())),
                                 4 => Err(QueryError::NotFound),
-                                5 => Err(QueryError::Timeout),
-                                _ => {
-                                    Err(QueryError::ProtocolError(format!("error code {err_code}")))
-                                }
+                                5 => Err(QueryError::NotSupported("unknown variable".to_string())),
+                                6 => Err(QueryError::ProtocolError(
+                                    "invalid variable value".to_string(),
+                                )),
+                                7 => Err(QueryError::ProtocolError(
+                                    "administratively prohibited".to_string(),
+                                )),
+                                _ => Err(QueryError::ProtocolError(format!("error {err_code}"))),
                             };
                         }
 
@@ -573,7 +590,7 @@ impl ControlClient {
                             resp.offset,
                             resp.count,
                             &data,
-                            !oc.more,
+                            oc.more,
                             resp.status,
                             resp.associd,
                         )?;
@@ -772,6 +789,42 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
     out
 }
 
+/// Render peer READVAR variables in ntpq-compatible format.
+pub fn format_peer_readvar(peer: &PeerVariables) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "associd={} status={:04x} 1 event, {},\n",
+        peer.associd,
+        peer.status,
+        peer.get("srcaddr").unwrap_or("unknown"),
+    ));
+    let keys = [
+        "srcaddr",
+        "stratum",
+        "offset",
+        "delay",
+        "dispersion",
+        "jitter",
+        "hpoll",
+        "ppoll",
+        "reach",
+        "flash",
+        "leap",
+        "refid",
+        "reftime",
+        "hmode",
+        "pmode",
+        "precision",
+    ];
+    for key in &keys {
+        if let Some(val) = peer.get(key) {
+            out.push_str(&format!("{}={}, ", key, val));
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// Render associations table in ntpq-compatible format.
 pub fn format_associations(assocs: &[AssociationStatus]) -> String {
     let mut out = String::new();
@@ -916,13 +969,11 @@ mod tests {
     #[test]
     fn test_fragment_inconsistent_final_end() {
         let mut fc = FragmentCollector::new();
-        let _ = fc.add_fragment(0, 5, b"01234", true, 0x0622, 0).unwrap();
-        // Second fragment claims more=false with different extent
-        let r = fc.add_fragment(5, 10, b"5678901234", true, 0x0622, 0);
-        assert!(r.is_ok()); // more=true doesn't set final_end
-                            // Now a third fragment with more=false at a different extent
+        // First fragment claims more=false at extent 5
+        let _ = fc.add_fragment(0, 5, b"01234", false, 0x0622, 0).unwrap();
+        // Second fragment also claims more=false but at extent 15 — INCONSISTENT
         let r = fc.add_fragment(5, 10, b"5678901234", false, 0x0622, 0);
-        assert!(r.is_err()); // Inconsistent final_end
+        assert!(r.is_err());
     }
 
     #[test]
@@ -1047,7 +1098,8 @@ mod tests {
         }];
         let out = format_peers(&rows);
         assert!(out.contains("127.0.0.1"));
-        assert!(out.contains("*.LOCL."));
+        assert!(out.contains("*127.0.0.1"), "tally should prefix remote");
+        assert!(out.contains(".LOCL."));
     }
 
     #[test]
