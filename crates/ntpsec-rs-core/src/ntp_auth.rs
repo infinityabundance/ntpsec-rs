@@ -61,8 +61,8 @@ impl DigestType {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "md5" => Some(DigestType::Md5),
-            "sha" | "sha1" => Some(DigestType::Sha1),
-            "aes-128-cmac" | "cmac" => Some(DigestType::Aes128Cmac),
+            "sha" | "sha1" | "sha-1" => Some(DigestType::Sha1),
+            "aes-128-cmac" | "cmac" | "aes" | "aes128cmac" => Some(DigestType::Aes128Cmac),
             _ => None,
         }
     }
@@ -236,16 +236,24 @@ impl AuthKeyStore {
         let id: KeyId = parts[0]
             .parse()
             .map_err(|_| format!("invalid key ID '{}'", parts[0]))?;
+        if id == 0 {
+            return Err("key ID 0 is not allowed".to_string());
+        }
         let digest = DigestType::from_str(parts[1])
             .ok_or_else(|| format!("unknown digest type '{}'", parts[1]))?;
         // NTPsec rule (authreadkeys.c):
         //   ≤ 20 characters → printable ASCII key (used as-is)
-        //   > 20 characters → hex-encoded binary key (decoded)
-        let key_data = if parts[2].len() > 20
-            && parts[2].chars().all(|c| c.is_ascii_hexdigit())
-            && parts[2].len() % 2 == 0
-        {
-            hex_decode(parts[2]).unwrap_or_else(|_| parts[2].as_bytes().to_vec())
+        //   > 20 characters → hex-encoded binary key (must be valid hex, or error)
+        let key_data = if parts[2].len() > 20 {
+            if parts[2].chars().all(|c| c.is_ascii_hexdigit()) && parts[2].len() % 2 == 0 {
+                hex_decode(parts[2])
+                    .map_err(|e| format!("hex decode error for '{}': {}", parts[2], e))?
+            } else {
+                return Err(format!(
+                    "key with length {} is neither valid hex nor ≤20 ASCII",
+                    parts[2].len()
+                ));
+            }
         } else {
             parts[2].as_bytes().to_vec()
         };

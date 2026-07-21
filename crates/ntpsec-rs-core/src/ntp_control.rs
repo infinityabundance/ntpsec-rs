@@ -438,6 +438,25 @@ fn format_refid(refid: u32) -> String {
     }
 }
 
+/// Selection status values per RFC 9327 §5.2.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionStatus {
+    Rejected = 0,
+    IntersectionDiscard = 1,
+    OverflowDiscard = 2,
+    ClusterDiscard = 3,
+    Candidate = 4,
+    Backup = 5,
+    SystemPeer = 6,
+    PpsPeer = 7,
+}
+
+impl SelectionStatus {
+    pub fn to_bits(self) -> u8 {
+        self as u8
+    }
+}
+
 /// Format the peer status word for Mode 6 READSTAT responses.
 /// Matching NTPsec's peer_status() and RFC 9327 §5.2.
 ///
@@ -447,8 +466,8 @@ fn format_refid(refid: u32) -> String {
 ///   Bit 5: authentication okay
 ///   Bit 4: reachable
 ///   Bit 3: broadcast
-///   Bits 2-0: selection state (6 = sys.peer, 0 = rejected)
-pub fn peer_status(peer: &super::ntp_peer::Peer, is_system_peer: bool) -> u16 {
+///   Bits 2-0: selection state per SelectionStatus
+pub fn peer_status(peer: &super::ntp_peer::Peer, selection: SelectionStatus) -> u16 {
     let mut flags: u8 = 0;
 
     if peer.flags.contains(super::ntp_peer::PeerFlags::CONFIGURED) {
@@ -467,12 +486,8 @@ pub fn peer_status(peer: &super::ntp_peer::Peer, is_system_peer: bool) -> u16 {
         flags |= 0x08;
     }
 
-    // Selection state: 6 = system peer, 3 = survivor, 0 = rejected
-    if is_system_peer {
-        flags |= 6;
-    } else if peer.reach.is_reachable() && peer.stratum < 16 {
-        flags |= 3; // survivor
-    }
+    // Bits 2-0: selection state
+    flags |= selection.to_bits() & 0x07;
 
     // Low byte: event count (bits 7-4) and event code (bits 3-0)
     ((flags as u16) << 8) | 0x0000

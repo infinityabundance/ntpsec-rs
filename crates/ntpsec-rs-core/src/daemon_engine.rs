@@ -75,8 +75,14 @@ pub struct DaemonEngine {
     /// Minimum number of sane peers for the clock to synchronize.
     pub minsane: usize,
 
-    /// Index of the system peer (the selected synchronization source), or None.
+    /// Association ID of the system peer, or None if unsynchronized.
+    pub system_peer_associd: Option<u16>,
+
+    /// Index of the system peer (legacy, use associd instead).
     pub system_peer_id: Option<usize>,
+
+    /// Monotonic counter for allocating association IDs.
+    next_associd: u16,
 
     /// Pending requests awaiting server responses.
     pending_requests: Vec<PendingRequest>,
@@ -96,7 +102,9 @@ impl DaemonEngine {
             precision: -20, // ~1 us typical
             minsane: 1,
             config: ConfigTree::new(),
+            system_peer_associd: None,
             system_peer_id: None,
+            next_associd: 1,
             pending_requests: Vec::new(),
         };
         engine.apply_config(config);
@@ -157,8 +165,9 @@ impl DaemonEngine {
                         if iburst {
                             peer.flags |= PeerFlags::IBURST;
                         }
-                        // Assign an immutable association ID (1-based)
-                        let associd = (self.peers.len() + 1) as u16;
+                        // Assign a unique monotonic association ID
+                        let associd = self.next_associd;
+                        self.next_associd = self.next_associd.wrapping_add(1).max(1);
                         peer.associd = associd;
                         let peer_id = self.peers.len();
                         self.peers.add(peer);
@@ -349,11 +358,13 @@ impl DaemonEngine {
         // Run the full selection pipeline
         let sys_peer_idx = self.system.update_from_peers(&mut peers_vec, now);
 
-        // Track system peer
+        // Track system peer by both index (legacy) and association ID
         if sys_peer_idx < self.peers.len() {
             self.system_peer_id = Some(sys_peer_idx);
+            self.system_peer_associd = self.peers.get(sys_peer_idx).map(|p| p.associd);
         } else {
             self.system_peer_id = None;
+            self.system_peer_associd = None;
         }
 
         // Write updated peer state back
@@ -641,9 +652,15 @@ impl DaemonEngine {
                             (i + 1) as u16
                         };
                         data.extend_from_slice(&associd.to_be_bytes());
-                        let is_sys = self.system_peer_id == Some(i);
+                        let sel = if self.system_peer_associd == Some(peer.associd) {
+                            crate::ntp_control::SelectionStatus::SystemPeer
+                        } else if peer.reach.is_reachable() && peer.stratum < 16 {
+                            crate::ntp_control::SelectionStatus::Candidate
+                        } else {
+                            crate::ntp_control::SelectionStatus::Rejected
+                        };
                         data.extend_from_slice(
-                            &crate::ntp_control::peer_status(peer, is_sys).to_be_bytes(),
+                            &crate::ntp_control::peer_status(peer, sel).to_be_bytes(),
                         );
                     }
                 }
@@ -762,16 +779,18 @@ impl DaemonEngine {
         let status = if oc.op == opcodes::OP_READVAR && req.associd != 0 {
             // Look up the peer for its status
             if let Some(peer) = self.peers.iter().find(|p| p.associd == req.associd) {
-                let is_sys = Some(peer.associd as usize - 1) == self.system_peer_id
-                    || self.system_peer_id.map_or(false, |sp| {
-                        self.peers
-                            .get(sp)
-                            .map_or(false, |sp_peer| sp_peer.associd == peer.associd)
-                    });
-                peer_status(peer, is_sys)
+                let sel = if self.system_peer_associd == Some(peer.associd) {
+                    crate::ntp_control::SelectionStatus::SystemPeer
+                } else if peer.reach.is_reachable() && peer.stratum < 16 {
+                    crate::ntp_control::SelectionStatus::Candidate
+                } else {
+                    crate::ntp_control::SelectionStatus::Rejected
+                };
+                use crate::ntp_control::SelectionStatus;
+                peer_status(peer, sel)
             } else {
                 // Peer not found — this shouldn't happen since we validated above
-                sys_status::make(3, 0, 0, 4) // Alarm, unsync, bad assoc
+                sys_status::make(3, 0, 0, 4)
             }
         } else {
             let li = match self.system.leap {
