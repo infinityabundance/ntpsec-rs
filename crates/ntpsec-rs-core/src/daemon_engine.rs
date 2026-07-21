@@ -288,10 +288,13 @@ impl DaemonEngine {
         }
     }
 
-    /// Allocate a unique association ID for a new peer.
-    /// Scans active IDs on wrap to guarantee uniqueness.
-    /// Takes next counter and peers table by ref to avoid borrow conflicts.
-    fn allocate_associd(next: &mut u16, peers: &PeerTable) -> Option<u16> {
+    /// Allocate a unique association ID using a predicate for used-ID checking.
+    /// Separated from the concrete PeerTable lookup so courts can test exhaustion
+    /// without constructing 65,535 peers.
+    fn allocate_associd_with<F>(next: &mut u16, mut is_used: F) -> Option<u16>
+    where
+        F: FnMut(u16) -> bool,
+    {
         for _ in 0..u16::MAX {
             let c = *next;
             let candidate = if c == 0 { 1 } else { c };
@@ -300,11 +303,19 @@ impl DaemonEngine {
             } else {
                 candidate + 1
             };
-            if !peers.iter().any(|p| p.associd == candidate) {
+            if !is_used(candidate) {
                 return Some(candidate);
             }
         }
         None
+    }
+
+    /// Allocate a unique association ID for a new peer.
+    /// Scans active IDs on wrap, delegates to the predicate-based allocator.
+    fn allocate_associd(next: &mut u16, peers: &PeerTable) -> Option<u16> {
+        Self::allocate_associd_with(next, |candidate| {
+            peers.iter().any(|p| p.associd == candidate)
+        })
     }
 
     /// Drain all due timers and return their actions.
@@ -1897,13 +1908,11 @@ mod tests {
         );
     }
 
-    /// Precision court: all 65535 IDs exhausted returns None.
+    /// Precision court: allocator skips occupied prefix.
     #[test]
-    fn test_associd_allocator_exhaustion() {
+    fn test_associd_allocator_skips_occupied_prefix() {
         let mut next: u16 = 1;
-        // Testing full exhaustion is impractical — verify the allocator skips occupied IDs
         let mut peers = PeerTable::new();
-        // Fill IDs 1..100
         for a in 1..=100u16 {
             let mut p = Peer::new(
                 unsafe { std::mem::zeroed() },
@@ -1915,9 +1924,17 @@ mod tests {
             p.associd = a;
             peers.add(p);
         }
-        // Allocator should find ID 101 (first free after 100)
         let aid = DaemonEngine::allocate_associd(&mut next, &peers);
-        assert_eq!(aid, Some(101));
+        assert_eq!(aid, Some(101), "should skip occupied 1..100");
+    }
+
+    /// Precision court: all 65535 IDs exhausted returns None.
+    /// Uses the predicate-based allocator to avoid constructing 65535 peers.
+    #[test]
+    fn test_associd_allocator_exhaustion() {
+        let mut next: u16 = 1;
+        let aid = DaemonEngine::allocate_associd_with(&mut next, |_| true);
+        assert_eq!(aid, None, "every ID used → exhaustion");
     }
 
     /// Precision court: AES-CMAC short key zero-padding matches explicit 16-byte key.
