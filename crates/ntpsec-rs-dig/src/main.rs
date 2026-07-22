@@ -14,7 +14,10 @@
 //   - ntpsec ntpclients/ntpdig.py (20K)
 // =============================================================================
 
+use std::time::Duration;
+
 use clap::Parser;
+use ntpsec_rs_core::ntpdig_proto::*;
 
 /// NTP query tool — forensic Rust reconstruction of ntpdig.
 #[derive(Parser, Debug)]
@@ -51,16 +54,56 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    println!("ntpdig-rs v{} — NTP query tool (Rust)", env!("CARGO_PKG_VERSION"));
+    println!(
+        "ntpdig-rs v{} — NTP query tool (Rust)",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("Querying {}:{}", cli.server, cli.port);
     println!();
 
-    // TODO: Phase 1 will implement the actual NTP query.
-    // For now, this is a scaffold matching ntpdig output format.
+    let mut client = NtpDigClient::new(Duration::from_secs(cli.timeout as u64), cli.samples);
 
+    let result = match client.query(&cli.server, cli.port) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // --- Main output table ---
     println!("     remote           refid      st t when poll reach   delay   offset  jitter");
     println!("==============================================================================");
-    println!("*{}         .NTP.           2 u    -   64    1    0.000    0.000   0.001", cli.server);
+    println!(
+        "*{:<15}  {:<12} {:2} u    -   64    1  {:>7.3}  {:>7.3}  {:>7.3}",
+        result.remote,
+        result.refid_string,
+        result.stratum,
+        result.delay * 1000.0,
+        result.offset * 1000.0,
+        result.dispersion * 1000.0,
+    );
     println!();
-    println!("time: 2026-07-17T12:00:00Z, clock offset: 0.000000s");
+
+    // --- Time line ---
+    println!(
+        "time: {}Z, clock offset: {:.6}s",
+        result.when, result.offset
+    );
+
+    // --- Verbose details ---
+    if cli.verbose {
+        println!();
+        println!("  Verbose details:");
+        println!("    Root delay:      {:.6} s", result.root_delay);
+        println!("    Root dispersion: {:.6} s", result.root_dispersion);
+        println!(
+            "    Precision:       2^{} ({:.6} s)",
+            result.precision,
+            2.0f64.powi(result.precision as i32)
+        );
+        println!("    Leap indicator:  {:?}", result.leap);
+        println!("    Round-trip delay: {:.6} s", result.delay);
+        println!("    Dispersion:      {:.6} s", result.dispersion);
+    }
 }

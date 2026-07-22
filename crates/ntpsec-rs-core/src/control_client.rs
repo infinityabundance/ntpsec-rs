@@ -157,6 +157,16 @@ impl FragmentCollector {
             }
         }
 
+        // Prevent shrinking an existing same-offset fragment
+        if self.fragments.contains_key(&offset) {
+            let existing_len = self.fragments.get(&offset).map(|d| d.len()).unwrap_or(0);
+            if payload.len() < existing_len {
+                return Err(QueryError::BadResponse(
+                    "retrograde fragment would shrink existing data".to_string(),
+                ));
+            }
+        }
+
         self.fragments.insert(offset, payload);
 
         // Track the final fragment extent
@@ -169,6 +179,7 @@ impl FragmentCollector {
                     ))
                 }
             };
+            // When establishing final_end, validate ALL existing fragments fit within
             match self.final_end {
                 Some(existing) => {
                     if current_end != existing {
@@ -177,7 +188,20 @@ impl FragmentCollector {
                         ));
                     }
                 }
-                None => self.final_end = Some(current_end),
+                None => {
+                    // New final_end: verify no existing fragment extends past it
+                    for (&eo, ed) in &self.fragments {
+                        let ee = eo.checked_add(ed.len() as u16).ok_or_else(|| {
+                            QueryError::BadResponse("existing fragment overflows".to_string())
+                        })?;
+                        if ee > current_end {
+                            return Err(QueryError::BadResponse(
+                                "existing fragment exceeds newly declared final extent".to_string(),
+                            ));
+                        }
+                    }
+                    self.final_end = Some(current_end);
+                }
             }
         }
 
@@ -356,6 +380,15 @@ pub struct SystemVariables {
     pub vars: HashMap<String, String>,
     pub associd: u16,
     pub status: u16,
+    /// Status word used for the display description.
+    ///
+    /// Real C ntpq issues a separate status-summary request (count=0)
+    /// whose response status word is used for the textual description
+    /// (leap/source/event), while the full READVAR response's status
+    /// word is shown as `status=XXXX`. When these differ, this field
+    /// holds the separate status word for description; `self.status`
+    /// is always the READVAR header status.
+    pub display_status: u16,
 }
 
 impl SystemVariables {
@@ -367,7 +400,14 @@ impl SystemVariables {
             vars,
             associd,
             status,
+            display_status: status,
         }
+    }
+
+    /// Set a separate display status (from a status-summary request).
+    pub fn with_display_status(mut self, display_status: u16) -> Self {
+        self.display_status = display_status;
+        self
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -381,32 +421,34 @@ impl SystemVariables {
     }
 
     pub fn leap_str(&self) -> &str {
-        match self.get("leap") {
-            Some("00") => "leap_none",
-            Some("01") => "leap_add_sec",
-            Some("10") => "leap_del_sec",
-            Some("11") => "leap_alarm",
-            _ => "leap_unknown",
-        }
+        use crate::ntp_control::sys_status;
+        sys_status::li_name(sys_status::decode_li(self.display_status))
     }
 
-    /// Status description matching ntpq output (e.g. "leap_none, sync_ntp").
+    /// Status description matching real ntpq output format.
+    ///
+    /// Uses `display_status` (which may come from a separate status-summary
+    /// request in the C ntpq) for the textual description, while `self.status`
+    /// is always the READVAR header value shown as `status=XXXX`.
     pub fn status_description(&self) -> String {
-        let leap_desc = match self.get("leap") {
-            Some("00") => "leap_none",
-            Some("01") => "leap_add_sec",
-            Some("10") => "leap_del_sec",
-            Some("11") => "leap_alarm",
-            _ => "leap_unknown",
-        };
-        let sync_desc = match self.get("sync") {
-            Some("0") | Some("none") => "sync_unspec",
-            Some("1") | Some("lcl") => "sync_lcl",
-            Some("2") | Some("pps") => "sync_pps",
-            Some("3") | Some("ntp") => "sync_ntp",
-            _ => "sync_unspec",
-        };
-        format!("{leap_desc}, {sync_desc}")
+        use crate::ntp_control::sys_status;
+        let s = self.display_status;
+        let li = sys_status::decode_li(s);
+        let source = sys_status::decode_source(s);
+        let ev_cnt = sys_status::decode_event_count(s);
+
+        let mut desc = format!(
+            "{}, {}",
+            sys_status::li_name(li),
+            sys_status::source_name(source),
+        );
+        // Append event count to match ntpq format: "N event"
+        desc.push_str(&format!(" {} event,", ev_cnt));
+        // freq_mode flag: bit 7 of the status word
+        if s & 0x0080 != 0 {
+            desc.push_str(" freq_mode,");
+        }
+        desc
     }
 }
 
@@ -662,12 +704,19 @@ impl ControlClient {
     }
 
     /// Read system variables (ntpq -c rv).
+    ///
+    /// Real C ntpq issues a separate status-summary request (READVAR
+    /// associd=0, count=0) whose response status word is used for the
+    /// textual description, followed by a second READVAR request to
+    /// retrieve the actual variables. This two-request sequence is
+    /// necessary because the status word can change between requests.
     pub fn read_system_vars(
         &mut self,
         host: &str,
         port: u16,
     ) -> Result<SystemVariables, QueryError> {
-        let msg = ControlMessage {
+        // Request 1: status-summary (count=0) to get the display status word
+        let status_msg = ControlMessage {
             li_vn_mode: 0,
             opcode: ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8(),
             sequence: 0,
@@ -676,9 +725,24 @@ impl ControlClient {
             offset: 0,
             count: 0,
         };
-        let (data, status, associd) = self.query(host, port, msg)?;
+        let display_status = match self.query(host, port, status_msg) {
+            Ok((_, status, _)) => status,
+            Err(_) => 0, // Fall back to 0 if status request fails
+        };
+
+        // Request 2: full READVAR to get the variables
+        let var_msg = ControlMessage {
+            li_vn_mode: 0,
+            opcode: ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8(),
+            sequence: 0,
+            status: 0,
+            associd: 0,
+            offset: 0,
+            count: 0,
+        };
+        let (data, status, associd) = self.query(host, port, var_msg)?;
         let text = String::from_utf8_lossy(&data).to_string();
-        Ok(SystemVariables::from_text(&text, associd, status))
+        Ok(SystemVariables::from_text(&text, associd, status).with_display_status(display_status))
     }
 
     /// Read peer variables for a specific association.
@@ -741,11 +805,102 @@ pub struct PeerRow {
     pub jitter: f64,
 }
 
+/// Refclock driver name for 127.127.x.y addresses.
+/// Maps driver type x to the display name used by ntpq.
+fn refclock_driver_name(driver_type: u8) -> &'static str {
+    match driver_type {
+        1 => "LOCAL",
+        2 => "WWVB",
+        3 => "WWV",
+        4 => "WWVH",
+        5 => "GOES",
+        6 => "GPS_ONCORE",
+        7 => "ACTS",
+        8 => "IRIG",
+        9 => "ARCR",
+        10 => "CHU",
+        11 => "PARSE",
+        12 => "PPS",
+        13 => "TRAK",
+        14 => "HOPF",
+        15 => "MSF",
+        16 => "GPSD",
+        17 => "GENERIC",
+        18 => "SHM",
+        19 => "NMEA",
+        20 => "PALISADE",
+        21 => "ONCORE",
+        22 => "ATOM",
+        23 => "PTB",
+        24 => "ULINK",
+        25 => "DATUM",
+        26 => "HARDWARE",
+        27 => "NEOCLK4",
+        28 => "GPS_HS",
+        29 => "PROFANCT",
+        30 => "GPS_AS2201",
+        31 => "GPS",
+        32 => "ARBITER",
+        33 => "GPS_ME",
+        34 => "GPS_WWV",
+        35 => "PERFE",
+        _ => "REFCLOCK",
+    }
+}
+
+/// Format a refclock address (127.127.x.y) into ntpq display name.
+/// Returns None if the address is not a refclock address.
+fn format_refclock_remote(srcaddr: &str) -> Option<String> {
+    // Parse 127.127.x.y format
+    let parts: Vec<&str> = srcaddr.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    if parts[0] != "127" || parts[1] != "127" {
+        return None;
+    }
+    let driver_type: u8 = parts[2].parse().ok()?;
+    let unit: u8 = parts[3].parse().ok()?;
+    let name = refclock_driver_name(driver_type);
+    Some(format!("{name}({unit})"))
+}
+
+/// Wrap an ASCII refid in dots if it looks like a printable string
+/// (matching real ntpq's convention of `.LOCL.` for ASCII refids).
+fn format_refid(refid: &str) -> String {
+    let trimmed = refid.trim_end_matches('\0');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() <= 4 && trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        format!(".{trimmed}.")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl PeerRow {
     pub fn from_association(pv: &PeerVariables, assoc: &AssociationStatus) -> Self {
         let tally = assoc.tally_char();
-        let remote = pv.get("srcaddr").unwrap_or("unknown").to_string();
-        let refid = pv.get("refid").unwrap_or("").to_string();
+        // Detect refclocks: stratum >= 10 and known refclock refid or address
+        let pv_stratum = pv.stratum();
+        let pv_refid = pv.get("refid").unwrap_or("");
+        let srcaddr = pv.get("srcaddr").unwrap_or("");
+        let is_refclock = pv_stratum >= 10
+            && (pv_refid == "LOCL"
+                || pv_refid.starts_with("127.127.")
+                || srcaddr.starts_with("127.127."));
+
+        // For refclocks, format the remote as DRIVERNAME(unit);
+        // otherwise use srcaddr or fall back to refid.
+        let remote = if is_refclock && !srcaddr.is_empty() {
+            format_refclock_remote(srcaddr).unwrap_or_else(|| srcaddr.to_string())
+        } else if !srcaddr.is_empty() {
+            srcaddr.to_string()
+        } else {
+            pv_refid.to_string()
+        };
+        let refid = format_refid(pv.get("refid").unwrap_or(""));
         let stratum = pv.stratum();
         let delay = pv.get("delay").and_then(|s| s.parse().ok()).unwrap_or(0.0);
         let offset = pv.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -755,13 +910,38 @@ impl PeerRow {
             .and_then(|s| s.parse::<f64>().ok())
             .map(|p| 1u64 << p as u64)
             .unwrap_or(64);
+
+        // Derive reach from peer READVAR if available, else from association status
         let reach = pv
             .get("reach")
             .and_then(|s| u8::from_str_radix(s, 16).ok())
-            .unwrap_or(0);
-        // Derive `when` from the `recv` variable (seconds since last packet)
-        // ntpq computes this client-side from the last receive time in the peer variables.
-        let when = pv.get("recv").and_then(|s| s.parse::<u64>().ok());
+            .unwrap_or(if assoc.reachable { 1 } else { 0 });
+
+        // Derive `when` from the `recv` variable (seconds since last packet).
+        // Fall back to `rec` if `recv` is absent.
+        let when = pv
+            .get("recv")
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| pv.get("rec").and_then(|s| s.parse::<u64>().ok()));
+        // For refclocks that don't report recv, derive from reachable state
+        let when = when.or(if assoc.reachable { Some(0) } else { None });
+
+        // Determine peer type from hmode variable, matching ntpq conventions:
+        //   0=unspec(local), 1=sym_active(s), 2=sym_passive(S),
+        //   3=client(u), 4=server(u), 5=broadcast(b), 6=control(u)
+        let peer_type = if assoc.broadcast {
+            'b'
+        } else if is_refclock {
+            'l'
+        } else {
+            match pv.get("hmode").and_then(|s| s.parse::<u8>().ok()) {
+                Some(0) => 'l',
+                Some(1) => 's',
+                Some(2) => 'S',
+                Some(5) => 'b',
+                _ => 'u',
+            }
+        };
 
         Self {
             tally,
@@ -769,7 +949,7 @@ impl PeerRow {
             refid,
             associd: assoc.associd,
             stratum,
-            peer_type: if assoc.broadcast { 'b' } else { 'u' },
+            peer_type,
             when,
             poll,
             reach,
@@ -786,7 +966,7 @@ impl PeerRow {
 pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "associd={} status={:04x} {},\n",
+        "associd={} status={:04x} {}\n",
         sys.associd,
         sys.status,
         sys.status_description(),
@@ -813,7 +993,7 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut rendered = std::collections::HashSet::new();
     for key in &preferred_order {
         if let Some(val) = sys.get(key) {
-            let quoted = matches!(*key, "version" | "processor" | "system" | "refid");
+            let quoted = matches!(*key, "version" | "processor" | "system");
             if quoted {
                 out.push_str(&format!("{}=\"{}\", ", key, val));
             } else {
@@ -879,6 +1059,7 @@ pub fn format_peer_readvar(peer: &PeerVariables) -> String {
 
 /// Render associations table in ntpq-compatible format.
 pub fn format_associations(assocs: &[AssociationStatus]) -> String {
+    use crate::ntp_control::sys_status;
     let mut out = String::new();
     out.push_str("ind assid status  conf reach auth condition  last_event cnt\n");
     out.push_str("===========================================================\n");
@@ -901,8 +1082,12 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
             1 => "falsetick",
             _ => "rejected",
         };
+        // Decode event code and count from the status word
+        let event_code = sys_status::decode_event_code(assoc.status);
+        let event_count = sys_status::decode_event_count(assoc.status);
+        let last_event = ntpq_event_name(event_code);
         out.push_str(&format!(
-            "  {} {:5} {:04x}   {:3}  {:4}  {:4}  {:11}\n",
+            "  {} {:5} {:04x}   {:3}  {:4}  {:4}  {:11} {:>4}     {:>2}\n",
             i + 1,
             assoc.associd,
             assoc.status,
@@ -910,9 +1095,33 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
             reach,
             auth,
             cond,
+            last_event,
+            event_count,
         ));
     }
     out
+}
+
+/// Map a peer event code (0-15) to its ntpq display name.
+fn ntpq_event_name(code: u16) -> &'static str {
+    match code {
+        0 => "restart",
+        1 => "no_reach",
+        2 => "no_reply",
+        3 => "rate_excd",
+        4 => "reach_brd",
+        5 => "sys_rest",
+        6 => "sys_clk",
+        7 => "sys_peer",
+        8 => "sys_peer",
+        9 => "sys_peer",
+        10 => "sys_peer",
+        11 => "sys_peer",
+        12 => "prot_test",
+        13 => "crypto",
+        14 => "nopeer",
+        _ => "unknown",
+    }
 }
 
 /// Render peers billboard in ntpq-compatible format.
@@ -948,6 +1157,226 @@ pub fn format_peers(rows: &[PeerRow]) -> String {
         ));
     }
     out
+}
+
+// ──── Test Mode 6 Server ────────────────────────────────────────────────
+// In-process UDP server that responds to Mode 6 requests with configurable
+// responses. Used by local oracle courts below.
+
+#[cfg(test)]
+pub(crate) mod test_mode6_server {
+    use std::net::UdpSocket;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// A simple Mode 6 test server that responds to one request.
+    pub struct TestMode6Server {
+        pub port: u16,
+        stop: Arc<AtomicBool>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl TestMode6Server {
+        /// Create a server that waits for one request, then sends `response_bytes`.
+        pub fn serve(response_bytes: Vec<u8>) -> Self {
+            Self::serve_conditional(move |_buf, _len| Some(response_bytes.clone()))
+        }
+
+        /// Create a server that computes a response based on the received request.
+        /// The closure receives the raw request bytes and length, and returns
+        /// an optional response (None = don't respond).
+        pub fn serve_conditional<F>(handler: F) -> Self
+        where
+            F: Fn(&[u8], usize) -> Option<Vec<u8>> + Send + 'static,
+        {
+            let socket = UdpSocket::bind("127.0.0.1:0").expect("test server bind");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("test server set timeout");
+            let port = socket.local_addr().unwrap().port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_clone = stop.clone();
+
+            let join = thread::spawn(move || {
+                let mut buf = [0u8; 512];
+                loop {
+                    if stop_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    match socket.recv_from(&mut buf) {
+                        Ok((len, src)) => {
+                            if let Some(response) = handler(&buf, len) {
+                                let _ = socket.send_to(&response, src);
+                            }
+                        }
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                port,
+                stop,
+                join: Some(join),
+            }
+        }
+
+        /// Serve a sequence of responses, one per incoming request.
+        /// Each request gets the next response in the sequence.
+        /// Useful for multi-request operations like read_system_vars.
+        pub fn serve_sequence(responses: Vec<Vec<u8>>) -> Self {
+            use std::sync::Mutex;
+            let idx = Arc::new(Mutex::new(0usize));
+            let resp = Arc::new(responses);
+            Self::serve_conditional(move |_buf, _len| {
+                let mut i = idx.lock().unwrap();
+                if *i < resp.len() {
+                    let r = Some(resp[*i].clone());
+                    *i += 1;
+                    r
+                } else {
+                    None
+                }
+            })
+        }
+
+        /// Receive one request, then send all fragments in sequence with small delays.
+        pub fn serve_fragments(fragments: Vec<Vec<u8>>) -> Self {
+            let socket = UdpSocket::bind("127.0.0.1:0").expect("test server bind");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("test server set timeout");
+            let port = socket.local_addr().unwrap().port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_clone = stop.clone();
+
+            let join = thread::spawn(move || {
+                let mut buf = [0u8; 512];
+                loop {
+                    if stop_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    match socket.recv_from(&mut buf) {
+                        Ok((_len, src)) => {
+                            for frag in &fragments {
+                                let _ = socket.send_to(frag, src);
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            break;
+                        }
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                port,
+                stop,
+                join: Some(join),
+            }
+        }
+    }
+
+    impl Drop for TestMode6Server {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Ok(s) = UdpSocket::bind("127.0.0.1:0") {
+                let _ = s.send_to(b"\x00", format!("127.0.0.1:{}", self.port));
+            }
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    /// Build a Mode 6 READVAR response payload (system variables as text).
+    pub fn make_readvar_response(
+        associd: u16,
+        sequence: u16,
+        status: u16,
+        variable_text: &str,
+        more: bool,
+    ) -> Vec<u8> {
+        use crate::ntp_control::*;
+        use crate::ntp_types::NtpPacket;
+        let msg = ControlMessage {
+            li_vn_mode: NtpPacket::set_li_vn_mode(
+                crate::ntp_types::LeapIndicator::NoWarning,
+                crate::ntp_types::NtpVersion::V4,
+                crate::ntp_types::NtpMode::NtpControl,
+            ),
+            opcode: ControlOpcode::new(true, false, more, opcodes::OP_READVAR).to_u8(),
+            sequence,
+            status,
+            associd,
+            offset: 0,
+            count: variable_text.len() as u16,
+        };
+        let mut buf = msg.encode().to_vec();
+        buf.extend_from_slice(variable_text.as_bytes());
+        buf
+    }
+
+    /// Build a Mode 6 error response.
+    pub fn make_error_response(associd: u16, sequence: u16, error_code: u8) -> Vec<u8> {
+        use crate::ntp_control::*;
+        use crate::ntp_types::NtpPacket;
+        let msg = ControlMessage {
+            li_vn_mode: NtpPacket::set_li_vn_mode(
+                crate::ntp_types::LeapIndicator::NoWarning,
+                crate::ntp_types::NtpVersion::V4,
+                crate::ntp_types::NtpMode::NtpControl,
+            ),
+            opcode: ControlOpcode::new(true, true, false, opcodes::OP_READVAR).to_u8(),
+            sequence,
+            status: (error_code as u16) << 8,
+            associd,
+            offset: 0,
+            count: 0,
+        };
+        msg.encode().to_vec()
+    }
+
+    /// Build an associations (READSTAT) binary response.
+    pub fn make_readstat_response(sequence: u16, assoc_pairs: &[(u16, u16)]) -> Vec<u8> {
+        use crate::ntp_control::*;
+        use crate::ntp_types::NtpPacket;
+        let mut payload = Vec::with_capacity(assoc_pairs.len() * 4);
+        for &(aid, st) in assoc_pairs {
+            payload.extend_from_slice(&aid.to_be_bytes());
+            payload.extend_from_slice(&st.to_be_bytes());
+        }
+        let msg = ControlMessage {
+            li_vn_mode: NtpPacket::set_li_vn_mode(
+                crate::ntp_types::LeapIndicator::NoWarning,
+                crate::ntp_types::NtpVersion::V4,
+                crate::ntp_types::NtpMode::NtpControl,
+            ),
+            opcode: ControlOpcode::new(true, false, false, opcodes::OP_READSTAT).to_u8(),
+            sequence,
+            status: 0x0622,
+            associd: 0,
+            offset: 0,
+            count: payload.len() as u16,
+        };
+        let mut buf = msg.encode().to_vec();
+        buf.extend_from_slice(&payload);
+        buf
+    }
 }
 
 // ──── Tests ───────────────────────────────────────────────────────────
@@ -1055,6 +1484,50 @@ mod tests {
         // Non-final fragment at 5..10 extends past final_end=5
         let r = fc.add_fragment(5, 5, b"56789", true, 0x0622, 0);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_fragment_reverse_order_excess_rejected() {
+        let mut fc = FragmentCollector::new();
+        // Excess fragment 0..12 arrives FIRST (non-final), extending past
+        // the eventual final_end=10
+        let _ = fc
+            .add_fragment(0, 12, b"0123456789ab", true, 0x0622, 0)
+            .unwrap();
+        // Smaller final fragment 0..10 arrives LATER — should reject because
+        // existing fragment 0..12 extends past final_end=10
+        let r = fc.add_fragment(0, 10, b"0123456789", false, 0x0622, 0);
+        assert!(r.is_err(), "existing fragment extends past new final_end");
+    }
+
+    #[test]
+    fn test_fragment_shrink_rejected() {
+        let mut fc = FragmentCollector::new();
+        // Fragment 0..10 arrives first
+        let _ = fc
+            .add_fragment(0, 10, b"0123456789", true, 0x0622, 0)
+            .unwrap();
+        // Same offset 0 with smaller payload 0..5 — should reject
+        let r = fc.add_fragment(0, 5, b"01234", false, 0x0622, 0);
+        assert!(r.is_err(), "retrograde fragment must be rejected");
+    }
+
+    #[test]
+    fn test_fragment_excess_extent_violation() {
+        // Fragment 0..10 with more=true arrives first (covers bytes 0-10).
+        let mut fc = FragmentCollector::new();
+        let _ = fc
+            .add_fragment(0, 10, b"0123456789", true, 0x0622, 0)
+            .unwrap();
+        // Final fragment at offset 3, count=2 declares final_end=5.
+        // Existing fragment 0..10 extends to byte 10 > 5 → reject.
+        // The overlapping bytes "34" match, so overlap is consistent;
+        // rejection is purely from the extent invariant.
+        let r = fc.add_fragment(3, 2, b"34", false, 0x0622, 0);
+        assert!(
+            r.is_err(),
+            "existing fragment 0..10 extending to 10 must be rejected when final_end=5"
+        );
     }
 
     #[test]
@@ -1169,16 +1642,18 @@ mod tests {
         let out = format_peers(&rows);
         assert!(out.contains("127.0.0.1"));
         assert!(out.contains("*127.0.0.1"), "tally should prefix remote");
-        assert!(out.contains(".LOCL."));
+        assert!(out.contains(".LOCL."), "refid should be dot-wrapped");
     }
 
     #[test]
     fn test_readvar_format() {
+        // Status description decodes from the status word, not variables.
+        // 0x0622: li=0(none), source=6(radio), count=2, event=2
         let text = r#"version="ntpd 4.2.8",stratum=2,offset=0.005"#;
         let sv = SystemVariables::from_text(text, 0, 0x0622);
         let out = format_readvar(&sv);
         assert!(out.contains("associd=0"));
-        assert!(out.contains("leap_none, sync_unspec"));
+        assert!(out.contains("leap_none, sync_radio, 2 event"));
         assert!(out.contains("stratum=2"));
     }
 
@@ -1189,5 +1664,535 @@ mod tests {
         let sv = SystemVariables::from_text(text, 0, 0x0622);
         let out = format_readvar(&sv);
         assert!(out.contains("extra_var=42"), "extra vars must be included");
+    }
+
+    // ──── Frozen Renderer Fixture Courts ──────────────────────────────
+
+    #[test]
+    fn test_format_readvar_frozen_parity() {
+        // Exact known-good output matching real ntpq -c rv.
+        // Status word 0x0322: li=0(none), source=3(ntp), count=2, event=2
+        let text = r##"version="ntpd 4.2.8p3",processor="x86_64",system="Linux/4.19.0",stratum=2,precision=-24,rootdelay=0.001,rootdisp=0.005,refid=.NTP.,reftime=0,peer=0,tc=6,offset=0.002,frequency=0.123,sys_jitter=0.001,rootdist=0.006"##;
+        let sv = SystemVariables::from_text(text, 0, 0x0322);
+        let out = format_readvar(&sv);
+        let expected = concat!(
+            "associd=0 status=0322 leap_none, sync_ntp, 2 event,\n",
+            "version=\"ntpd 4.2.8p3\", processor=\"x86_64\", system=\"Linux/4.19.0\", ",
+            "stratum=2, precision=-24, rootdelay=0.001, rootdisp=0.005, ",
+            "refid=\".NTP.\", reftime=0, peer=0, tc=6, offset=0.002, ",
+            "frequency=0.123, sys_jitter=0.001, rootdist=0.006, \n",
+        );
+        assert_eq!(out, expected, "frozen system readvar output mismatch");
+    }
+
+    #[test]
+    fn test_format_readvar_extra_vars() {
+        // Extra variables beyond the preferred list appear, preferred vars come first
+        let text = "version=ntpd,stratum=2,extra_var=42,z_var=99,offset=0.005";
+        let sv = SystemVariables::from_text(text, 0, 0);
+        let out = format_readvar(&sv);
+        assert!(
+            out.starts_with("associd=0 status=0000 "),
+            "output should start with associd/status header"
+        );
+        assert!(
+            out.contains("extra_var=42"),
+            "extra_var must appear in output"
+        );
+        assert!(out.contains("z_var=99"), "z_var must appear in output");
+        // Preferred vars (version, stratum, offset) should come before extra_var
+        let version_pos = out.find("version=").unwrap();
+        let stratum_pos = out.find("stratum=").unwrap();
+        let offset_pos = out.find("offset=").unwrap();
+        let extra_pos = out.find("extra_var=").unwrap();
+        let z_pos = out.find("z_var=").unwrap();
+        assert!(
+            version_pos < extra_pos,
+            "preferred var 'version' should appear before extra_var"
+        );
+        assert!(
+            stratum_pos < extra_pos,
+            "preferred var 'stratum' should appear before extra_var"
+        );
+        assert!(
+            offset_pos < extra_pos,
+            "preferred var 'offset' should appear before extra_var"
+        );
+        // Both extra vars appear after preferred ones
+        assert!(
+            extra_pos < z_pos,
+            "extra_var should appear before z_var (input order preserved)"
+        );
+    }
+
+    #[test]
+    fn test_format_peer_readvar_frozen() {
+        // Peer READVAR output format matches real ntpq
+        let text = concat!(
+            "srcaddr=192.168.1.1,",
+            "stratum=2,",
+            "offset=0.002,",
+            "delay=0.001,",
+            "dispersion=0.000,",
+            "jitter=0.001,",
+            "hpoll=6,",
+            "ppoll=6,",
+            "reach=0xFF,",
+            "flash=0x000,",
+            "leap=00,",
+            "refid=.NTP.,",
+            "reftime=0,",
+            "hmode=3,",
+            "pmode=4,",
+            "precision=-24",
+        );
+        let pv = PeerVariables::from_text(text, 49723, 0x9614);
+        let out = format_peer_readvar(&pv);
+        let expected = concat!(
+            "associd=49723 status=9614 1 event, 192.168.1.1,\n",
+            "srcaddr=192.168.1.1, stratum=2, offset=0.002, delay=0.001, ",
+            "dispersion=0.000, jitter=0.001, hpoll=6, ppoll=6, reach=0xFF, ",
+            "flash=0x000, leap=00, refid=.NTP., reftime=0, hmode=3, pmode=4, ",
+            "precision=-24, \n",
+        );
+        assert_eq!(out, expected, "frozen peer readvar output mismatch");
+    }
+
+    #[test]
+    fn test_format_associations_frozen() {
+        // Exact output format for multiple associations
+        let assocs = vec![
+            AssociationStatus {
+                associd: 49723,
+                status: 0x9614,
+                configured: true,
+                auth_enabled: true,
+                auth_ok: false,
+                reachable: true,
+                broadcast: false,
+                selection: 6,
+            },
+            AssociationStatus {
+                associd: 49724,
+                status: 0x8010,
+                configured: true,
+                auth_enabled: false,
+                auth_ok: false,
+                reachable: true,
+                broadcast: false,
+                selection: 4,
+            },
+            AssociationStatus {
+                associd: 49725,
+                status: 0x8000,
+                configured: true,
+                auth_enabled: true,
+                auth_ok: true,
+                reachable: false,
+                broadcast: false,
+                selection: 0,
+            },
+        ];
+        let out = format_associations(&assocs);
+        // Build expected using the same format spec to avoid manual counting errors
+        let mut expected =
+            String::from("ind assid status  conf reach auth condition  last_event cnt\n");
+        expected.push_str("===========================================================\n");
+        // Status 0x9614: event_code=4(reach_brd), event_count=1
+        expected.push_str("  1 49723 9614   yes  yes   yes   sys.peer    reach_brd      1\n");
+        // Status 0x8010: event_code=0(restart), event_count=1
+        expected.push_str("  2 49724 8010   yes  yes   none  candidate   restart        1\n");
+        // Status 0x8000: event_code=0(restart), event_count=0
+        expected.push_str("  3 49725 8000   yes  no    ok    rejected    restart        0\n");
+        assert_eq!(out, expected, "frozen associations output mismatch");
+    }
+
+    #[test]
+    fn test_format_peers_frozen() {
+        // Exact peers billboard output format
+        let rows = vec![
+            PeerRow {
+                tally: '*',
+                remote: "time.example.com".to_string(),
+                refid: ".NTP.".to_string(),
+                associd: 1,
+                stratum: 2,
+                peer_type: 'u',
+                when: Some(10),
+                poll: 64,
+                reach: 0o377,
+                delay: 0.001,
+                offset: 0.002,
+                jitter: 0.001,
+            },
+            PeerRow {
+                tally: ' ',
+                remote: "192.168.1.100".to_string(),
+                refid: ".GPS.".to_string(),
+                associd: 2,
+                stratum: 1,
+                peer_type: 'u',
+                when: None,
+                poll: 64,
+                reach: 0o377,
+                delay: 0.003,
+                offset: -0.001,
+                jitter: 0.002,
+            },
+        ];
+        let out = format_peers(&rows);
+        // Build expected using the same format specs used by the production code
+        let mut expected = String::new();
+        expected.push_str(
+            "     remote           refid      st t when poll reach   delay   offset  jitter\n",
+        );
+        expected.push_str(
+            "==============================================================================\n",
+        );
+        // Row 1 — use refid without wrapping (PeerRow stores raw refid; format_peers won't wrap it)
+        expected.push_str(&format!(
+            " {}{:16} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            '*', "time.example.com", ".NTP.", 2, 'u', "10", 64, "377", 0.001, 0.002, 0.001,
+        ));
+        // Row 2
+        expected.push_str(&format!(
+            " {}{:16} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            ' ', "192.168.1.100", ".GPS.", 1, 'u', "-", 64, "377", 0.003, -0.001, 0.002,
+        ));
+        assert_eq!(out, expected, "frozen peers output mismatch");
+    }
+
+    #[test]
+    fn test_format_peers_when_units() {
+        // Test that when values render correctly with different units
+        let rows = vec![
+            PeerRow {
+                tally: ' ',
+                remote: "a".to_string(),
+                refid: ".X.".to_string(),
+                associd: 1,
+                stratum: 1,
+                peer_type: 'u',
+                when: Some(45),
+                poll: 64,
+                reach: 0o377,
+                delay: 0.0,
+                offset: 0.0,
+                jitter: 0.0,
+            },
+            PeerRow {
+                tally: ' ',
+                remote: "b".to_string(),
+                refid: ".X.".to_string(),
+                associd: 2,
+                stratum: 1,
+                peer_type: 'u',
+                when: Some(1100),
+                poll: 64,
+                reach: 0o377,
+                delay: 0.0,
+                offset: 0.0,
+                jitter: 0.0,
+            },
+            PeerRow {
+                tally: ' ',
+                remote: "c".to_string(),
+                refid: ".X.".to_string(),
+                associd: 3,
+                stratum: 1,
+                peer_type: 'u',
+                when: Some(3660),
+                poll: 64,
+                reach: 0o377,
+                delay: 0.0,
+                offset: 0.0,
+                jitter: 0.0,
+            },
+            PeerRow {
+                tally: ' ',
+                remote: "d".to_string(),
+                refid: ".X.".to_string(),
+                associd: 4,
+                stratum: 1,
+                peer_type: 'u',
+                when: None,
+                poll: 64,
+                reach: 0o377,
+                delay: 0.0,
+                offset: 0.0,
+                jitter: 0.0,
+            },
+        ];
+        let out = format_peers(&rows);
+        assert!(out.contains("45"), "when=45 should render as '45'");
+        assert!(out.contains("18m"), "when=1100 should render as '18m'");
+        assert!(out.contains("1h"), "when=3660 should render as '1h'");
+        assert!(out.contains("  -"), "when=None should render as '-'");
+    }
+
+    #[test]
+    fn test_associations_format_many() {
+        // Test all selection values render correct condition strings
+        let selection_labels = [
+            (0usize, "rejected"),
+            (1usize, "falsetick"),
+            (2usize, "excess"),
+            (3usize, "outlyer"),
+            (4usize, "candidate"),
+            (5usize, "backup"),
+            (6usize, "sys.peer"),
+            (7usize, "rejected"),
+        ];
+        let assocs: Vec<AssociationStatus> = selection_labels
+            .iter()
+            .map(|&(sel, _)| AssociationStatus {
+                associd: 1000 + sel as u16,
+                status: 0x8000 | (sel as u16),
+                configured: true,
+                auth_enabled: false,
+                auth_ok: false,
+                reachable: false,
+                broadcast: false,
+                selection: sel as u8,
+            })
+            .collect();
+        let out = format_associations(&assocs);
+        for &(sel, label) in &selection_labels {
+            assert!(
+                out.contains(label),
+                "selection={} should produce condition string '{}'",
+                sel,
+                label
+            );
+        }
+        // Verify count: 1 header + 1 separator + 8 data lines
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            10,
+            "expected 10 lines (header, separator, 8 assocs)"
+        );
+        // Verify event_code and event_count appear in output
+        assert!(out.contains("restart"), "event_code 0 should be restart");
+        assert!(
+            out.contains("reach_brd"),
+            "event_code 4 should be reach_brd"
+        );
+    }
+
+    // ──── Local UDP Oracle Courts ──────────────────────────────────────
+
+    #[test]
+    fn test_local_udp_readvar() {
+        // read_system_vars now makes TWO requests (status + variables).
+        // Serve an empty status response first, then the variable response.
+        let variable_text = r#"version="ntpd 4.2.8",stratum=2,offset=0.005"#;
+        let empty_resp = test_mode6_server::make_readvar_response(0, 1, 0x0622, "", false);
+        let var_resp = test_mode6_server::make_readvar_response(0, 2, 0x0622, variable_text, false);
+        let responses = vec![empty_resp, var_resp];
+        let server = test_mode6_server::TestMode6Server::serve_sequence(responses);
+        let mut client = ControlClient::new(5, 1);
+        let result = client.read_system_vars("127.0.0.1", server.port);
+        assert!(
+            result.is_ok(),
+            "read_system_vars failed: {:?}",
+            result.err()
+        );
+        let sv = result.unwrap();
+        assert_eq!(sv.associd, 0);
+        assert_eq!(sv.get("stratum"), Some("2"));
+        assert_eq!(sv.get("offset"), Some("0.005"));
+    }
+
+    #[test]
+    fn test_local_udp_readvar_fragmented() {
+        // Two fragments: first more=true with "version=1,", second more=false with "stratum=2"
+        let frag1 = test_mode6_server::make_readvar_response(0, 1, 0x0622, "version=1,", true);
+        let mut frag2 = test_mode6_server::make_readvar_response(0, 1, 0x0622, "stratum=2", false);
+        // Patch offset field (bytes 8..10) to 10, the length of "version=1,"
+        let offset_bytes = 10u16.to_be_bytes();
+        frag2[8..10].copy_from_slice(&offset_bytes);
+
+        let server = test_mode6_server::TestMode6Server::serve_fragments(vec![frag1, frag2]);
+        let mut client = ControlClient::new(5, 1);
+        let result = client.read_system_vars("127.0.0.1", server.port);
+        assert!(
+            result.is_ok(),
+            "fragmented readvar failed: {:?}",
+            result.err()
+        );
+        let sv = result.unwrap();
+        assert_eq!(sv.get("version"), Some("1"));
+        assert_eq!(sv.get("stratum"), Some("2"));
+    }
+
+    #[test]
+    fn test_local_udp_wrong_sequence() {
+        // Server responds with a different sequence number than requested
+        // First request (status) also gets wrong sequence
+        let status_resp = test_mode6_server::make_readvar_response(0, 99, 0x0622, "", false);
+        let var_resp = test_mode6_server::make_readvar_response(0, 99, 0x0622, "stratum=2", false);
+        let server =
+            test_mode6_server::TestMode6Server::serve_sequence(vec![status_resp, var_resp]);
+        let mut client = ControlClient::new(1, 0); // No retries, timeout
+        let result = client.read_system_vars("127.0.0.1", server.port);
+        assert!(result.is_err(), "wrong sequence must be rejected");
+    }
+
+    #[test]
+    fn test_local_udp_error_response() {
+        // First request (status) gets an error response
+        let err_resp = test_mode6_server::make_error_response(0, 1, 4); // CERR_BADASSOC
+        let server = test_mode6_server::TestMode6Server::serve(err_resp);
+        let mut client = ControlClient::new(1, 0); // No retries, timeout
+        let result = client.read_system_vars("127.0.0.1", server.port);
+        assert!(result.is_err(), "error response must produce error");
+        match result.err().unwrap() {
+            QueryError::NotFound => {} // Expected for error code 4
+            other => panic!("expected NotFound error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_local_udp_timeout() {
+        // Server that never responds
+        let server = test_mode6_server::TestMode6Server::serve_conditional(|_, _| None);
+        let mut client = ControlClient::new(1, 0); // 1s timeout, no retries
+        let result = client.read_system_vars("127.0.0.1", server.port);
+        assert!(result.is_err(), "timeout must produce error");
+        match result.err().unwrap() {
+            QueryError::Timeout => {}
+            other => panic!("expected Timeout, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_local_udp_readstat() {
+        let assocs: Vec<(u16, u16)> = vec![(1, 0x9614), (2, 0x8010)];
+        let resp = test_mode6_server::make_readstat_response(1, &assocs);
+        let server = test_mode6_server::TestMode6Server::serve(resp);
+        let mut client = ControlClient::new(5, 1);
+        let result = client.read_associations("127.0.0.1", server.port);
+        assert!(
+            result.is_ok(),
+            "read_associations failed: {:?}",
+            result.err()
+        );
+        let assocs = result.unwrap();
+        assert_eq!(assocs.len(), 2);
+        assert_eq!(assocs[0].associd, 1);
+        assert!(assocs[0].configured);
+        assert!(assocs[0].reachable);
+        assert_eq!(assocs[0].selection, 6);
+        assert_eq!(assocs[1].associd, 2);
+        assert_eq!(assocs[1].selection, 0);
+    }
+
+    #[test]
+    fn test_local_udp_authentication_error() {
+        let err_resp = test_mode6_server::make_error_response(0, 1, 1); // CERR_AUTH
+        let server = test_mode6_server::TestMode6Server::serve(err_resp);
+        let mut client = ControlClient::new(1, 0); // No retries, timeout
+        let result = client.read_system_vars("127.0.0.1", server.port);
+        assert!(result.is_err(), "auth error must produce error");
+        match result.err().unwrap() {
+            QueryError::AuthFailure => {}
+            other => panic!("expected AuthFailure, got: {other}"),
+        }
+    }
+
+    // ──── Raw Bytes → Typed Model Courts ──────────────────────────────
+
+    #[test]
+    fn test_raw_bytes_to_system_vars() {
+        // Layer 1 fixture: raw Mode 6 response bytes → SystemVariables
+        use crate::ntp_control::*;
+        use crate::ntp_types::NtpPacket;
+
+        let variable_text = r##"version="ntpd 4.2.8p3",stratum=2,offset=0.005,leap=00,sync=3"##;
+        let msg = ControlMessage {
+            li_vn_mode: NtpPacket::set_li_vn_mode(
+                crate::ntp_types::LeapIndicator::NoWarning,
+                crate::ntp_types::NtpVersion::V4,
+                crate::ntp_types::NtpMode::NtpControl,
+            ),
+            opcode: ControlOpcode::new(true, false, false, opcodes::OP_READVAR).to_u8(),
+            sequence: 1,
+            status: 0x0622,
+            associd: 0,
+            offset: 0,
+            count: variable_text.len() as u16,
+        };
+        let mut wire_bytes = msg.encode().to_vec();
+        wire_bytes.extend_from_slice(variable_text.as_bytes());
+
+        // Decode wire bytes using ControlMessage::decode
+        let (decoded, after_header) = ControlMessage::decode(&wire_bytes).unwrap();
+        assert_eq!(decoded.sequence, 1);
+        assert_eq!(decoded.status, 0x0622);
+        assert_eq!(decoded.associd, 0);
+
+        // Extract text payload
+        let count = decoded.count as usize;
+        let text = String::from_utf8_lossy(&after_header[..count]);
+        let sv = SystemVariables::from_text(&text, decoded.associd, decoded.status);
+
+        // Verify typed model
+        assert_eq!(sv.associd, 0);
+        assert_eq!(sv.status, 0x0622);
+        assert_eq!(sv.get("version"), Some("ntpd 4.2.8p3"));
+        assert_eq!(sv.get("stratum"), Some("2"));
+        assert_eq!(sv.get("offset"), Some("0.005"));
+        assert_eq!(sv.leap_str(), "leap_none");
+        // Verify layer 2: typed model → exact text output
+        // Status 0x0622: li=0(none), source=6(radio), count=2, event=2
+        let out = format_readvar(&sv);
+        assert!(out.starts_with("associd=0 status=0622 "));
+        assert!(out.contains("leap_none, sync_radio, 2 event"));
+        assert!(out.contains("stratum=2"));
+        assert!(out.contains("offset=0.005"));
+    }
+
+    #[test]
+    fn test_raw_bytes_to_peer_vars() {
+        // Layer 1 fixture: raw Mode 6 response bytes → PeerVariables
+        use crate::ntp_control::*;
+        use crate::ntp_types::NtpPacket;
+
+        let variable_text = "srcaddr=192.168.1.1,stratum=2,offset=0.002,delay=0.001";
+        let msg = ControlMessage {
+            li_vn_mode: NtpPacket::set_li_vn_mode(
+                crate::ntp_types::LeapIndicator::NoWarning,
+                crate::ntp_types::NtpVersion::V4,
+                crate::ntp_types::NtpMode::NtpControl,
+            ),
+            opcode: ControlOpcode::new(true, false, false, opcodes::OP_READVAR).to_u8(),
+            sequence: 1,
+            status: 0x9614,
+            associd: 49723,
+            offset: 0,
+            count: variable_text.len() as u16,
+        };
+        let mut wire_bytes = msg.encode().to_vec();
+        wire_bytes.extend_from_slice(variable_text.as_bytes());
+
+        // Decode wire bytes
+        let (decoded, after_header) = ControlMessage::decode(&wire_bytes).unwrap();
+        let count = decoded.count as usize;
+        let text = String::from_utf8_lossy(&after_header[..count]);
+        let pv = PeerVariables::from_text(&text, decoded.associd, decoded.status);
+
+        // Verify typed model
+        assert_eq!(pv.associd, 49723);
+        assert_eq!(pv.status, 0x9614);
+        assert_eq!(pv.get("srcaddr"), Some("192.168.1.1"));
+        assert_eq!(pv.get("stratum"), Some("2"));
+        assert_eq!(pv.get("offset"), Some("0.002"));
+
+        // Verify layer 2: typed model → exact text output
+        let out = format_peer_readvar(&pv);
+        assert!(out.contains("associd=49723 status=9614"));
+        assert!(out.contains("srcaddr=192.168.1.1"));
+        assert!(out.contains("stratum=2"));
     }
 }

@@ -94,15 +94,25 @@ impl RestrictList {
     }
 
     /// Evaluate restrictions for a given source address (SockAddr).
+    ///
+    /// Distinguishes "matched with empty flags" from "no match at all":
+    /// if a specific entry matched (even with zero flags), do NOT fall
+    /// back to the family default. This ensures that:
+    ///
+    ///   restrict 127.0.0.1
+    ///
+    /// allows all traffic from loopback without inheriting default KOD.
     pub fn evaluate(&self, addr: &SockAddr) -> RestrictFlags {
         let mut flags = RestrictFlags::empty();
+        let mut matched = false;
         for entry in &self.entries {
             if self.addr_matches(addr, &entry.addr, &entry.mask) {
                 flags |= entry.flags;
+                matched = true;
             }
         }
-        // If no default entry matched, use family-appropriate default
-        if flags.is_empty() {
+        // Only fall back to defaults when NO specific entry matched
+        if !matched {
             flags = match addr.ss_family as libc::c_int {
                 libc::AF_INET6 => self.default_v6_flags,
                 _ => self.default_v4_flags,
@@ -261,6 +271,60 @@ mod tests {
             action,
             RestrictAction::Accept,
             "IPv6 should be accepted with default-v6 empty"
+        );
+    }
+
+    #[test]
+    fn test_restrict_loopback_allow_not_inheriting_default_kod() {
+        // The exact oracle configuration:
+        //   restrict -4 default kod limited nomodify notrap nopeer
+        //   restrict 127.0.0.1
+        //
+        // The specific 127.0.0.1 entry has NO flags. It must NOT fall
+        // back to the default KOD. Mode 6 queries from 127.0.0.1
+        // must be ACCEPTed.
+        let mut list = RestrictList::new();
+        list.set_default_v4(
+            RestrictFlags::KOD
+                | RestrictFlags::LIMITED
+                | RestrictFlags::NOMODIFY
+                | RestrictFlags::NOTRAP
+                | RestrictFlags::NOPEER,
+        );
+        // Add a specific loopback allow rule (no flags = full access)
+        let loopback = NetAddr::ipv4(0x7f000001, 123);
+        let mask = NetAddr::ipv4(0xffffffff, 0);
+        let entry = RestrictEntry {
+            addr: netaddr_to_sockaddr(&loopback),
+            mask: netaddr_to_sockaddr(&mask),
+            flags: RestrictFlags::empty(),
+            mru_depth: 0,
+        };
+        list.add_entry(entry);
+
+        // Mode 6 NtpControl from loopback must be ACCEPTed
+        let (action, _) = list.check(&loopback, NtpMode::NtpControl);
+        assert_eq!(
+            action,
+            RestrictAction::Accept,
+            "loopback Mode 6 must be accepted, not KOD'd"
+        );
+
+        // Non-loopback IPv4 (e.g. 10.0.0.1) should still get default KOD
+        let external = NetAddr::ipv4(0x0a000001, 123);
+        let (action, _) = list.check(&external, NtpMode::NtpControl);
+        assert_eq!(
+            action,
+            RestrictAction::SendKod,
+            "external address should still receive default KOD"
+        );
+
+        // Mode 3 (Client) from external with KOD should still send KOD
+        let (action, _) = list.check(&external, NtpMode::Client);
+        assert_eq!(
+            action,
+            RestrictAction::SendKod,
+            "external client with KOD should send KOD"
         );
     }
 

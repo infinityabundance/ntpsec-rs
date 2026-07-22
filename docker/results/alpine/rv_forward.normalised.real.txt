@@ -1,0 +1,8 @@
+associd=0 status=0514 leap_none, sync_local, 1 event, freq_mode,
+leap=00, stratum=11, precision=-23, rootdelay=0.000, rootdisp=7947.500,
+refid=127.127.1.0, reftime=ee0ae06c.458036db 2026-07-22THH:MM:SS.271,
+tc=6, peer=37547, offset=0.000000, frequency=0.000000,
+sys_jitter=0.000000, clk_jitter=0.000112,
+clock=ee0ae06d.4380e7b8 2026-07-22THH:MM:SS.263, processor="x86_64",
+system="Linux/7.1.3-2-cachyos", version="ntpd ntpsec-1.2.2a",
+clk_wander=0.000000, mintc=0

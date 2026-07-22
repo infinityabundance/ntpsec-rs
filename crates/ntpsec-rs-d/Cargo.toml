@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "ntpd-rs"
+path = "src/main.rs"
+
 [dependencies]
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.12" }
 ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.2.12" }

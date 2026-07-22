@@ -49,25 +49,57 @@ struct Cli {
     timeout: u32,
 }
 
+enum CliCommand {
+    ReadVar { associd: u16 },
+    Associations,
+    Peers,
+}
+
+fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
+    let mut words = input.split_whitespace();
+    let command = words.next().unwrap_or_default();
+
+    match command {
+        "rv" => {
+            // Extra arguments are an error
+            let associd_str = words.next();
+            if words.next().is_some() {
+                return Err(format!(
+                    "too many arguments for 'rv': expected 0 or 1 associd, got extra arguments"
+                ));
+            }
+            let associd = match associd_str {
+                Some(a) => {
+                    let val = if let Some(stripped) = a.strip_prefix("associd=") {
+                        stripped
+                    } else {
+                        a
+                    };
+                    val.parse::<u16>()
+                        .map_err(|_| format!("invalid associd: '{val}'"))?
+                }
+                None => 0u16,
+            };
+            Ok(CliCommand::ReadVar { associd })
+        }
+        "associations" | "as" => Ok(CliCommand::Associations),
+        "peers" | "pe" => Ok(CliCommand::Peers),
+        _ => Err(format!("unknown command: {command}")),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let mut client = ControlClient::new(cli.timeout, 1);
 
     for cmd in &cli.command {
-        // Split command into words: "rv 12345" → ["rv", "12345"]
-        let mut words = cmd.split_whitespace();
-        let command = words.next().unwrap_or_default();
-
-        let result: Result<String, String> = match command {
-            "rv" => {
-                let associd = match parse_associd(words.next()) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        eprintln!("ERROR: {e}");
-                        continue;
-                    }
-                };
+        let result: Result<String, String> = match parse_cli_command(cmd) {
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            Ok(CliCommand::ReadVar { associd }) => {
                 if associd == 0 {
                     client
                         .read_system_vars(&cli.host, cli.port)
@@ -80,11 +112,11 @@ fn main() {
                         .map_err(|e| format!("{e}"))
                 }
             }
-            "associations" | "as" => client
+            Ok(CliCommand::Associations) => client
                 .read_associations(&cli.host, cli.port)
                 .map(|assocs| format_associations(&assocs))
                 .map_err(|e| format!("{e}")),
-            "peers" | "pe" => {
+            Ok(CliCommand::Peers) => {
                 let assoc_result = client.read_associations(&cli.host, cli.port);
                 match assoc_result {
                     Ok(assocs) => {
@@ -118,7 +150,6 @@ fn main() {
                     Err(e) => Err(format!("{e}")),
                 }
             }
-            _ => Err(format!("unknown command: {command}")),
         };
 
         match result {
@@ -126,23 +157,4 @@ fn main() {
             Err(e) => eprintln!("ERROR: {}", e),
         }
     }
-}
-
-/// Parse optional associd from command argument.
-///   "12345"        → Ok(12345)
-///   "associd=12345" → Ok(12345)
-///   None           → Ok(0)   (system)
-///   "garbage"      → Err(...)
-fn parse_associd(arg: Option<&str>) -> Result<u16, String> {
-    let arg = match arg {
-        Some(a) => a,
-        None => return Ok(0),
-    };
-    let val = if let Some(stripped) = arg.strip_prefix("associd=") {
-        stripped
-    } else {
-        arg
-    };
-    val.parse::<u16>()
-        .map_err(|_| format!("invalid associd: '{val}'"))
 }

@@ -229,15 +229,13 @@ fn recvmsg_with_timestamp(
 
     // Source address storage
     let mut src_addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut msg = libc::msghdr {
-        msg_name: &mut src_addr as *mut _ as *mut libc::c_void,
-        msg_namelen: std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t,
-        msg_iov: &mut iov,
-        msg_iovlen: 1,
-        msg_control: cmsg_ptr,
-        msg_controllen: 256,
-        msg_flags: 0,
-    };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_name = &mut src_addr as *mut _ as *mut libc::c_void;
+    msg.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_ptr;
+    msg.msg_controllen = 256;
 
     // Use the raw file descriptor from socket2
     let fd = socket.as_raw_fd();

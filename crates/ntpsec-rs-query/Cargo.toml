@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "ntpq-rs"
+path = "src/main.rs"
+
 [dependencies]
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.12" }
 clap = { version = "4", features = ["derive"] }

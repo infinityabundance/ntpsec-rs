@@ -4,13 +4,16 @@ set -e
 
 cd "$(dirname "$0")"
 
-IMAGES="alpine debian-stable ubuntu-lts"
+# Build in order of size (Alpine fastest, Fedora largest)
+IMAGES="alpine debian-stable ubuntu-lts fedora"
 
 for img in $IMAGES; do
+    echo ""
     echo "=== Building ntpsec-oracle:${img} ==="
     docker build -f "${img}.dockerfile" -t "ntpsec-oracle:${img}" ..
     echo "=== Done: ${img} ==="
-    echo ""
 done
 
+echo ""
 echo "=== All oracle images built ==="
+docker images

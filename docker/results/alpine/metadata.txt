@@ -1,0 +1,3 @@
+image=ntpsec-oracle:alpine
+date=2026-07-22T06:23:37Z
+host=vanir

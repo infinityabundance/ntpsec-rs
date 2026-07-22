@@ -1,16 +1,16 @@
-# Ubuntu 24.04 LTS — ntpsec oracle container
-FROM ubuntu:24.04
+# Fedora 40 — ntpsec oracle container
+FROM fedora:40
 
-RUN apt-get update && apt-get install -y \
+RUN dnf install -y \
     ntpsec \
-    build-essential \
+    gcc \
     git \
     clang \
-    linux-headers-generic \
+    kernel-headers \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    && dnf clean all
 
-# Install rustup for a modern Rust toolchain (system cargo too old for lockfile v4)
+# Install rustup for a modern Rust toolchain
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 

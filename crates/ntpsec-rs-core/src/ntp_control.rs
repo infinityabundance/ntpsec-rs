@@ -171,6 +171,48 @@ pub mod sys_status {
     pub fn decode_li(status: u16) -> u16 {
         (status >> LI_SHIFT) & 0x03
     }
+
+    /// Decode clock source from a status word.
+    pub fn decode_source(status: u16) -> u16 {
+        (status >> CS_SHIFT) & 0x3F
+    }
+
+    /// Decode event count from a status word (bits 7-4).
+    pub fn decode_event_count(status: u16) -> u16 {
+        (status >> EVENT_COUNT_SHIFT) & 0x0F
+    }
+
+    /// Decode event code from a status word (bits 3-0).
+    pub fn decode_event_code(status: u16) -> u16 {
+        status & EVENT_CODE_MASK
+    }
+
+    /// Clock source name matching ntpq output.
+    /// Maps the 6-bit source value to its display name.
+    pub fn source_name(source: u16) -> &'static str {
+        match source & 0x3F {
+            0 => "sync_unspec",
+            1 => "sync_lcl",
+            2 => "sync_pps",
+            3 => "sync_ntp",
+            4 => "sync_nist",
+            5 => "sync_acts",
+            6 => "sync_radio",
+            7 => "sync_hwclock",
+            _ => "sync_unknown",
+        }
+    }
+
+    /// Leap indicator name matching ntpq output.
+    pub fn li_name(li: u16) -> &'static str {
+        match li & 0x03 {
+            0 => "leap_none",
+            1 => "leap_add_sec",
+            2 => "leap_del_sec",
+            3 => "leap_alarm",
+            _ => "leap_unknown",
+        }
+    }
 }
 
 /// Control message header — 12 bytes on wire, all big-endian.
@@ -388,16 +430,19 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "leap" => Some(format!("{:02}", sys.leap as u8)),
         "stratum" => Some(format!("{}", sys.stratum)),
         "precision" => Some(format!("{}", sys.precision)),
-        "rootdelay" => Some(format!("{:.3}", sys.root_delay)),
-        "rootdisp" => Some(format!("{:.3}", sys.root_dispersion)),
+        // Use Debug format for f64 to match C ntpd's %g output:
+        //   format!("{:?}", 0.0)      => "0.0"
+        //   format!("{:?}", 7947.515) => "7947.515"
+        "rootdelay" => Some(format!("{:?}", sys.root_delay)),
+        "rootdisp" => Some(format!("{:?}", sys.root_dispersion)),
         "refid" => Some(format_refid(sys.reference_id)),
         "reftime" => Some(crate::ntp_fp::dolfptoa(sys.reference_time, 6)),
         "peer" => Some(format!("{}", sys.peer_count)),
         "tc" => Some(format!("{}", sys.poll)),
-        "offset" => Some(format!("{:.3}", sys.sys_offset)),
-        "frequency" => Some(format!("{:.3}", sys.sys_frequency)),
-        "sys_jitter" => Some(format!("{:.3}", sys.sys_jitter)),
-        "rootdist" => Some(format!("{:.3}", sys.sys_rootdist)),
+        "offset" => Some(format!("{:?}", sys.sys_offset)),
+        "frequency" => Some(format!("{:?}", sys.sys_frequency)),
+        "sys_jitter" => Some(format!("{:?}", sys.sys_jitter)),
+        "rootdist" => Some(format!("{:?}", sys.sys_rootdist)),
         _ => None,
     }
 }
@@ -407,10 +452,10 @@ pub fn get_peer_variable(peer: &super::ntp_peer::Peer, name: &str) -> Option<Str
     match name {
         "srcaddr" => Some(crate::ntp_net::socktoa(&peer.srcaddr)),
         "stratum" => Some(format!("{}", peer.stratum)),
-        "offset" => Some(format!("{:.3}", peer.offset)),
-        "delay" => Some(format!("{:.3}", peer.delay)),
-        "dispersion" => Some(format!("{:.3}", peer.dispersion)),
-        "jitter" => Some(format!("{:.3}", peer.jitter)),
+        "offset" => Some(format!("{:?}", peer.offset)),
+        "delay" => Some(format!("{:?}", peer.delay)),
+        "dispersion" => Some(format!("{:?}", peer.dispersion)),
+        "jitter" => Some(format!("{:?}", peer.jitter)),
         "hpoll" => Some(format!("{}", peer.hpoll)),
         "ppoll" => Some(format!("{}", peer.ppoll)),
         "reach" => Some(format!("{:02x}", peer.reach.register())),
@@ -421,8 +466,8 @@ pub fn get_peer_variable(peer: &super::ntp_peer::Peer, name: &str) -> Option<Str
         "hmode" => Some(format!("{}", peer.hmode as u8)),
         "pmode" => Some(format!("{}", peer.pmode as u8)),
         "precision" => Some(format!("{}", peer.precision)),
-        "rootdelay" => Some(format!("{:.3}", peer.root_delay)),
-        "rootdisp" => Some(format!("{:.3}", peer.root_dispersion)),
+        "rootdelay" => Some(format!("{:?}", peer.root_delay)),
+        "rootdisp" => Some(format!("{:?}", peer.root_dispersion)),
         _ => None,
     }
 }
