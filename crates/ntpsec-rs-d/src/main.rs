@@ -23,8 +23,12 @@ use std::time::Duration;
 
 use clap::Parser;
 use ntpsec_rs_core::daemon_engine::*;
+use ntpsec_rs_core::daemon_engine::*;
+use ntpsec_rs_core::ntp_config::*;
 use ntpsec_rs_core::ntp_config::*;
 use ntpsec_rs_core::ntp_io::*;
+use ntpsec_rs_core::ntp_io::*;
+use ntpsec_rs_core::ntp_sandbox;
 
 // ──── CLI ─────────────────────────────────────────────────────────────────
 
@@ -147,6 +151,28 @@ fn main() {
         return;
     }
 
+    // ──── Drop Privileges ──────────────────────────────────────────
+    if let Some(ref user) = cli.user {
+        match drop_privileges(user) {
+            Ok(()) => tracing::info!("Dropped privileges to '{}'", user),
+            Err(e) => {
+                tracing::error!("Failed to drop privileges: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // ──── Seccomp Sandbox ──────────────────────────────────────────
+    if cli.seccomp {
+        match ntp_sandbox::enable_sandbox() {
+            Ok(()) => tracing::info!("Seccomp sandbox enabled"),
+            Err(e) => {
+                tracing::error!("Failed to enable seccomp: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // ──── Signal Handling ────────────────────────────────────────────
     let running = Arc::new(AtomicBool::new(true));
     let wants_reload = Arc::new(AtomicBool::new(false));
@@ -195,7 +221,7 @@ fn main() {
             }
         }
 
-        // 3. Periodic status
+        // 3. Periodic status & statistics
         if iteration % 100 == 0 {
             tracing::info!(
                 "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm",
@@ -204,6 +230,45 @@ fn main() {
                 engine.system.sys_offset,
                 engine.loop_filter.frequency_ppm(),
             );
+            // Emit loopstats (one line per 100 iterations)
+            let loopstats_line = format!(
+                "{} {:.6} {:.6} {:.3} {:.6} {:.6}",
+                iteration / 100,
+                iteration as f64,
+                engine.system.sys_offset,
+                engine.loop_filter.frequency_ppm(),
+                engine.loop_filter.jitter,
+                engine.loop_filter.wander,
+            );
+            execute_actions(
+                &[DaemonAction::AppendStatistic {
+                    stream: "loopstats".to_string(),
+                    line: loopstats_line,
+                }],
+                &mut clock,
+                &mut network,
+                &mut store,
+            );
+            // Emit peerstats for each reachable peer
+            for i in 0..engine.peers.len() {
+                if let Some(peer) = engine.peers.get(i) {
+                    if peer.reach.is_reachable() {
+                        let peerstats_line = format!(
+                            "{} {:.6} {:.6} {:.6} {:.6}",
+                            iteration as f64, peer.offset, peer.delay, peer.dispersion, peer.jitter,
+                        );
+                        execute_actions(
+                            &[DaemonAction::AppendStatistic {
+                                stream: "peerstats".to_string(),
+                                line: peerstats_line,
+                            }],
+                            &mut clock,
+                            &mut network,
+                            &mut store,
+                        );
+                    }
+                }
+            }
         }
 
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -447,6 +512,64 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
         iterations,
         network.sent_packets.len(),
     );
+}
+
+// ──── Privilege Dropping ────────────────────────────────────────────────
+
+/// Drop privileges to the given username after binding privileged sockets.
+/// Calls setgid() + setuid() with supplementary groups.
+fn drop_privileges(user: &str) -> Result<(), String> {
+    // Look up user by name
+    let pw = unsafe {
+        let buf = vec![0i8; 4096];
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let cuser = std::ffi::CString::new(user).map_err(|e| format!("invalid username: {e}"))?;
+        let ret = libc::getpwnam_r(
+            cuser.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        );
+        if ret != 0 || result.is_null() {
+            return Err(format!("user '{}' not found", user));
+        }
+        pwd
+    };
+    let uid = pw.pw_uid;
+    let gid = pw.pw_gid;
+
+    // Initialize supplementary groups
+    let cuser = std::ffi::CString::new(user).map_err(|e| format!("invalid username: {e}"))?;
+    let ret = unsafe { libc::initgroups(cuser.as_ptr(), gid) };
+    if ret != 0 {
+        return Err(format!(
+            "initgroups failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // Set primary group
+    let ret = unsafe { libc::setgid(gid) };
+    if ret != 0 {
+        return Err(format!(
+            "setgid failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // Set user
+    let ret = unsafe { libc::setuid(uid) };
+    if ret != 0 {
+        return Err(format!(
+            "setuid failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    tracing::info!("Privileges dropped to uid={} gid={}", uid, gid);
+    Ok(())
 }
 
 // ──── Tests ───────────────────────────────────────────────────────────────
