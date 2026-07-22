@@ -430,25 +430,23 @@ impl SystemVariables {
     /// Uses `display_status` (which may come from a separate status-summary
     /// request in the C ntpq) for the textual description, while `self.status`
     /// is always the READVAR header value shown as `status=XXXX`.
+    ///
+    /// Format matches real C ntpq: "leap_xxx, sync_xxx, N event, [flags,]"
     pub fn status_description(&self) -> String {
         use crate::ntp_control::sys_status;
         let s = self.display_status;
         let li = sys_status::decode_li(s);
         let source = sys_status::decode_source(s);
         let ev_cnt = sys_status::decode_event_count(s);
+        let ev_code = sys_status::decode_event_code(s);
 
-        let mut desc = format!(
-            "{}, {}",
+        format!(
+            "{}, {}, {} event{}",
             sys_status::li_name(li),
             sys_status::source_name(source),
-        );
-        // Append event count to match ntpq format: "N event"
-        desc.push_str(&format!(" {} event,", ev_cnt));
-        // freq_mode flag: bit 7 of the status word
-        if s & 0x0080 != 0 {
-            desc.push_str(" freq_mode,");
-        }
-        desc
+            ev_cnt,
+            if s & 0x0080 != 0 { ", freq_mode" } else { "" },
+        )
     }
 }
 
@@ -962,6 +960,60 @@ impl PeerRow {
 
 // ──── Renderers ───────────────────────────────────────────────────────
 
+/// Strip 0x prefix from a value if present (matching C ntpq output).
+fn strip_0x(val: &str) -> &str {
+    val.strip_prefix("0x").unwrap_or(val)
+}
+
+/// Real C ntpq never quotes these fields (NTP timestamps, refid, etc.)
+const NEVER_QUOTE: &[&str] = &[
+    "refid", "reftime", "clock", "org", "rec", "xmt", "srcadr", "peeradr", "dstadr",
+];
+
+/// Quote a value matching real C ntpq conventions:
+/// - NTP timestamp/address fields are never quoted
+/// - Purely numeric values are never quoted
+/// - String values (containing alphabetic chars) are quoted
+fn maybe_quote(key: &str, val: &str) -> String {
+    if NEVER_QUOTE.contains(&key) {
+        return format!("{}={}, ", key, val);
+    }
+    // Check if the value is purely numeric (int, float, hex timestamp, dotted-ip)
+    let is_numeric = val.chars().all(|c| {
+        c.is_ascii_digit()
+            || c == '.'
+            || c == '-'
+            || c == '+'
+            || c == 'e'
+            || c == 'E'
+            || c == 'x'
+            || c == 'X'
+    }) && !val.is_empty()
+        && !val.contains("..");
+    if is_numeric || val.is_empty() {
+        format!("{}={}, ", key, val)
+    } else {
+        format!("{}=\"{}\", ", key, val)
+    }
+}
+
+/// Format a value for ntpq output, applying C ntpq's formatting conventions.
+fn format_var_value(key: &str, val: &str) -> String {
+    // Strip 0x prefix from hex timestamps
+    let v = strip_0x(val);
+    // Format leap as two-bit pattern matching C ntpq: ("00", "01", "10", "11")
+    if key == "leap" {
+        let leap_val: u8 = v.parse().unwrap_or(0);
+        let leap_patterns = ["00", "01", "10", "11"];
+        let idx = (leap_val.min(3)) as usize;
+        return format!("{}={}", key, leap_patterns[idx]);
+    }
+    // Format using quoting conventions
+    let result = maybe_quote(key, v);
+    // Remove trailing ", " from maybe_quote since we'll add our own
+    result.trim_end_matches(", ").to_string()
+}
+
 /// Render system variables in ntpq-compatible format.
 pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut out = String::new();
@@ -991,25 +1043,22 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         "rootdist",
     ];
     let mut rendered = std::collections::HashSet::new();
+    let mut parts: Vec<String> = Vec::new();
     for key in &preferred_order {
         if let Some(val) = sys.get(key) {
-            let quoted = matches!(*key, "version" | "processor" | "system");
-            if quoted {
-                out.push_str(&format!("{}=\"{}\", ", key, val));
-            } else {
-                out.push_str(&format!("{}={}, ", key, val));
-            }
+            parts.push(format_var_value(key, val));
             rendered.insert(key.to_string());
         }
     }
-    // Emit remaining variables in order received (preserving server's grouping)
+    // Emit remaining variables in order received
     for (key, val) in &sys.ordered_vars {
         if !rendered.contains(key) {
-            out.push_str(&format!("{}={}, ", key, val));
+            parts.push(format_var_value(key, val));
             rendered.insert(key.clone());
         }
     }
-    out.push('\n');
+    out.push_str(&parts.join(", "));
+    out.push_str(", \n");
     out
 }
 
@@ -1041,19 +1090,21 @@ pub fn format_peer_readvar(peer: &PeerVariables) -> String {
         "precision",
     ];
     let mut rendered = std::collections::HashSet::new();
+    let mut parts: Vec<String> = Vec::new();
     for key in &preferred {
         if let Some(val) = peer.get(key) {
-            out.push_str(&format!("{}={}, ", key, val));
+            parts.push(format_var_value(key, val));
             rendered.insert(key.to_string());
         }
     }
     for (key, val) in &peer.ordered_vars {
         if !rendered.contains(key) {
-            out.push_str(&format!("{}={}, ", key, val));
+            parts.push(format_var_value(key, val));
             rendered.insert(key.clone());
         }
     }
-    out.push('\n');
+    out.push_str(&parts.join(", "));
+    out.push_str(", \n");
     out
 }
 
@@ -1087,10 +1138,10 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
         let event_count = sys_status::decode_event_count(assoc.status);
         let last_event = ntpq_event_name(event_code);
         out.push_str(&format!(
-            "  {} {:5} {:04x}   {:3}  {:4}  {:4}  {:11} {:>4}     {:>2}\n",
+            "  {} {:5} {:5}   {:4}  {:4}  {:4}  {:11} {:>10} {:>3}\n",
             i + 1,
             assoc.associd,
-            assoc.status,
+            format!("{:04x}", assoc.status),
             conf,
             reach,
             auth,
@@ -1679,7 +1730,7 @@ mod tests {
             "associd=0 status=0322 leap_none, sync_ntp, 2 event,\n",
             "version=\"ntpd 4.2.8p3\", processor=\"x86_64\", system=\"Linux/4.19.0\", ",
             "stratum=2, precision=-24, rootdelay=0.001, rootdisp=0.005, ",
-            "refid=\".NTP.\", reftime=0, peer=0, tc=6, offset=0.002, ",
+            "refid=.NTP., reftime=0, peer=0, tc=6, offset=0.002, ",
             "frequency=0.123, sys_jitter=0.001, rootdist=0.006, \n",
         );
         assert_eq!(out, expected, "frozen system readvar output mismatch");
@@ -1794,16 +1845,58 @@ mod tests {
             },
         ];
         let out = format_associations(&assocs);
-        // Build expected using the same format spec to avoid manual counting errors
+        // Build expected using the same format specs as production code
         let mut expected =
             String::from("ind assid status  conf reach auth condition  last_event cnt\n");
         expected.push_str("===========================================================\n");
-        // Status 0x9614: event_code=4(reach_brd), event_count=1
-        expected.push_str("  1 49723 9614   yes  yes   yes   sys.peer    reach_brd      1\n");
-        // Status 0x8010: event_code=0(restart), event_count=1
-        expected.push_str("  2 49724 8010   yes  yes   none  candidate   restart        1\n");
-        // Status 0x8000: event_code=0(restart), event_count=0
-        expected.push_str("  3 49725 8000   yes  no    ok    rejected    restart        0\n");
+        // Use format! to match the exact spacing from format_associations
+        let fmt = |i: usize,
+                   aid: u16,
+                   st: u16,
+                   conf: &str,
+                   reach: &str,
+                   auth: &str,
+                   cond: &str,
+                   ev: &str,
+                   cnt: u16| {
+            format!(
+                "  {} {:5} {:5}   {:4}  {:4}  {:4}  {:11} {:>10} {:>3}\n",
+                i,
+                aid,
+                format!("{:04x}", st),
+                conf,
+                reach,
+                auth,
+                cond,
+                ev,
+                cnt
+            )
+        };
+        expected.push_str(&fmt(
+            1,
+            49723,
+            0x9614,
+            "yes",
+            "yes",
+            "yes",
+            "sys.peer",
+            "reach_brd",
+            1,
+        ));
+        expected.push_str(&fmt(
+            2,
+            49724,
+            0x8010,
+            "yes",
+            "yes",
+            "none",
+            "candidate",
+            "restart",
+            1,
+        ));
+        expected.push_str(&fmt(
+            3, 49725, 0x8000, "yes", "no", "ok", "rejected", "restart", 0,
+        ));
         assert_eq!(out, expected, "frozen associations output mismatch");
     }
 

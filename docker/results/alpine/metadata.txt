@@ -1,4 +1,4 @@
 image=ntpsec-oracle:alpine
-date=2026-07-22T08:17:22Z
+date=2026-07-22T17:30:37Z
 host=vanir
-git_commit=6c7f6e7cc65a37b7e15f640fa61a9434200e29cf
+git_commit=d4c0c006ec08b5e0bce3f065292462e39591b89d

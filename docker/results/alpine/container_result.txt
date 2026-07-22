@@ -1,6 +1,6 @@
 image: ntpsec-oracle:alpine
-date: 2026-07-22T08:17:41Z
-git_commit: 6c7f6e7cc65a37b7e15f640fa61a9434200e29cf
+date: 2026-07-22T17:31:07Z
+git_commit: d4c0c006ec08b5e0bce3f065292462e39591b89d
 
 --- Forward Court (both clients query real ntpd) ---
 rv_forward: FAIL
@@ -8,7 +8,7 @@ associations_forward: FAIL
 peers_forward: FAIL
 
 --- Reverse Court (real ntpq queries ntpd-rs) ---
-rv_reverse: PASS
+rv_reverse: FAIL
 associations_reverse: PASS
 peers_reverse: PASS
 
