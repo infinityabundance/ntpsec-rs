@@ -113,8 +113,24 @@ impl DaemonEngine {
 
     /// Apply (or re-apply) configuration to the engine.
     /// Public for SIGHUP config reload from the daemon shell.
+    ///
+    /// On SIGHUP, the old configuration is replaced transactionally:
+    /// existing peers and timers are cleared before applying the new config
+    /// to prevent duplicate associations and timer multiplication.
     pub fn apply_config(&mut self, config: ConfigTree) {
-        self.config = config;
+        // Parse the new config fully before mutating state
+        let new_config = config;
+
+        // ── Clear existing dynamic state ──────────────────────────────
+        // Remove all existing peers and their poll timers
+        let old_ids: Vec<u16> = self.peers.iter().filter_map(|p| Some(p.associd)).collect();
+        for associd in &old_ids {
+            self.peers.remove_by_associd(*associd);
+        }
+        self.system.peer_count = 0;
+
+        // ── Apply new configuration ───────────────────────────────────
+        self.config = new_config;
         for opt in &self.config.options {
             match opt {
                 ConfigOption::Server {

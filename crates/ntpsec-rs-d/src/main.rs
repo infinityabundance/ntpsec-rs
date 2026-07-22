@@ -121,7 +121,10 @@ fn main() {
     let mut engine = DaemonEngine::new(config);
     let mut clock = ntpsec_rs_io::RealSystemClock::new();
     let mut network = ntpsec_rs_io::RealNetworkIo::new();
-    let mut store = ntpsec_rs_io::FileStateStore::new(&std::path::Path::new("/var/lib/ntp"));
+
+    // Determine stats/drift directory from config or default
+    let stats_dir = std::path::PathBuf::from("/var/lib/ntp");
+    let mut store = ntpsec_rs_io::FileStateStore::new(&stats_dir);
 
     // Apply CLI overrides
     if cli.slew {
@@ -131,10 +134,17 @@ fn main() {
         engine.loop_filter.panic_threshold = f64::MAX;
     }
 
+    // Use CLI driftfile if specified, otherwise default from config
+    let drift_path = cli
+        .driftfile
+        .as_ref()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| stats_dir.join("ntp.drift"));
+
     // Load drift file
     if let Ok(freq) = store.load_drift() {
         engine.loop_filter.frequency = freq;
-        tracing::info!("Loaded drift: {:.3} ppm", freq);
+        tracing::info!("Loaded drift ({:.3} ppm) from {:?}", freq, drift_path);
     }
 
     // ──── Bind Privileged Port ───────────────────────────────────────
@@ -187,16 +197,23 @@ fn main() {
     while running.load(Ordering::Relaxed) {
         iteration += 1;
 
-        // Check for SIGHUP config reload
+        // Check for SIGHUP config reload — parse BEFORE mutating state
         if wants_reload.swap(false, Ordering::Relaxed) {
             tracing::info!("SIGHUP received — reloading configuration");
             match read_config_file(&cli.config) {
                 Ok(new_config) => {
-                    engine.apply_config(new_config);
-                    tracing::info!("Configuration reloaded");
+                    if new_config.errors.is_empty() {
+                        engine.apply_config(new_config);
+                        tracing::info!("Configuration reloaded");
+                    } else {
+                        tracing::error!("SIGHUP config has errors — keeping old config");
+                        for err in &new_config.errors {
+                            tracing::error!("  Config error: {err}");
+                        }
+                    }
                 }
                 Err(e) => {
-                    tracing::error!("SIGHUP config reload failed: {e}");
+                    tracing::error!("SIGHUP config reload failed (keeping old config): {e}");
                 }
             }
         }
@@ -519,29 +536,36 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
 /// Drop privileges to the given username after binding privileged sockets.
 /// Calls setgid() + setuid() with supplementary groups.
 fn drop_privileges(user: &str) -> Result<(), String> {
-    // Look up user by name
-    let pw = unsafe {
-        let buf = vec![0i8; 4096];
-        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-        let mut result: *mut libc::passwd = std::ptr::null_mut();
-        let cuser = std::ffi::CString::new(user).map_err(|e| format!("invalid username: {e}"))?;
-        let ret = libc::getpwnam_r(
+    // Step 1: PR_SET_KEEPCAPS — retain bounding set through UID transition
+    let ret = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) };
+    if ret != 0 {
+        return Err(format!(
+            "PR_SET_KEEPCAPS failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // Step 2: Look up user by name
+    let mut buf = vec![0i8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let cuser = std::ffi::CString::new(user).map_err(|e| format!("invalid username: {e}"))?;
+    let ret = unsafe {
+        libc::getpwnam_r(
             cuser.as_ptr(),
             &mut pwd,
             buf.as_mut_ptr() as *mut libc::c_char,
             buf.len(),
             &mut result,
-        );
-        if ret != 0 || result.is_null() {
-            return Err(format!("user '{}' not found", user));
-        }
-        pwd
+        )
     };
-    let uid = pw.pw_uid;
-    let gid = pw.pw_gid;
+    if ret != 0 || result.is_null() {
+        return Err(format!("user '{}' not found", user));
+    }
+    let uid = pwd.pw_uid;
+    let gid = pwd.pw_gid;
 
-    // Initialize supplementary groups
-    let cuser = std::ffi::CString::new(user).map_err(|e| format!("invalid username: {e}"))?;
+    // Step 3: Initialize supplementary groups
     let ret = unsafe { libc::initgroups(cuser.as_ptr(), gid) };
     if ret != 0 {
         return Err(format!(
@@ -550,7 +574,7 @@ fn drop_privileges(user: &str) -> Result<(), String> {
         ));
     }
 
-    // Set primary group
+    // Step 4: Change GID first, then UID (Linux capability semantics)
     let ret = unsafe { libc::setgid(gid) };
     if ret != 0 {
         return Err(format!(
@@ -558,8 +582,6 @@ fn drop_privileges(user: &str) -> Result<(), String> {
             std::io::Error::last_os_error()
         ));
     }
-
-    // Set user
     let ret = unsafe { libc::setuid(uid) };
     if ret != 0 {
         return Err(format!(
@@ -568,7 +590,63 @@ fn drop_privileges(user: &str) -> Result<(), String> {
         ));
     }
 
-    tracing::info!("Privileges dropped to uid={} gid={}", uid, gid);
+    // Step 5: Retain CAP_SYS_TIME for clock discipline
+    // We need effective + permitted caps after setuid.
+    // PR_SET_KEEPCAPS above made the permitted set survive the UID change;
+    // now we must raise the effective bit for CAP_SYS_TIME.
+    #[cfg(target_os = "linux")]
+    {
+        let cap = libc::CAP_SYS_TIME;
+        let header = libc::__user_cap_header_struct {
+            version: libc::LINUX_CAPABILITY_VERSION_3 as u32,
+            pid: 0,
+        };
+        // Read current caps
+        let mut data = [libc::__user_cap_data_struct {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        let ret = unsafe { libc::capget(&header, data.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(format!(
+                "capget failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // CAP_SYS_TIME is in the second word (index 1)
+        let mask: u32 = 1 << cap;
+        data[1].effective |= mask;
+        data[1].permitted |= mask;
+        // Preserve CAP_NET_BIND_SERVICE if already held
+        let net_mask: u32 = 1 << libc::CAP_NET_BIND_SERVICE;
+        data[0].effective |= net_mask;
+        data[0].permitted |= net_mask;
+        let ret = unsafe { libc::capset(&header, data.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(format!(
+                "capset failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    // Step 6: Verify identity
+    let actual_uid = unsafe { libc::getuid() };
+    let actual_gid = unsafe { libc::getgid() };
+    tracing::info!(
+        "Privileges dropped to uid={} gid={} (requested {}:{})",
+        actual_uid,
+        actual_gid,
+        uid,
+        gid,
+    );
+    if actual_uid != uid || actual_gid != gid {
+        return Err(format!(
+            "UID/GID mismatch: got {}:{} expected {}:{}",
+            actual_uid, actual_gid, uid, gid
+        ));
+    }
     Ok(())
 }
 
