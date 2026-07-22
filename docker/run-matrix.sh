@@ -41,11 +41,16 @@ for img in $IMAGES; do
     IMG_RESULTS="$RESULTS_DIR/${img}"
     mkdir -p "$IMG_RESULTS"
 
+    # Capture metadata from current source
+    GIT_COMMIT=$(cd /home/one/ntpsec-rs && git rev-parse HEAD 2>/dev/null || echo "unknown")
+    echo "$GIT_COMMIT" > "$IMG_RESULTS/git_commit.txt"
+
     # Write metadata
     cat > "$IMG_RESULTS/metadata.txt" << EOF
 image=ntpsec-oracle:${img}
 date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 host=$(hostname)
+git_commit=$GIT_COMMIT
 EOF
 
     # Write the oracle script to a temp file
@@ -69,6 +74,15 @@ mkdir -p "$RESULTS"
 ntpq --version 2>/dev/null > "$RESULTS/ntpq_version.txt" || true
 ntpd --version 2>/dev/null > "$RESULTS/ntpd_version.txt" || true
 cat /etc/os-release 2>/dev/null | head -4 > "$RESULTS/os_release.txt" || true
+
+# Record binary checksums
+sha256sum /opt/ntpsec-rs/target/release/ntpd-rs 2>/dev/null | cut -d' ' -f1 > "$RESULTS/ntpd-rs.sha256" || true
+sha256sum /opt/ntpsec-rs/target/release/ntpq-rs 2>/dev/null | cut -d' ' -f1 > "$RESULTS/ntpq-rs.sha256" || true
+sha256sum /opt/ntpsec-rs/target/release/ntpdig-rs 2>/dev/null | cut -d' ' -f1 > "$RESULTS/ntpdig-rs.sha256" || true
+# Only compute C ntpq hash if it's an ELF binary (not Python)
+if file /usr/bin/ntpq 2>/dev/null | grep -q ELF; then
+    sha256sum /usr/bin/ntpq 2>/dev/null | cut -d' ' -f1 > "$RESULTS/ntpq.sha256" || true
+fi
 
 # Volatile patterns normalised before diff
 VOLATILE_PATTERNS="clock|reftime|when|rcvbuf|clock_epoch|uptime|sys_epoch"
@@ -267,8 +281,8 @@ else
 
     # associations
     echo ""
-    echo "--- associations (reverse) ---"
-    if NTPQ_AS_REV=$(ntpq -c associations 2>"$RESULTS/associations_reverse.stderr"); then
+    echo "--- associations (reverse, real ntpq -4 127.0.0.1) ---"
+    if NTPQ_AS_REV=$(ntpq -4 -c associations 127.0.0.1 2>"$RESULTS/associations_reverse.stderr"); then
         if printf '%s\n' "$NTPQ_AS_REV" | grep -q '^ind assid'; then
             echo "$NTPQ_AS_REV" > "$RESULTS/associations_reverse.real.txt"
             report_pass "associations reverse"
@@ -286,8 +300,8 @@ else
 
     # peers
     echo ""
-    echo "--- peers (reverse) ---"
-    if NTPQ_PEERS_REV=$(ntpq -c peers 2>"$RESULTS/peers_reverse.stderr"); then
+    echo "--- peers (reverse, real ntpq -4 127.0.0.1) ---"
+    if NTPQ_PEERS_REV=$(ntpq -4 -c peers 127.0.0.1 2>"$RESULTS/peers_reverse.stderr"); then
         if printf '%s\n' "$NTPQ_PEERS_REV" | grep -q '^     remote'; then
             echo "$NTPQ_PEERS_REV" > "$RESULTS/peers_reverse.real.txt"
             report_pass "peers reverse"
@@ -370,20 +384,41 @@ ORACLE_EOF
         OVERALL_FAILED=1
     fi
 
-    # Save container results summary
-    echo "$img" > "$IMG_RESULTS/container_result.txt"
-    if [ -f "$IMG_RESULTS/rv_forward.result" ]; then
-        echo "rv_forward: $(cat $IMG_RESULTS/rv_forward.result)" >> "$IMG_RESULTS/container_result.txt"
-    fi
-    if [ -f "$IMG_RESULTS/associations_forward.result" ]; then
-        echo "associations_forward: $(cat $IMG_RESULTS/associations_forward.result)" >> "$IMG_RESULTS/container_result.txt"
-    fi
-    if [ -f "$IMG_RESULTS/peers_forward.result" ]; then
-        echo "peers_forward: $(cat $IMG_RESULTS/peers_forward.result)" >> "$IMG_RESULTS/container_result.txt"
-    fi
-    if [ -f "$IMG_RESULTS/ntpdig_rs.result" ]; then
-        echo "ntpdig_rs: $(cat $IMG_RESULTS/ntpdig_rs.result)" >> "$IMG_RESULTS/container_result.txt"
-    fi
+    # Save container results summary with metadata
+    {
+        echo "image: ntpsec-oracle:${img}"
+        echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if [ -f "$IMG_RESULTS/git_commit.txt" ]; then
+            echo "git_commit: $(cat $IMG_RESULTS/git_commit.txt)"
+        fi
+        echo ""
+        echo "--- Forward Court (both clients query real ntpd) ---"
+        for t in rv_forward associations_forward peers_forward; do
+            if [ -f "$IMG_RESULTS/$t.result" ]; then
+                echo "$t: $(cat $IMG_RESULTS/$t.result)"
+            fi
+        done
+        echo ""
+        echo "--- Reverse Court (real ntpq queries ntpd-rs) ---"
+        for t in rv_reverse associations_reverse peers_reverse; do
+            if [ -f "$IMG_RESULTS/$t.result" ]; then
+                echo "$t: $(cat $IMG_RESULTS/$t.result)"
+            fi
+        done
+        echo ""
+        echo "--- Rust Client Reverse (ntpq-rs queries ntpd-rs) ---"
+        if [ -f "$IMG_RESULTS/rv_reverse_rs.result" ]; then
+            echo "rv_reverse_rs: $(cat $IMG_RESULTS/rv_reverse_rs.result)"
+        fi
+        echo ""
+        echo "--- ntpdig ---"
+        if [ -f "$IMG_RESULTS/ntpdig_rs.result" ]; then
+            echo "ntpdig_rs: $(cat $IMG_RESULTS/ntpdig_rs.result)"
+        fi
+        if [ -f "$IMG_RESULTS/ntpdig_parity.result" ]; then
+            echo "ntpdig_parity: $(cat $IMG_RESULTS/ntpdig_parity.result)"
+        fi
+    } > "$IMG_RESULTS/container_result.txt"
 
     rm -f "$ORACLE_SCRIPT"
 done
