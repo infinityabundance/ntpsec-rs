@@ -759,7 +759,9 @@ impl PeerRow {
             .get("reach")
             .and_then(|s| u8::from_str_radix(s, 16).ok())
             .unwrap_or(0);
-        let when = None; // ntpq computes this client-side from last receive time
+        // Derive `when` from the `recv` variable (seconds since last packet)
+        // ntpq computes this client-side from the last receive time in the peer variables.
+        let when = pv.get("recv").and_then(|s| s.parse::<u64>().ok());
 
         Self {
             tally,
@@ -789,7 +791,7 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         sys.status,
         sys.status_description(),
     ));
-    // Output in the order: version, processor, system, then the rest
+    // Render preferred system keys first, then any remaining variables from ordered_vars
     let preferred_order = [
         "version",
         "processor",
@@ -808,14 +810,23 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         "sys_jitter",
         "rootdist",
     ];
+    let mut rendered = std::collections::HashSet::new();
     for key in &preferred_order {
         if let Some(val) = sys.get(key) {
-            // Quote string values
-            if matches!(*key, "version" | "processor" | "system" | "refid") {
+            let quoted = matches!(*key, "version" | "processor" | "system" | "refid");
+            if quoted {
                 out.push_str(&format!("{}=\"{}\", ", key, val));
             } else {
                 out.push_str(&format!("{}={}, ", key, val));
             }
+            rendered.insert(key.to_string());
+        }
+    }
+    // Emit remaining variables in order received (preserving server's grouping)
+    for (key, val) in &sys.ordered_vars {
+        if !rendered.contains(key) {
+            out.push_str(&format!("{}={}, ", key, val));
+            rendered.insert(key.clone());
         }
     }
     out.push('\n');
@@ -831,7 +842,7 @@ pub fn format_peer_readvar(peer: &PeerVariables) -> String {
         peer.status,
         peer.get("srcaddr").unwrap_or("unknown"),
     ));
-    let keys = [
+    let preferred = [
         "srcaddr",
         "stratum",
         "offset",
@@ -849,9 +860,17 @@ pub fn format_peer_readvar(peer: &PeerVariables) -> String {
         "pmode",
         "precision",
     ];
-    for key in &keys {
+    let mut rendered = std::collections::HashSet::new();
+    for key in &preferred {
         if let Some(val) = peer.get(key) {
             out.push_str(&format!("{}={}, ", key, val));
+            rendered.insert(key.to_string());
+        }
+    }
+    for (key, val) in &peer.ordered_vars {
+        if !rendered.contains(key) {
+            out.push_str(&format!("{}={}, ", key, val));
+            rendered.insert(key.clone());
         }
     }
     out.push('\n');
@@ -1161,5 +1180,14 @@ mod tests {
         assert!(out.contains("associd=0"));
         assert!(out.contains("leap_none, sync_unspec"));
         assert!(out.contains("stratum=2"));
+    }
+
+    #[test]
+    fn test_readvar_contains_all_vars() {
+        // Verify that format_readvar includes variables beyond the preferred list
+        let text = "version=ntpd,stratum=2,offset=0.005,leap=00,extra_var=42";
+        let sv = SystemVariables::from_text(text, 0, 0x0622);
+        let out = format_readvar(&sv);
+        assert!(out.contains("extra_var=42"), "extra vars must be included");
     }
 }

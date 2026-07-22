@@ -61,7 +61,13 @@ fn main() {
 
         let result: Result<String, String> = match command {
             "rv" => {
-                let associd = parse_associd(words.next());
+                let associd = match parse_associd(words.next()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        continue;
+                    }
+                };
                 if associd == 0 {
                     client
                         .read_system_vars(&cli.host, cli.port)
@@ -123,17 +129,20 @@ fn main() {
 }
 
 /// Parse optional associd from command argument.
-///   "12345"        → 12345
-///   "associd=12345" → 12345
-///   None           → 0 (system)
-fn parse_associd(arg: Option<&str>) -> u16 {
+///   "12345"        → Ok(12345)
+///   "associd=12345" → Ok(12345)
+///   None           → Ok(0)   (system)
+///   "garbage"      → Err(...)
+fn parse_associd(arg: Option<&str>) -> Result<u16, String> {
     let arg = match arg {
         Some(a) => a,
-        None => return 0,
+        None => return Ok(0),
     };
-    if let Some(val) = arg.strip_prefix("associd=") {
-        val.parse().unwrap_or(0)
+    let val = if let Some(stripped) = arg.strip_prefix("associd=") {
+        stripped
     } else {
-        arg.parse().unwrap_or(0)
-    }
+        arg
+    };
+    val.parse::<u16>()
+        .map_err(|_| format!("invalid associd: '{val}'"))
 }
