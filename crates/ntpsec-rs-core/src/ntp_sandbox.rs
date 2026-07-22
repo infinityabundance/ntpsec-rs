@@ -82,11 +82,10 @@ fn install_seccomp_filter() -> Result<(), String> {
         // BPF instruction: allow everything (for now)
         // In production, this would enumerate allowed syscalls.
         filter.push(seccomp_bpf_sock_filter(
-            0x0004, // BPF_RET | BPF_K
-            0,
-            0,
-            0,
-            SECCOMP_RET_ALLOW as u32,
+            0x0004,                   // BPF_RET | BPF_K
+            0,                        // jt
+            0,                        // jf
+            SECCOMP_RET_ALLOW as u32, // k = action
         ));
 
         let prog = libc::sock_fprog {
