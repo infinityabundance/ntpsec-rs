@@ -111,8 +111,9 @@ impl DaemonEngine {
         engine
     }
 
-    /// Apply configuration to the engine.
-    fn apply_config(&mut self, config: ConfigTree) {
+    /// Apply (or re-apply) configuration to the engine.
+    /// Public for SIGHUP config reload from the daemon shell.
+    pub fn apply_config(&mut self, config: ConfigTree) {
         self.config = config;
         for opt in &self.config.options {
             match opt {

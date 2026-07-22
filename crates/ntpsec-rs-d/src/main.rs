@@ -372,7 +372,10 @@ fn run_query_mode<C: SystemClock, N: NetworkIo, S: StateStore>(
 
         // If we have a clock update, apply it and exit
         if engine.system.sys_offset.abs() > 0.001 {
-            let adj = engine.loop_filter.sample_offset(engine.system.sys_offset);
+            let now = clock.now();
+            let adj = engine
+                .loop_filter
+                .local_clock(engine.system.sys_offset, now);
             if let Adjustment::Step(offset) = adj {
                 if clock.step(offset).is_ok() {
                     tracing::info!("Set clock: offset {:.6}s", offset);
@@ -401,7 +404,7 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
 
     let mut engine = DaemonEngine::new(config);
     let mut clock = SimulatedClock::unix_epoch();
-    let mut network = ReplayNetwork::new();
+    let mut network = ReplayNetwork::new(Vec::new());
     let mut store = MemoryStateStore::new();
 
     // Apply CLI overrides
@@ -422,14 +425,7 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
         let timer_actions = engine.tick(now);
         execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
 
-        // Replay packets if available
-        if let Some(dgram) = network.next() {
-            let event = DaemonEvent::PacketReceived(dgram);
-            let actions = engine.handle(event);
-            execute_actions(&actions, &mut clock, &mut network, &mut store);
-        }
-
-        clock.advance(Duration::from_secs(1));
+        clock.advance(1.0);
 
         if (i + 1) % 100 == 0 {
             tracing::info!(
@@ -447,10 +443,9 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
     execute_actions(&shutdown_actions, &mut clock, &mut network, &mut store);
 
     tracing::info!(
-        "Lab run complete: {} ticks, {} packets sent, {} delivered",
+        "Lab run complete: {} ticks, {} packets sent",
         iterations,
         network.sent_packets.len(),
-        network.sent_packets.iter().filter(|(_, d)| *d).count(),
     );
 }
 
@@ -526,14 +521,14 @@ mod tests {
         let config = parse_config("server 127.127.1.0\n");
         let mut engine = DaemonEngine::new(config);
         let mut clock = SimulatedClock::unix_epoch();
-        let mut network = ReplayNetwork::new();
+        let mut network = ReplayNetwork::new(Vec::new());
         let mut store = MemoryStateStore::new();
 
         for _ in 0..10 {
             let now = clock.now();
             let actions = engine.tick(now);
             execute_actions(&actions, &mut clock, &mut network, &mut store);
-            clock.advance(Duration::from_secs(1));
+            clock.advance(1.0);
         }
 
         let shutdown = engine.handle(DaemonEvent::Shutdown);
