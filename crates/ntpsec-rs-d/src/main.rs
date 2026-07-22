@@ -124,7 +124,17 @@ fn main() {
 
     // Determine stats/drift directory from config or default
     let stats_dir = std::path::PathBuf::from("/var/lib/ntp");
-    let mut store = ntpsec_rs_io::FileStateStore::new(&stats_dir);
+    let drift_path = cli
+        .driftfile
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| stats_dir.join("ntp.drift"));
+    let mut store = ntpsec_rs_io::FileStateStore::with_drift_path(&stats_dir, &drift_path);
+    std::fs::create_dir_all(&stats_dir).ok();
+    // Ensure stats dir exists and is writable
+    if let Err(e) = std::fs::create_dir_all(&stats_dir) {
+        tracing::warn!("Cannot create stats dir {:?}: {e}", stats_dir);
+    }
 
     // Apply CLI overrides
     if cli.slew {
@@ -134,18 +144,14 @@ fn main() {
         engine.loop_filter.panic_threshold = f64::MAX;
     }
 
-    // Use CLI driftfile if specified, otherwise default from config
-    let drift_path = cli
-        .driftfile
-        .as_ref()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| stats_dir.join("ntp.drift"));
-
     // Load drift file
     if let Ok(freq) = store.load_drift() {
         engine.loop_filter.frequency = freq;
         tracing::info!("Loaded drift ({:.3} ppm) from {:?}", freq, drift_path);
     }
+
+    // ──── Load Key Files ────────────────────────────────────────────
+    load_key_files(&mut engine, &engine.config);
 
     // ──── Bind Privileged Port ───────────────────────────────────────
     if let Err(e) = network.bind("0.0.0.0:123") {
@@ -172,7 +178,14 @@ fn main() {
         }
     }
 
-    // ──── Seccomp Sandbox ──────────────────────────────────────────
+    // ──── Signal Handling (must be BEFORE seccomp — threads need clone/clone3) ─
+    let running = Arc::new(AtomicBool::new(true));
+    let wants_reload = Arc::new(AtomicBool::new(false));
+    let sig_exit_code = Arc::new(std::sync::Mutex::new(0i32));
+
+    init_signal_handlers(running.clone(), wants_reload.clone(), sig_exit_code.clone());
+
+    // ──── Seccomp Sandbox (after signal threads are created) ────────
     if cli.seccomp {
         match ntp_sandbox::enable_sandbox() {
             Ok(()) => tracing::info!("Seccomp sandbox enabled"),
@@ -182,13 +195,6 @@ fn main() {
             }
         }
     }
-
-    // ──── Signal Handling ────────────────────────────────────────────
-    let running = Arc::new(AtomicBool::new(true));
-    let wants_reload = Arc::new(AtomicBool::new(false));
-    let sig_exit_code = Arc::new(std::sync::Mutex::new(0i32));
-
-    init_signal_handlers(running.clone(), wants_reload.clone(), sig_exit_code.clone());
 
     // ──── Main Event Loop ────────────────────────────────────────────
     tracing::info!("Entering main event loop with {} peers", engine.peers.len());
@@ -203,8 +209,17 @@ fn main() {
             match read_config_file(&cli.config) {
                 Ok(new_config) => {
                     if new_config.errors.is_empty() {
-                        engine.apply_config(new_config);
-                        tracing::info!("Configuration reloaded");
+                        // Build new engine state atomically before swap
+                        let mut new_engine = DaemonEngine::new(new_config);
+                        // Inherit non-config state (loop filter, system)
+                        new_engine.loop_filter = engine.loop_filter.clone();
+                        new_engine.system = engine.system.clone();
+                        new_engine.precision = engine.precision;
+                        // Load key files for the new config
+                        load_key_files(&mut new_engine, &new_engine.config);
+                        // Transactional swap
+                        engine = new_engine;
+                        tracing::info!("Configuration reloaded (transactional)");
                     } else {
                         tracing::error!("SIGHUP config has errors — keeping old config");
                         for err in &new_config.errors {
@@ -270,9 +285,15 @@ fn main() {
             for i in 0..engine.peers.len() {
                 if let Some(peer) = engine.peers.get(i) {
                     if peer.reach.is_reachable() {
+                        let peer_addr = ntpsec_rs_core::ntp_net::socktoa(&peer.srcaddr);
                         let peerstats_line = format!(
-                            "{} {:.6} {:.6} {:.6} {:.6}",
-                            iteration as f64, peer.offset, peer.delay, peer.dispersion, peer.jitter,
+                            "{} {} {:.6} {:.6} {:.6} {:.6}",
+                            iteration as f64,
+                            peer_addr,
+                            peer.offset,
+                            peer.delay,
+                            peer.dispersion,
+                            peer.jitter,
                         );
                         execute_actions(
                             &[DaemonAction::AppendStatistic {
@@ -531,6 +552,34 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
     );
 }
 
+// ──── Key File Loading ──────────────────────────────────────────────────
+
+/// Load all key files referenced in the configuration into the engine.
+/// Called at startup and during SIGHUP reload.
+fn load_key_files(engine: &mut DaemonEngine, config: &ConfigTree) {
+    let keys_paths: Vec<String> = config
+        .options
+        .iter()
+        .filter_map(|opt| {
+            if let ntpsec_rs_core::ntp_config::ConfigOption::Keys(p) = opt {
+                Some(p.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for path in &keys_paths {
+        match std::fs::read_to_string(path) {
+            Ok(content) => match engine.auth.parse_keys_file(&content) {
+                Ok(count) => tracing::info!("Loaded {} keys from '{}'", count, path),
+                Err(e) => tracing::warn!("Failed to parse keys from '{}': {}", path, e),
+            },
+            Err(e) => tracing::warn!("Cannot read key file '{}': {}", path, e),
+        }
+    }
+}
+
 // ──── Privilege Dropping ────────────────────────────────────────────────
 
 /// Drop privileges to the given username after binding privileged sockets.
@@ -590,38 +639,28 @@ fn drop_privileges(user: &str) -> Result<(), String> {
         ));
     }
 
-    // Step 5: Retain CAP_SYS_TIME for clock discipline
-    // We need effective + permitted caps after setuid.
-    // PR_SET_KEEPCAPS above made the permitted set survive the UID change;
-    // now we must raise the effective bit for CAP_SYS_TIME.
+    // Step 5: Retain only CAP_SYS_TIME for clock discipline.
+    // CAP_SYS_TIME = 25. Linux v3 caps: caps 0-31 → data[0], caps 32-63 → data[1].
+    // So cap 25 belongs in data[0], bit 25.
     #[cfg(target_os = "linux")]
     {
-        let cap = libc::CAP_SYS_TIME;
+        const CAP_SYS_TIME_NUM: u32 = 25;
+        let cap_index = (CAP_SYS_TIME_NUM / 32) as usize; // 0
+        let cap_bit = 1u32 << (CAP_SYS_TIME_NUM % 32); // bit 25
+
         let header = libc::__user_cap_header_struct {
             version: libc::LINUX_CAPABILITY_VERSION_3 as u32,
             pid: 0,
         };
-        // Read current caps
+        // Zero out all capabilities, then set only CAP_SYS_TIME
         let mut data = [libc::__user_cap_data_struct {
             effective: 0,
             permitted: 0,
             inheritable: 0,
         }; 2];
-        let ret = unsafe { libc::capget(&header, data.as_mut_ptr()) };
-        if ret != 0 {
-            return Err(format!(
-                "capget failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        // CAP_SYS_TIME is in the second word (index 1)
-        let mask: u32 = 1 << cap;
-        data[1].effective |= mask;
-        data[1].permitted |= mask;
-        // Preserve CAP_NET_BIND_SERVICE if already held
-        let net_mask: u32 = 1 << libc::CAP_NET_BIND_SERVICE;
-        data[0].effective |= net_mask;
-        data[0].permitted |= net_mask;
+        data[cap_index].effective = cap_bit;
+        data[cap_index].permitted = cap_bit;
+        // inheritable stays 0
         let ret = unsafe { libc::capset(&header, data.as_mut_ptr()) };
         if ret != 0 {
             return Err(format!(
@@ -629,6 +668,9 @@ fn drop_privileges(user: &str) -> Result<(), String> {
                 std::io::Error::last_os_error()
             ));
         }
+        // Turn off PR_SET_KEEPCAPS now that caps are locked
+        unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
+        tracing::info!("Retained CAP_SYS_TIME, all other capabilities cleared");
     }
 
     // Step 6: Verify identity

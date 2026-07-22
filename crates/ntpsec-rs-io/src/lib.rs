@@ -434,21 +434,30 @@ fn netaddr_to_socketaddr(na: &NetAddr) -> std::net::SocketAddr {
 
 #[derive(Debug)]
 pub struct FileStateStore {
-    base_path: std::path::PathBuf,
+    drift_path: std::path::PathBuf,
+    stats_dir: std::path::PathBuf,
 }
 
 impl FileStateStore {
     pub fn new(base_path: &std::path::Path) -> Self {
         Self {
-            base_path: base_path.to_path_buf(),
+            drift_path: base_path.join("ntp.drift"),
+            stats_dir: base_path.to_path_buf(),
+        }
+    }
+
+    /// Create a FileStateStore with a custom drift file path.
+    pub fn with_drift_path(base_path: &std::path::Path, drift_file: &std::path::Path) -> Self {
+        Self {
+            drift_path: drift_file.to_path_buf(),
+            stats_dir: base_path.to_path_buf(),
         }
     }
 }
 
 impl StateStore for FileStateStore {
     fn load_drift(&self) -> Result<f64, IoError> {
-        let path = self.base_path.join("ntp.drift");
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read_to_string(&self.drift_path)
             .map_err(|e| IoError::FileFailed(format!("read drift: {e}")))?;
         content
             .trim()
@@ -457,8 +466,7 @@ impl StateStore for FileStateStore {
     }
 
     fn save_drift(&mut self, freq_ppm: f64) -> Result<(), IoError> {
-        let path = self.base_path.join("ntp.drift");
-        let tmp_path = self.base_path.join("ntp.drift.tmp");
+        let tmp_path = self.drift_path.with_extension("drift.tmp");
         std::fs::write(&tmp_path, format!("{:.3}\n", freq_ppm))
             .map_err(|e| IoError::FileFailed(format!("write drift: {e}")))?;
         std::fs::rename(&tmp_path, &path)
@@ -472,7 +480,7 @@ impl StateStore for FileStateStore {
     }
 
     fn append_stats(&mut self, stream: &str, line: &str) -> Result<(), IoError> {
-        let path = self.base_path.join(stream);
+        let path = self.stats_dir.join(stream);
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
