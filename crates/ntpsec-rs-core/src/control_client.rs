@@ -113,10 +113,24 @@ impl FragmentCollector {
             self.associd = Some(associd);
         }
 
-        // Check for conflicting overlap with existing fragments
-        let frag_end = offset.saturating_add(count);
+        // Check for overflow in offset + count
+        let frag_end = match offset.checked_add(count) {
+            Some(e) => e,
+            None => {
+                return Err(QueryError::BadResponse(
+                    "fragment offset+count overflows u16".to_string(),
+                ))
+            }
+        };
         for (&existing_offset, existing_data) in &self.fragments {
-            let existing_end = existing_offset.saturating_add(existing_data.len() as u16);
+            let existing_end = match existing_offset.checked_add(existing_data.len() as u16) {
+                Some(e) => e,
+                None => {
+                    return Err(QueryError::BadResponse(
+                        "existing fragment overflows u16".to_string(),
+                    ))
+                }
+            };
             if offset < existing_end && frag_end > existing_offset {
                 let overlap_start = offset.max(existing_offset);
                 let overlap_end = frag_end.min(existing_end);
@@ -134,11 +148,27 @@ impl FragmentCollector {
             }
         }
 
+        // If final_end is known, reject fragments that extend past it
+        if let Some(fe) = self.final_end {
+            if frag_end > fe {
+                return Err(QueryError::BadResponse(
+                    "fragment extends beyond final response extent".to_string(),
+                ));
+            }
+        }
+
         self.fragments.insert(offset, payload);
 
         // Track the final fragment extent
         if !more {
-            let current_end = offset.saturating_add(count);
+            let current_end = match offset.checked_add(count) {
+                Some(e) => e,
+                None => {
+                    return Err(QueryError::BadResponse(
+                        "final fragment offset+count overflows u16".to_string(),
+                    ))
+                }
+            };
             match self.final_end {
                 Some(existing) => {
                     if current_end != existing {
@@ -158,23 +188,26 @@ impl FragmentCollector {
     pub fn is_complete(&self) -> bool {
         let final_end = match self.final_end {
             Some(e) => e,
-            None => return false, // Haven't seen the final fragment yet
+            None => return false,
         };
         if final_end == 0 {
-            return true; // Empty response
+            return true;
         }
-
         let mut covered_end = 0u16;
         for (&offset, data) in &self.fragments {
             if offset > covered_end {
-                return false; // Hole detected
+                return false;
             }
-            let frag_end = offset.saturating_add(data.len() as u16);
+            let frag_end = match offset.checked_add(data.len() as u16) {
+                Some(e) if e <= final_end => e,
+                // Fragment extends past final_end (rejected by add_fragment, but defence-in-depth)
+                _ => return false,
+            };
             if frag_end > covered_end {
                 covered_end = frag_end;
             }
         }
-        covered_end >= final_end
+        covered_end == final_end
     }
 
     /// Assemble the collected fragments into a contiguous byte vector.
@@ -993,6 +1026,24 @@ mod tests {
         let done = fc.add_fragment(6, 4, b"6789", false, 0x0622, 0).unwrap();
         assert!(done);
         assert_eq!(fc.assemble().unwrap(), b"0123456789");
+    }
+
+    #[test]
+    fn test_fragment_excess_past_final_rejected() {
+        let mut fc = FragmentCollector::new();
+        // First fragment more=false at extent 5 → final_end=5
+        let _ = fc.add_fragment(0, 5, b"01234", false, 0x0622, 0).unwrap();
+        // Non-final fragment at 5..10 extends past final_end=5
+        let r = fc.add_fragment(5, 5, b"56789", true, 0x0622, 0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_fragment_overflow_rejected() {
+        let mut fc = FragmentCollector::new();
+        // offset=65535, count=10 would overflow u16
+        let r = fc.add_fragment(u16::MAX, 10, b"0123456789", false, 0x0622, 0);
+        assert!(r.is_err());
     }
 
     // ──── Association Status Courts ───────────────────────────────────
