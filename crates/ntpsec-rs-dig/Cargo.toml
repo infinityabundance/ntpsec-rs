@@ -10,5 +10,5 @@ name = "ntpdig-rs"
 path = "src/main.rs"
 
 [dependencies]
-ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.12" }
+ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.13" }
 clap = { version = "4", features = ["derive"] }
