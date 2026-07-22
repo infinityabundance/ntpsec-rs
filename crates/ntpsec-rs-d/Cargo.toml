@@ -10,9 +10,10 @@ name = "ntpd-rs"
 path = "src/main.rs"
 
 [dependencies]
-ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.13" }
-ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.2.13" }
+ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.16" }
+ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.2.16" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+signal-hook = "0.3"
