@@ -177,24 +177,18 @@ fn main() {
         let target_gid = lookup_gid(user).unwrap_or(0);
 
         // Ensure stats dir exists and is owned by the target user
-        std::fs::create_dir_all(&stats_dir).ok();
-        unsafe {
-            libc::chown(
-                stats_dir.to_string_lossy().as_bytes().as_ptr() as *const libc::c_char,
-                target_uid,
-                target_gid,
-            );
+        if let Err(e) = std::fs::create_dir_all(&stats_dir) {
+            tracing::warn!("Cannot create stats dir {:?}: {e}", stats_dir);
+        } else if let Err(e) = chown_path(&stats_dir, target_uid, target_gid) {
+            tracing::warn!("Cannot chown stats dir: {e}");
         }
 
         // Ensure drift file parent directory exists and is owned
         if let Some(parent) = drift_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-            unsafe {
-                libc::chown(
-                    parent.to_string_lossy().as_bytes().as_ptr() as *const libc::c_char,
-                    target_uid,
-                    target_gid,
-                );
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("Cannot create drift parent {:?}: {e}", parent);
+            } else if let Err(e) = chown_path(parent, target_uid, target_gid) {
+                tracing::warn!("Cannot chown drift parent: {e}");
             }
         }
     }
@@ -611,6 +605,23 @@ fn collect_key_paths(config: &ConfigTree) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Chown a path to the given UID/GID using a proper NUL-terminated C string.
+fn chown_path(path: &std::path::Path, uid: libc::uid_t, gid: libc::gid_t) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("path contains embedded NUL: {}", path.display()))?;
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(format!(
+            "chown {} failed: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// Look up a user's UID by name.

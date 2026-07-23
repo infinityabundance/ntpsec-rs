@@ -216,9 +216,10 @@ if netstat -tuln 2>/dev/null | grep -q ':123 '; then
     sleep 3
 fi
 
-# Start ntpd-rs (Rust daemon) on port 123
-# Redirect both stdout and stderr to the results dir for diagnostics
-$NTPD_RS -c "$CONF" -n > "$RESULTS/ntpd-rs.log" 2>&1 &
+# Start ntpd-rs (Rust daemon) on port 123 — with hardening flags
+# Creates 'ntp' user for -u flag if it doesn't exist
+adduser -D ntp 2>/dev/null || true
+$NTPD_RS -c "$CONF" -n -u ntp --seccomp > "$RESULTS/ntpd-rs.log" 2>&1 &
 NTPD_RS_PID=$!
 sleep 3
 
@@ -230,6 +231,8 @@ if ! kill -0 "$NTPD_RS_PID" 2>/dev/null; then
     echo "FAIL" > "$RESULTS/peers_reverse.result"
 else
     echo "  ntpd-rs PID: $NTPD_RS_PID"
+    echo "  ntpd-rs UID: $(ps -o uid= -p $NTPD_RS_PID 2>/dev/null || echo 'unknown')" >> "$RESULTS/ntpd-rs.log"
+    echo "  ntpd-rs seccomp: $(cat /proc/$NTPD_RS_PID/status 2>/dev/null | grep Seccomp || echo 'unknown')" >> "$RESULTS/ntpd-rs.log"
 
     # Check if port 123 is actually bound
     if netstat -tuln 2>/dev/null | grep -q ':123 '; then
