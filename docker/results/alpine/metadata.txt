@@ -1,3 +1,0 @@
-image=ntpsec-oracle:alpine
-date=2026-07-23T02:38:57Z
-git_commit=97a5b6c763813692c956ca0b769e1c05220a88ac
