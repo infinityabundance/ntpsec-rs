@@ -1,0 +1,27 @@
+image: ntpsec-oracle:ubuntu-lts
+date: 2026-07-23T23:45:13Z
+git_commit: 71fd5dc6a80836e92228a2c9aceeb6ac2cd2c119
+
+--- Forward Court (ntpq-rs vs real ntpd) ---
+rv_forward: FAIL
+associations_forward: FAIL
+peers_forward: FAIL
+
+--- Reverse Court (real ntpq vs ntpd-rs -u ntp --seccomp) ---
+rv_reverse: FAIL
+associations_reverse: FAIL
+peers_reverse: FAIL
+
+--- Hardening ---
+uid: FAIL
+seccomp: PASS
+capability: FAIL
+sighup: FAIL
+sigterm: FAIL
+
+--- Rust Client Reverse ---
+rv_reverse_rs: FAIL
+
+--- ntpdig ---
+ntpdig_rs: PASS
+ntpdig_parity: SKIP

@@ -1,6 +1,6 @@
 associd=0 status=c000 leap_alarm, sync_unspec, no events, unspecified,
 version=ntpd-rs 1.3.3, processor=x86_64, system=linux/linux, leap=11,
-stratum=16, precision=0, rootdelay=0.0, rootdisp=59906.47695925014,
+stratum=16, precision=0, rootdelay=0.0, rootdisp=59907.58484392029,
 refid=0.0.0.0, reftime=00000000.00000000 2036-02-07T06:28:16.000, peer=1,
 tc=4, offset=0.0, frequency=0.0, sys_jitter=0.0,
-rootdist=59906.47695925014
+rootdist=59907.58484392029

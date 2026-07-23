@@ -1,0 +1,3 @@
+     remote           refid      st t when poll reach   delay   offset  jitter
+==============================================================================
+ *LOCL             .LOCL.       10 u    -   64     0   0.000    0.000   0.000
