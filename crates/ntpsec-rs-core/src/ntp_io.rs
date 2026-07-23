@@ -213,6 +213,12 @@ pub enum DaemonEvent {
     PacketReceived(ReceivedDatagram),
     TimerFired(TimerId),
     Shutdown,
+    /// A synthetic NTP packet from a refclock driver.
+    RefclockSample {
+        associd: u16,
+        packet: NtpPacket,
+        rx_time: NtpTs64,
+    },
 }
 
 /// Timer identifiers for the event loop.
@@ -239,6 +245,13 @@ pub enum DaemonAction {
         line: String,
     },
     Log(String),
+    /// A refclock sample produced by poll_all(). The daemon loop feeds this
+    /// back through engine.handle() as DaemonEvent::RefclockSample.
+    RefclockSample {
+        associd: u16,
+        packet: NtpPacket,
+        rx_time: NtpTs64,
+    },
 }
 
 // Re-export Adjustment from loopfilter for the DaemonAction type.

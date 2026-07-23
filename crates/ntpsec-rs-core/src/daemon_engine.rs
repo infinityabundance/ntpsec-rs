@@ -91,6 +91,8 @@ pub struct RefclockInstance {
     pub driver: Option<RefclockDriver>,
     pub active: bool,
     pub samples_collected: u64,
+    /// Association ID assigned to the peer entry for this refclock.
+    pub associd: u16,
 }
 
 /// Manages refclock lifecycle — open, poll, close.
@@ -108,7 +110,7 @@ impl RefclockManager {
 
     /// Add a refclock by type and unit. The driver is NOT created here —
     /// actual device opening happens in `open_all()`.
-    pub fn add(&mut self, refclock_type: u8, unit: u8) {
+    pub fn add(&mut self, refclock_type: u8, unit: u8, associd: u16) {
         // Don't add duplicates
         if self
             .instances
@@ -123,6 +125,7 @@ impl RefclockManager {
             driver: None,
             active: false,
             samples_collected: 0,
+            associd,
         });
     }
 
@@ -239,9 +242,10 @@ impl RefclockManager {
         }
     }
 
-    /// Poll all active refclocks for samples. Returns synthetic packets.
+    /// Poll all active refclocks for samples. Returns synthetic packets
+    /// as DaemonAction::RefclockSample actions, plus log messages.
     /// Called from the daemon's main loop.
-    pub fn poll_all(&mut self, _now: NtpTs64) -> Vec<DaemonAction> {
+    pub fn poll_all(&mut self, now: NtpTs64) -> Vec<DaemonAction> {
         let mut actions = Vec::new();
         for inst in &mut self.instances {
             if !inst.active {
@@ -251,46 +255,49 @@ impl RefclockManager {
                 match driver {
                     RefclockDriver::Shm(ref mut shm) => {
                         if let Ok(Some(sample)) = shm.read_sample() {
-                            let _pkt = crate::refclock_shm::shm_sample_to_packet(
+                            let pkt = crate::refclock_shm::shm_sample_to_packet(
                                 &sample,
                                 sample.precision,
                             );
                             inst.samples_collected += 1;
-                            // TODO: route to clock filter via synthetic ReceivedDatagram
-                            actions.push(DaemonAction::Log(format!(
-                                "SHM{} sample #{} received",
-                                inst.unit, inst.samples_collected
-                            )));
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
                         }
                     }
                     RefclockDriver::Pps(ref mut pps) => {
                         if let Ok(Some(stamp)) = pps.read_timestamp() {
-                            let _pkt = crate::refclock_pps::pps_stamp_to_packet(&stamp);
+                            let pkt = crate::refclock_pps::pps_stamp_to_packet(&stamp);
                             inst.samples_collected += 1;
-                            actions.push(DaemonAction::Log(format!(
-                                "PPS{} sample #{} received",
-                                inst.unit, inst.samples_collected
-                            )));
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
                         }
                     }
                     RefclockDriver::Nmea(ref mut nmea) => {
                         if let Ok(Some(sample)) = nmea.read_sample() {
-                            let _pkt = crate::refclock_nmea::nmea_sample_to_packet(&sample, -6);
+                            let pkt = crate::refclock_nmea::nmea_sample_to_packet(&sample, -6);
                             inst.samples_collected += 1;
-                            actions.push(DaemonAction::Log(format!(
-                                "NMEA{} sample #{} received",
-                                inst.unit, inst.samples_collected
-                            )));
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
                         }
                     }
                     RefclockDriver::Gpsd(ref mut gpsd) => {
                         if let Ok(Some(fix)) = gpsd.read_sample() {
-                            let _pkt = crate::refclock_gpsd::gpsd_fix_to_packet(&fix, _now);
+                            let pkt = crate::refclock_gpsd::gpsd_fix_to_packet(&fix, now);
                             inst.samples_collected += 1;
-                            actions.push(DaemonAction::Log(format!(
-                                "GPSD{} sample #{} received",
-                                inst.unit, inst.samples_collected
-                            )));
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
                         }
                     }
                 }
@@ -459,7 +466,24 @@ impl DaemonEngine {
                     unit,
                     options: _,
                 } => {
-                    self.refclocks.add(*refclock_type, *unit);
+                    // Build the canonical refclock address 127.127.x.y
+                    let refclock_ip = std::net::Ipv4Addr::new(127, 127, *refclock_type, *unit);
+                    let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                    let sin = unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in) };
+                    sin.sin_family = libc::AF_INET as libc::sa_family_t;
+                    sin.sin_port = 123u16.to_be();
+                    sin.sin_addr = libc::in_addr {
+                        s_addr: u32::from_ne_bytes(refclock_ip.octets()),
+                    };
+
+                    let mut peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
+                    peer.flags |= PeerFlags::CONFIGURED;
+                    // Assign a unique association ID
+                    if let Some(aid) = Self::allocate_associd(&mut self.next_associd, &self.peers) {
+                        peer.associd = aid;
+                        self.peers.add(peer);
+                        self.refclocks.add(*refclock_type, *unit, aid);
+                    }
                 }
                 ConfigOption::Restrict {
                     ref addr,
@@ -556,6 +580,11 @@ impl DaemonEngine {
             }
             DaemonEvent::TimerFired(timer_id) => self.handle_timer(timer_id),
             DaemonEvent::PacketReceived(dgram) => self.handle_packet(dgram),
+            DaemonEvent::RefclockSample {
+                associd,
+                packet,
+                rx_time,
+            } => self.handle_refclock_sample(associd, packet, rx_time),
         }
     }
 
@@ -1156,6 +1185,88 @@ impl DaemonEngine {
             }
             _ => vec![],
         }
+    }
+
+    /// Process a refclock sample through the clock filter and selection
+    /// pipeline, then apply clock discipline if this peer is the system peer.
+    fn handle_refclock_sample(
+        &mut self,
+        associd: u16,
+        packet: NtpPacket,
+        rx_time: NtpTs64,
+    ) -> Vec<DaemonAction> {
+        let mut actions = Vec::new();
+
+        // Find the refclock peer by association ID
+        let peer_idx = match self.peers.iter().position(|p| p.associd == associd) {
+            Some(idx) => idx,
+            None => {
+                return vec![DaemonAction::Log(format!(
+                    "refclock sample for unknown associd {}",
+                    associd
+                ))];
+            }
+        };
+
+        // For refclocks, we compute the offset directly:
+        //   offset = T3 - T4  (server transmit minus client receive)
+        //   delay  = nominal small value for a local refclock
+        //
+        // T1 (originate) and T2 (receive) from the packet are not meaningful
+        // for a refclock that produces samples autonomously; the important
+        // timestamp is T3 = transmit (when the refclock says the time is).
+        let t3 = ntp_fp::ntp_ts_to_ntpts(packet.transmit_ts);
+        let t3_f = ntp_fp::ntp_ts64_to_double(t3);
+        let t4_f = ntp_fp::ntp_ts64_to_double(rx_time);
+
+        let offset = t3_f - t4_f;
+        let delay = 0.001; // nominal 1 ms for a local refclock
+
+        // Validate
+        if !offset.is_finite() || offset.abs() > 1_000_000.0 {
+            return vec![DaemonAction::Log(format!(
+                "refclock {} crazy offset {:.6}s rejected",
+                associd, offset
+            ))];
+        }
+
+        // Update peer state and clock filter
+        if let Some(peer) = self.peers.get_mut(peer_idx) {
+            // Update peer fields from the synthetic server packet
+            peer.stratum = 0; // primary refclock
+            peer.leap = packet.leap_indicator();
+            peer.precision = packet.precision;
+            peer.root_delay = 0.0;
+            peer.root_dispersion = 0.0;
+            peer.reference_id = packet.reference_id;
+            peer.reference_time = ntp_fp::ntp_ts_to_ntpts(packet.reference_ts);
+            peer.receive_time = rx_time;
+            peer.transmit_time = t3;
+
+            // Accept the sample through clock filter (add_sample + filter
+            // to pick delay-minimum, compute jitter, update reachability)
+            crate::ntp_proto::accept_sample(peer, offset, delay, 0.001, rx_time);
+        }
+
+        // Run clock selection to potentially elect this peer as system peer
+        let select_actions = self.run_selection(rx_time);
+        actions.extend(select_actions);
+
+        // If this refclock IS the system peer, apply clock discipline
+        if let Some(sys_id) = self.system_peer_associd {
+            if sys_id == associd {
+                let adj = self.loop_filter.local_clock(offset, rx_time);
+                if !matches!(adj, Adjustment::Ignore) {
+                    actions.push(DaemonAction::AdjustClock(adj));
+                }
+                actions.push(DaemonAction::Log(format!(
+                    "refclock {} offset={:.6}s delay={:.6}s selected",
+                    associd, offset, delay
+                )));
+            }
+        }
+
+        actions
     }
 }
 
@@ -2234,10 +2345,10 @@ mod tests {
     #[test]
     fn test_refclock_manager_add_and_open() {
         let mut mgr = RefclockManager::new();
-        mgr.add(28, 0);
-        mgr.add(22, 0);
-        mgr.add(19, 0);
-        mgr.add(16, 0);
+        mgr.add(28, 0, 1);
+        mgr.add(22, 0, 2);
+        mgr.add(19, 0, 3);
+        mgr.add(16, 0, 4);
         assert_eq!(mgr.instances.len(), 4);
         // Opening produces log messages (SHM may succeed with shmget+IPC_CREAT,
         // but PPS/NMEA/GPSD will fail since their devices don't exist)

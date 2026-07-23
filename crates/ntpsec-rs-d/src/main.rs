@@ -307,7 +307,26 @@ fn main() {
         if iteration % 10 == 0 {
             let now = clock.now();
             let refclock_actions = engine.refclocks.poll_all(now);
-            execute_actions(&refclock_actions, &mut clock, &mut network, &mut store);
+            for action in refclock_actions {
+                match action {
+                    DaemonAction::RefclockSample {
+                        associd,
+                        packet,
+                        rx_time,
+                    } => {
+                        let event = DaemonEvent::RefclockSample {
+                            associd,
+                            packet,
+                            rx_time,
+                        };
+                        let actions = engine.handle(event);
+                        execute_actions(&actions, &mut clock, &mut network, &mut store);
+                    }
+                    other => {
+                        execute_actions(&[other], &mut clock, &mut network, &mut store);
+                    }
+                }
+            }
         }
 
         // 4. Periodic status & statistics
@@ -493,6 +512,12 @@ fn execute_actions<C: SystemClock, N: NetworkIo, S: StateStore>(
                 if let Err(e) = store.append_stats(stream, line) {
                     tracing::warn!("Failed to write to {stream}: {e}");
                 }
+            }
+            DaemonAction::RefclockSample { .. } => {
+                // RefclockSample actions are handled in the main loop
+                // before reaching execute_actions.  If one arrives here
+                // it means the caller did not pre-filter it.
+                tracing::debug!("RefclockSample bypassed main-loop filter");
             }
         }
     }
