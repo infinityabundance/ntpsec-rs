@@ -1,18 +1,25 @@
 image: ntpsec-oracle:alpine
-date: 2026-07-22T17:31:07Z
-git_commit: d4c0c006ec08b5e0bce3f065292462e39591b89d
+date: 2026-07-23T02:39:30Z
+git_commit: 97a5b6c763813692c956ca0b769e1c05220a88ac
 
---- Forward Court (both clients query real ntpd) ---
+--- Forward Court (ntpq-rs vs real ntpd) ---
 rv_forward: FAIL
 associations_forward: FAIL
 peers_forward: FAIL
 
---- Reverse Court (real ntpq queries ntpd-rs) ---
+--- Reverse Court (real ntpq vs ntpd-rs -u ntp --seccomp) ---
 rv_reverse: FAIL
 associations_reverse: PASS
 peers_reverse: PASS
 
---- Rust Client Reverse (ntpq-rs queries ntpd-rs) ---
+--- Hardening ---
+uid: PASS
+seccomp: PASS
+capability: PASS
+sighup: PASS
+sigterm: PASS
+
+--- Rust Client Reverse ---
 rv_reverse_rs: PASS
 
 --- ntpdig ---

@@ -84,6 +84,7 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     3,                                // close
     4,                                // stat
     5,                                // fstat
+    7,                                // poll (signal handler notification)
     8,                                // lseek
     9,                                // mmap
     10,                               // mprotect
@@ -99,6 +100,7 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     35,                               // nanosleep
     39,                               // getpid
     41,                               // socket
+    42,                               // connect
     44,                               // sendto
     45,                               // recvfrom
     46,                               // sendmsg
@@ -106,6 +108,7 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     49,                               // bind
     51,                               // getsockname
     52,                               // getpeername
+    53,                               // socketpair
     54,                               // setsockopt
     55,                               // getsockopt
     56,                               // clone (signal threads created before seccomp)
@@ -137,6 +140,7 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     158,                              // arch_prctl
     202,                              // futex
     217,                              // getdents64
+    227,                              // clock_settime (system clock set)
     228,                              // clock_gettime
     229,                              // clock_getres
     libc::SYS_clock_nanosleep as u64, // Rust std::thread::sleep

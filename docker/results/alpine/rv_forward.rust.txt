@@ -1,2 +1,2 @@
 associd=0 status=0514 leap_none, sync_acts, 1 event
-version="ntpd ntpsec-1.2.2a", processor="x86_64", system="Linux/7.1.3-2-cachyos", leap=0, stratum=11, precision=-24, rootdelay=0.000, rootdisp=7947.500, refid=127.127.1.0, reftime="ee0b7cbf.df9a9da9", peer=37547, tc=6, offset=0.000000, frequency=0.000000, sys_jitter=0.000000, clk_jitter=0.000056, clock="ee0b7cc0.dd4480e0", clk_wander=0.000000, mintc=0, 
+version="ntpd ntpsec-1.2.2a", processor="x86_64", system="Linux/7.1.3-2-cachyos", leap=00, stratum=11, precision=-23, rootdelay=0.000, rootdisp=7947.500, refid=127.127.1.0, reftime=ee0bfd43.cc528592, peer=37547, tc=6, offset=0.000000, frequency=0.000000, sys_jitter=0.000000, clk_jitter=0.000112, clock=ee0bfd44.ca469bf8, clk_wander=0.000000, mintc=0, 

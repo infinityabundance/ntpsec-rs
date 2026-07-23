@@ -180,6 +180,11 @@ impl PeerTable {
         self.peers.iter_mut()
     }
 
+    /// Remove a peer by association ID.
+    pub fn remove_by_associd(&mut self, associd: u16) {
+        self.peers.retain(|p| p.associd != associd);
+    }
+
     /// Find a peer by source address.
     pub fn find_by_addr(&self, addr: &SockAddr) -> Option<&Peer> {
         self.peers.iter().find(|p| unsafe {

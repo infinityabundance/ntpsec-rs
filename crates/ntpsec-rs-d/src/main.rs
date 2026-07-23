@@ -172,9 +172,14 @@ fn main() {
 
     // ──── Prepare State Paths Before Drop ─────────────────────────
     if let Some(ref user) = cli.user {
-        // Look up target UID/GID for chown
-        let target_uid = lookup_uid(user).unwrap_or(0);
-        let target_gid = lookup_gid(user).unwrap_or(0);
+        // Resolve user once — fail hard if unknown (no unwrap_or(0))
+        let (target_uid, target_gid) = match lookup_user(user) {
+            Some((u, g)) => (u, g),
+            None => {
+                tracing::error!("User '{}' not found — cannot drop privileges", user);
+                std::process::exit(2);
+            }
+        };
 
         // Ensure stats dir exists and is owned by the target user
         if let Err(e) = std::fs::create_dir_all(&stats_dir) {
@@ -216,8 +221,14 @@ fn main() {
         match ntp_sandbox::enable_sandbox() {
             Ok(()) => tracing::info!("Seccomp sandbox enabled"),
             Err(e) => {
-                tracing::error!("Failed to enable seccomp: {e}");
-                std::process::exit(1);
+                // Non-fatal: seccomp may be unavailable in containers or on
+                // kernels without CONFIG_SECCOMP. The daemon continues without
+                // syscall filtering.
+                eprintln!(
+                    "WARN: seccomp not available — continuing without sandbox ({})",
+                    e
+                );
+                tracing::warn!("Seccomp not available, continuing without sandbox: {e}");
             }
         }
     }
@@ -624,25 +635,14 @@ fn chown_path(path: &std::path::Path, uid: libc::uid_t, gid: libc::gid_t) -> Res
     Ok(())
 }
 
-/// Look up a user's UID by name.
-fn lookup_uid(user: &str) -> Option<u32> {
+/// Look up a user by name, returning (UID, GID).
+fn lookup_user(user: &str) -> Option<(libc::uid_t, libc::gid_t)> {
     let cuser = std::ffi::CString::new(user).ok()?;
     let pw = unsafe { libc::getpwnam(cuser.as_ptr()) };
     if pw.is_null() {
         None
     } else {
-        Some(unsafe { (*pw).pw_uid })
-    }
-}
-
-/// Look up a user's primary GID by name.
-fn lookup_gid(user: &str) -> Option<u32> {
-    let cuser = std::ffi::CString::new(user).ok()?;
-    let pw = unsafe { libc::getpwnam(cuser.as_ptr()) };
-    if pw.is_null() {
-        None
-    } else {
-        Some(unsafe { (*pw).pw_gid })
+        Some(unsafe { ((*pw).pw_uid, (*pw).pw_gid) })
     }
 }
 
@@ -736,29 +736,64 @@ fn drop_privileges(user: &str) -> Result<(), String> {
         let cap_index = (CAP_SYS_TIME_NUM / 32) as usize; // 0
         let cap_bit = 1u32 << (CAP_SYS_TIME_NUM % 32); // bit 25
 
-        let header = libc::__user_cap_header_struct {
-            version: libc::LINUX_CAPABILITY_VERSION_3 as u32,
+        // Linux kernel cap user header (see <linux/capability.h>)
+        #[repr(C)]
+        struct CapUserHeader {
+            version: u32,
+            pid: i32,
+        }
+        // Linux kernel cap user data (see <linux/capability.h>)
+        #[repr(C)]
+        struct CapUserData {
+            effective: u32,
+            permitted: u32,
+            inheritable: u32,
+        }
+
+        let header = CapUserHeader {
+            version: 0x20080522, // _LINUX_CAPABILITY_VERSION_3
             pid: 0,
         };
         // Zero out all capabilities, then set only CAP_SYS_TIME
-        let mut data = [libc::__user_cap_data_struct {
-            effective: 0,
-            permitted: 0,
-            inheritable: 0,
-        }; 2];
+        let mut data = [
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+        ];
         data[cap_index].effective = cap_bit;
         data[cap_index].permitted = cap_bit;
         // inheritable stays 0
-        let ret = unsafe { libc::capset(&header, data.as_mut_ptr()) };
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_capset,
+                &header as *const _ as *const libc::c_void,
+                data.as_mut_ptr() as *mut libc::c_void,
+            )
+        };
         if ret != 0 {
-            return Err(format!(
-                "capset failed: {}",
+            // capset may fail in containers without CAP_SETPCAP.
+            // This is non-fatal: the daemon continues with root's retained
+            // capabilities rather than a restricted set.
+            eprintln!(
+                "WARN: capset failed ({}), continuing with inherited caps",
                 std::io::Error::last_os_error()
-            ));
+            );
+            tracing::warn!(
+                "capset failed: {} — continuing with inherited capabilities",
+                std::io::Error::last_os_error()
+            );
+        } else {
+            // Turn off PR_SET_KEEPCAPS only after successful capset
+            unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
+            tracing::info!("Retained CAP_SYS_TIME, all other capabilities cleared");
         }
-        // Turn off PR_SET_KEEPCAPS now that caps are locked
-        unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
-        tracing::info!("Retained CAP_SYS_TIME, all other capabilities cleared");
     }
 
     // Step 6: Verify identity
