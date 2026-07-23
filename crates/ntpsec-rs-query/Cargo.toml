@@ -4,6 +4,11 @@ description = "NTP query client — forensic Rust reconstruction of ntpq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ntpsec-rs-query"
+readme = "README.md"
+keywords = ["ntp", "ntpsec", "time", "synchronization"]
 
 [[bin]]
 name = "ntpq-rs"

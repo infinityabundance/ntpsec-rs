@@ -156,6 +156,12 @@ fn main() {
         tracing::warn!("Key file loading issue: {e}");
     }
 
+    // ──── Open Refclocks ────────────────────────────────────────────
+    {
+        let refclock_actions = engine.refclocks.open_all();
+        execute_actions(&refclock_actions, &mut clock, &mut network, &mut store);
+    }
+
     // ──── Bind Privileged Port ───────────────────────────────────────
     if let Err(e) = network.bind("0.0.0.0:123") {
         tracing::error!("Cannot bind to port 123: {e}");
@@ -297,7 +303,14 @@ fn main() {
             }
         }
 
-        // 3. Periodic status & statistics
+        // 3. Poll refclocks for samples (every 10 iterations)
+        if iteration % 10 == 0 {
+            let now = clock.now();
+            let refclock_actions = engine.refclocks.poll_all(now);
+            execute_actions(&refclock_actions, &mut clock, &mut network, &mut store);
+        }
+
+        // 4. Periodic status & statistics
         if iteration % 100 == 0 {
             tracing::info!(
                 "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm",

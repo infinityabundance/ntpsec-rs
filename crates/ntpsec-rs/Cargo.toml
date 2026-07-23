@@ -4,6 +4,11 @@ description = "Umbrella crate for ntpsec-rs — forensic Rust reconstruction of 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ntpsec-rs"
+readme = "README.md"
+keywords = ["ntp", "ntpsec", "time", "synchronization"]
 
 [dependencies]
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }

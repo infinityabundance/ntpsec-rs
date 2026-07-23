@@ -737,17 +737,31 @@ mod tests {
     }
 
     #[test]
-    fn test_cookie_encrypt_deterministic() {
-        // AES-SIV with no associated data and zero nonce is deterministic
-        let cookie = make_test_cookie();
-        let key = test_key_32();
+    fn test_rfc5297_known_answer() {
+        // RFC 5297 Appendix A.1 known-answer test
+        // Uses Aes128Siv directly (not the AEAD wrapper) for exact input control.
+        use aes_siv::siv::Aes128Siv;
+        use aes_siv::Key;
+        use hex_literal::hex;
 
-        let encrypted1 = cookie.encrypt(&key).expect("encrypt should succeed");
-        let encrypted2 = cookie.encrypt(&key).expect("encrypt should succeed");
-
-        assert_eq!(
-            encrypted1, encrypted2,
-            "same key and plaintext should produce identical ciphertext"
+        let key = Key::<Aes128Siv>::from_slice(&hex!(
+            "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0"
+            "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        ));
+        let ad = hex!("101112131415161718191a1b1c1d1e1f2021222324252627");
+        let plaintext = hex!("112233445566778899aabbccddee");
+        let expected = hex!(
+            "85632d07c6e8f37f950acd320a2ecc93"
+            "40c02b9690c4dc04daef7f6afe5c"
         );
+
+        let mut siv = Aes128Siv::new(key);
+        let headers: [&[u8]; 1] = [&ad];
+        let result = siv.encrypt(headers, &plaintext).unwrap();
+        assert_eq!(result, expected, "RFC 5297 A.1 output mismatch");
+
+        // Verify decrypt round-trip
+        let decrypted = siv.decrypt(headers, &result).unwrap();
+        assert_eq!(decrypted, plaintext, "RFC 5297 A.1 decrypt mismatch");
     }
 }

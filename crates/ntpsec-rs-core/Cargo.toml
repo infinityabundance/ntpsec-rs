@@ -4,6 +4,12 @@ description = "Forensic Rust reconstruction of the NTPsec time-discipline brain 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ntpsec-rs-core"
+readme = "README.md"
+categories = ["network", "science", "simulation"]
+keywords = ["ntp", "ntpsec", "time", "synchronization"]
 
 [dependencies]
 bitflags = "2"
