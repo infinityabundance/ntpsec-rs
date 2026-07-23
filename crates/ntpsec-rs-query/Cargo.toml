@@ -10,6 +10,6 @@ name = "ntpq-rs"
 path = "src/main.rs"
 
 [dependencies]
-ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.2.13" }
+ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
