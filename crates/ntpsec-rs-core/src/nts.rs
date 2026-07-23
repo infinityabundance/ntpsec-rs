@@ -390,9 +390,11 @@ impl NtsKeProtocolClient {
         }
 
         let mut aead_algorithm: Option<AeadAlgorithm> = None;
+        let mut aead_count: usize = 0;
         let mut cookies: Vec<Vec<u8>> = Vec::new();
         let mut server_offer: Vec<NtsKeRecord> = Vec::new();
         let mut next_proto_count: usize = 0;
+        let mut selected_ntpv4 = false;
         let mut has_eom = false;
         let mut eom_position = usize::MAX;
 
@@ -448,12 +450,39 @@ impl NtsKeProtocolClient {
                             rec.body.len()
                         ));
                     }
+                    // Must select NTPv4 (Protocol ID 0) to proceed.
+                    for chunk in rec.body.chunks_exact(2) {
+                        let protocol = u16::from_be_bytes([chunk[0], chunk[1]]);
+                        if protocol == 0 {
+                            selected_ntpv4 = true;
+                        }
+                    }
                 }
                 t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
-                    if rec.body.len() >= 2 {
-                        let alg_id = u16::from_be_bytes([rec.body[0], rec.body[1]]);
-                        aead_algorithm = AeadAlgorithm::from_u16(alg_id);
+                    // RFC 8915 §4.1.3: exactly one AEAD record, exactly 2-byte body, must match client offer.
+                    aead_count += 1;
+                    if aead_count > 1 {
+                        self.state = NtsKeState::Error("duplicate AEAD".to_string());
+                        return Err("duplicate AEAD Algorithm record".to_string());
                     }
+                    if rec.body.len() != 2 {
+                        self.state =
+                            NtsKeState::Error(format!("AEAD body len {} != 2", rec.body.len()));
+                        return Err(format!(
+                            "AEAD Algorithm body must be exactly 2 bytes, got {}",
+                            rec.body.len()
+                        ));
+                    }
+                    let alg_id = u16::from_be_bytes([rec.body[0], rec.body[1]]);
+                    if alg_id != 15 {
+                        self.state =
+                            NtsKeState::Error(format!("server AEAD {} not offered", alg_id));
+                        return Err(format!(
+                            "server selected AEAD algorithm {}; client offered only 15",
+                            alg_id
+                        ));
+                    }
+                    aead_algorithm = AeadAlgorithm::from_u16(alg_id);
                 }
                 t if t == NTS_KE_RECORD_NEW_COOKIE => {
                     cookies.push(rec.body.clone());
@@ -496,6 +525,10 @@ impl NtsKeProtocolClient {
         if next_proto_count == 0 {
             self.state = NtsKeState::Error("missing Next Protocol".to_string());
             return Err("server did not include mandatory Next Protocol Negotiation".to_string());
+        }
+        if !selected_ntpv4 {
+            self.state = NtsKeState::Error("NTPv4 not selected".to_string());
+            return Err("server did not select NTPv4 protocol".to_string());
         }
         if !has_eom {
             self.state = NtsKeState::Error("missing EOM".to_string());

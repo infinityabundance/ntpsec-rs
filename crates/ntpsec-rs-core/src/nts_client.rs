@@ -178,9 +178,11 @@ impl NtsKeClient {
         }
 
         let mut aead_algorithm: Option<AeadAlgorithm> = None;
+        let mut aead_count: usize = 0;
         let mut cookies: Vec<Vec<u8>> = Vec::new();
         let mut server_offer: Vec<NtsKeRecord> = Vec::new();
         let mut next_proto_count: usize = 0;
+        let mut selected_ntpv4 = false;
         let mut has_eom = false;
         let mut eom_position = usize::MAX;
 
@@ -226,12 +228,35 @@ impl NtsKeClient {
                             rec.body.len()
                         ));
                     }
+                    // Must select NTPv4 (Protocol ID 0) to proceed.
+                    for chunk in rec.body.chunks_exact(2) {
+                        let protocol = u16::from_be_bytes([chunk[0], chunk[1]]);
+                        if protocol == 0 {
+                            selected_ntpv4 = true;
+                        }
+                    }
                 }
                 t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
-                    if rec.body.len() >= 2 {
-                        let alg_id = u16::from_be_bytes([rec.body[0], rec.body[1]]);
-                        aead_algorithm = AeadAlgorithm::from_u16(alg_id);
+                    // RFC 8915 §4.1.3: exactly one AEAD record, exactly 2-byte body, must match client offer.
+                    aead_count += 1;
+                    if aead_count > 1 {
+                        return Err("duplicate AEAD Algorithm record".to_string());
                     }
+                    if rec.body.len() != 2 {
+                        return Err(format!(
+                            "AEAD Algorithm body must be exactly 2 bytes, got {}",
+                            rec.body.len()
+                        ));
+                    }
+                    let alg_id = u16::from_be_bytes([rec.body[0], rec.body[1]]);
+                    // This client offers only algorithm 15 (AEAD_AES_SIV_CMAC_256).
+                    if alg_id != 15 {
+                        return Err(format!(
+                            "server selected AEAD algorithm {}; client offered only 15",
+                            alg_id
+                        ));
+                    }
+                    aead_algorithm = AeadAlgorithm::from_u16(alg_id);
                 }
                 t if t == NTS_KE_RECORD_NEW_COOKIE => {
                     cookies.push(rec.body.clone());
@@ -266,6 +291,9 @@ impl NtsKeClient {
 
         if next_proto_count == 0 {
             return Err("server did not include mandatory Next Protocol Negotiation".to_string());
+        }
+        if !selected_ntpv4 {
+            return Err("server did not select NTPv4 protocol".to_string());
         }
         if !has_eom {
             return Err("server response missing End of Message record".to_string());
@@ -515,6 +543,89 @@ mod tests {
         let result = proto_client.handshake_with_data(&req, &response);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("duplicate"));
+    }
+
+    /// Verify that Next Protocol body with only ID 1 (not NTPv4) is rejected.
+    #[test]
+    fn test_nts_ke_next_protocol_id_1_rejected() {
+        let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
+
+        // Next Protocol with protocol ID 1, not 0 (NTPv4).
+        let next_proto =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 1u16.to_be_bytes().to_vec());
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let mut response = Vec::new();
+        response.extend_from_slice(&next_proto.encode());
+        response.extend_from_slice(&eom.encode());
+
+        let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let result = proto_client.handshake_with_data(&req, &response);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("NTPv4"));
+    }
+
+    /// Verify that an empty Next Protocol body (0 bytes) is rejected.
+    #[test]
+    fn test_nts_ke_next_protocol_empty_rejected() {
+        let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
+
+        // Next Protocol with empty body.
+        let next_proto = NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, vec![]);
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let mut response = Vec::new();
+        response.extend_from_slice(&next_proto.encode());
+        response.extend_from_slice(&eom.encode());
+
+        let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let result = proto_client.handshake_with_data(&req, &response);
+        assert!(result.is_err());
+    }
+
+    /// Verify that duplicate AEAD Algorithm records are rejected.
+    #[test]
+    fn test_nts_ke_duplicate_aead_rejected() {
+        let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
+
+        // Next Protocol (required) + two AEAD records.
+        let next_proto =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        let aead1 =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 15u16.to_be_bytes().to_vec());
+        let aead2 =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 15u16.to_be_bytes().to_vec());
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let mut response = Vec::new();
+        response.extend_from_slice(&next_proto.encode());
+        response.extend_from_slice(&aead1.encode());
+        response.extend_from_slice(&aead2.encode());
+        response.extend_from_slice(&eom.encode());
+
+        let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let result = proto_client.handshake_with_data(&req, &response);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("duplicate"));
+    }
+
+    /// Verify that AEAD algorithm 16 (not offered) is rejected.
+    #[test]
+    fn test_nts_ke_aead_16_rejected() {
+        let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
+
+        // Server selects AEAD algorithm 16, but client offered only 15.
+        let next_proto =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        let aead =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 16u16.to_be_bytes().to_vec());
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let mut response = Vec::new();
+        response.extend_from_slice(&next_proto.encode());
+        response.extend_from_slice(&aead.encode());
+        response.extend_from_slice(&eom.encode());
+
+        let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let result = proto_client.handshake_with_data(&req, &response);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("15"));
     }
 
     /// Verify that the TLS 1.3 builder is used (compile-time structural check).
