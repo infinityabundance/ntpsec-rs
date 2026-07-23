@@ -364,8 +364,10 @@ else
 
     # SIGTERM: graceful shutdown, drift persisted, exit 0
     kill -TERM "$NTPD_RS_PID" 2>/dev/null
-    wait "$NTPD_RS_PID" 2>/dev/null || true
+    set +e
+    wait "$NTPD_RS_PID" 2>/dev/null
     SIGTERM_EXIT=$?
+    set -e
     echo "  SIGTERM exit code: $SIGTERM_EXIT"
     echo "$SIGTERM_EXIT" > "$RESULTS/sigterm_exit.txt"
     if [ "$SIGTERM_EXIT" -eq 0 ]; then
@@ -376,7 +378,29 @@ else
         echo "FAIL" > "$RESULTS/sigterm.result"
     fi
 
+    # Verify drift file was written on shutdown
+    DRIFT_FILE="/var/lib/ntp/ntp.drift"
+    if [ -s "$DRIFT_FILE" ]; then
+        report_pass "SIGTERM: drift file written ($(cat $DRIFT_FILE))"
+        echo "PASS" > "$RESULTS/drift_persist.result"
+    else
+        report_fail "SIGTERM: drift file not found or empty" "$DRIFT_FILE"
+        echo "FAIL" > "$RESULTS/drift_persist.result"
+    fi
+
+    # Verify stats files were written
+    for sf in loopstats peerstats; do
+        if [ -s "/var/lib/ntp/$sf" ]; then
+            report_pass "SIGTERM: $sf written"
+            echo "PASS" > "$RESULTS/${sf}_written.result"
+        else
+            report_fail "SIGTERM: $sf not found or empty" ""
+            echo "FAIL" > "$RESULTS/${sf}_written.result"
+        fi
+    done
+
     sleep 1
+
 fi
 
 # ──── ntpdig ────────────────────────────────────────────────────────────────

@@ -217,20 +217,15 @@ fn main() {
     init_signal_handlers(running.clone(), wants_reload.clone(), sig_exit_code.clone());
 
     // ──── Seccomp Sandbox (after signal threads are created) ────────
+    // When --seccomp is explicitly requested, fail closed — don't run
+    // without the sandbox. A hypothetical --seccomp-optional could permit
+    // fallback, but plain --seccomp means the filter is required.
     if cli.seccomp {
-        match ntp_sandbox::enable_sandbox() {
-            Ok(()) => tracing::info!("Seccomp sandbox enabled"),
-            Err(e) => {
-                // Non-fatal: seccomp may be unavailable in containers or on
-                // kernels without CONFIG_SECCOMP. The daemon continues without
-                // syscall filtering.
-                eprintln!(
-                    "WARN: seccomp not available — continuing without sandbox ({})",
-                    e
-                );
-                tracing::warn!("Seccomp not available, continuing without sandbox: {e}");
-            }
-        }
+        ntp_sandbox::enable_sandbox().unwrap_or_else(|e| {
+            tracing::error!("Seccomp requested but unavailable: {e}");
+            std::process::exit(1);
+        });
+        tracing::info!("Seccomp sandbox enabled");
     }
 
     // ──── Main Event Loop ────────────────────────────────────────────
@@ -778,22 +773,17 @@ fn drop_privileges(user: &str) -> Result<(), String> {
             )
         };
         if ret != 0 {
-            // capset may fail in containers without CAP_SETPCAP.
-            // This is non-fatal: the daemon continues with root's retained
-            // capabilities rather than a restricted set.
-            eprintln!(
-                "WARN: capset failed ({}), continuing with inherited caps",
-                std::io::Error::last_os_error()
-            );
-            tracing::warn!(
-                "capset failed: {} — continuing with inherited capabilities",
-                std::io::Error::last_os_error()
-            );
-        } else {
-            // Turn off PR_SET_KEEPCAPS only after successful capset
+            // capset failure leaves effective CAP_SYS_TIME unavailable,
+            // which prevents clock discipline. This must hard-fail.
             unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
-            tracing::info!("Retained CAP_SYS_TIME, all other capabilities cleared");
+            return Err(format!(
+                "capset CAP_SYS_TIME failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
+        // Turn off PR_SET_KEEPCAPS now that caps are locked
+        unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0) };
+        tracing::info!("Retained CAP_SYS_TIME, all other capabilities cleared");
     }
 
     // Step 6: Verify identity
