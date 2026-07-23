@@ -223,10 +223,13 @@ impl NtsKeRecord {
     }
 
     /// Decode a sequence of records from a byte buffer.
-    /// Stops at END_OF_MESSAGE (type 0) or when no more data is available.
-    /// The EOM record itself IS included in the returned vector so that
-    /// callers can verify its presence.
-    pub fn decode_all(data: &[u8]) -> Vec<Self> {
+    ///
+    /// Parses ALL decodable records without stopping at EOM.
+    /// Returns the records and any trailing undecodable bytes.
+    /// The critical bit (0x8000) is masked out for record type
+    /// identification but PRESERVED in the returned record so that
+    /// callers can validate critical vs. non-critical records.
+    pub fn decode_all(data: &[u8]) -> (Vec<Self>, &[u8]) {
         let mut records = Vec::new();
         let mut remain = data;
         loop {
@@ -235,17 +238,13 @@ impl NtsKeRecord {
             }
             match Self::decode(remain) {
                 Some((rec, rest)) => {
-                    let is_eom = rec.record_type == NTS_KE_RECORD_END_OF_MESSAGE;
-                    records.push(rec);
-                    if is_eom {
-                        break;
-                    }
                     remain = rest;
+                    records.push(rec);
                 }
                 None => break,
             }
         }
-        records
+        (records, remain)
     }
 }
 
@@ -306,19 +305,29 @@ impl NtsKeProtocolClient {
         // ── Build the negotiation request ──────────────────────────────
         let mut request_records: Vec<NtsKeRecord> = Vec::new();
 
+        // Mandatory: Next Protocol Negotiation selecting NTPv4 (protocol ID 0).
+        // Body is a 16-bit protocol ID in network byte order. Critical bit MUST be set.
+        let next_proto_body = 0u16.to_be_bytes().to_vec();
+        request_records.push(NtsKeRecord::new_critical(
+            NTS_KE_RECORD_NEXT_PROTOCOL,
+            next_proto_body,
+        ));
+
         // Advertise AES-SIV-CMAC-256 as the preferred AEAD algorithm.
         let aead_body = AeadAlgorithm::AeadAesSivCmac256
             .to_u16()
             .to_be_bytes()
             .to_vec();
-        request_records.push(NtsKeRecord::new(NTS_KE_RECORD_AEAD_ALGORITHM, aead_body));
+        request_records.push(NtsKeRecord::new_critical(
+            NTS_KE_RECORD_AEAD_ALGORITHM,
+            aead_body,
+        ));
 
-        // Optionally request NTPv4 server negotiation (RFC 8915 §4.1.2).
-        // In the simplest case this is an empty body.
-        request_records.push(NtsKeRecord::new(NTS_KE_RECORD_NTPV4_SERVER, vec![]));
-
-        // End-of-message marks the end of the client's request.
-        request_records.push(NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]));
+        // End-of-message: critical bit MUST be set (RFC 8915 §4.1.8).
+        request_records.push(NtsKeRecord::new_critical(
+            NTS_KE_RECORD_END_OF_MESSAGE,
+            vec![],
+        ));
 
         // ── Serialize the request ──────────────────────────────────────
         let _request_wire: Vec<u8> = request_records.iter().flat_map(|r| r.encode()).collect();
@@ -357,7 +366,7 @@ impl NtsKeProtocolClient {
         self.state = NtsKeState::Connecting;
 
         // Verify the request encodes (round-trip check for tests).
-        let req_records = NtsKeRecord::decode_all(request);
+        let (req_records, _) = NtsKeRecord::decode_all(request);
         if req_records.is_empty() {
             self.state = NtsKeState::Error("empty request".to_string());
             return Err("empty NTS-KE request".to_string());
@@ -365,16 +374,29 @@ impl NtsKeProtocolClient {
 
         self.state = NtsKeState::Negotiating;
 
-        // Parse the server's response records.
-        let resp_records = NtsKeRecord::decode_all(response);
+        // Parse the server's response records (decode_all parses the full buffer).
+        let (resp_records, trailing) = NtsKeRecord::decode_all(response);
+
+        // No trailing data allowed after EOM (RFC 8915 §4.1.8).
+        if !trailing.is_empty() {
+            self.state = NtsKeState::Error(format!(
+                "trailing data after NTS-KE records: {} bytes",
+                trailing.len()
+            ));
+            return Err(format!(
+                "trailing data after last NTS-KE record ({} bytes)",
+                trailing.len()
+            ));
+        }
 
         let mut aead_algorithm: Option<AeadAlgorithm> = None;
         let mut cookies: Vec<Vec<u8>> = Vec::new();
         let mut server_offer: Vec<NtsKeRecord> = Vec::new();
         let mut has_next_proto = false;
         let mut has_eom = false;
+        let mut eom_position = usize::MAX;
 
-        for rec in &resp_records {
+        for (pos, rec) in resp_records.iter().enumerate() {
             // Check for Error or Warning records (RFC 8915 §4.1.5, §4.1.6).
             if rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT == NTS_KE_RECORD_ERROR {
                 let msg = String::from_utf8_lossy(&rec.body);
@@ -404,8 +426,22 @@ impl NtsKeProtocolClient {
             let raw_type = rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT;
             match raw_type {
                 t if t == NTS_KE_RECORD_NEXT_PROTOCOL => {
-                    if rec.body.first() == Some(&0) {
-                        has_next_proto = true;
+                    // Body is a sequence of u16 protocol IDs in network byte order.
+                    if rec.body.len() < 2 || rec.body.len() % 2 != 0 {
+                        self.state = NtsKeState::Error(format!(
+                            "Next Protocol invalid body length: {}",
+                            rec.body.len()
+                        ));
+                        return Err(format!(
+                            "Next Protocol has invalid body length: {} bytes",
+                            rec.body.len()
+                        ));
+                    }
+                    for chunk in rec.body.chunks(2) {
+                        let proto_id = u16::from_be_bytes([chunk[0], chunk[1]]);
+                        if proto_id == 0 {
+                            has_next_proto = true;
+                        }
                     }
                 }
                 t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
@@ -422,13 +458,34 @@ impl NtsKeProtocolClient {
                         self.state = NtsKeState::Error("duplicate EOM".to_string());
                         return Err("duplicate End of Message record".to_string());
                     }
+                    // EOM MUST have critical bit set and empty body (RFC 8915 §4.1.8).
+                    if rec.record_type & NTS_KE_RECORD_CRITICAL_BIT == 0 {
+                        self.state = NtsKeState::Error("EOM missing critical bit".to_string());
+                        return Err("End of Message record missing critical bit".to_string());
+                    }
+                    if !rec.body.is_empty() {
+                        self.state = NtsKeState::Error(format!(
+                            "EOM non-empty body: {} bytes",
+                            rec.body.len()
+                        ));
+                        return Err(format!(
+                            "End of Message record has non-empty body ({} bytes)",
+                            rec.body.len()
+                        ));
+                    }
                     has_eom = true;
-                    break;
+                    eom_position = pos;
                 }
                 _ => {
                     server_offer.push(rec.clone());
                 }
             }
+        }
+
+        // EOM must be the final record (RFC 8915 §4.1.8).
+        if has_eom && eom_position != resp_records.len() - 1 {
+            self.state = NtsKeState::Error("EOM not final record".to_string());
+            return Err("EOM record is not the final record".to_string());
         }
 
         if !has_next_proto {
@@ -759,35 +816,44 @@ mod tests {
     fn test_nts_ke_record_decode_all() {
         let rec1 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![1, 2, 3]);
         let rec2 = NtsKeRecord::new(NTS_KE_RECORD_NTPV4_SERVER, vec![1]);
-        let eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let mut data = rec1.encode();
         data.extend_from_slice(&rec2.encode());
         data.extend_from_slice(&eom.encode());
-        let records = NtsKeRecord::decode_all(&data);
+        let (records, trailing) = NtsKeRecord::decode_all(&data);
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].record_type, NTS_KE_RECORD_NEW_COOKIE);
         assert_eq!(records[1].record_type, NTS_KE_RECORD_NTPV4_SERVER);
-        assert_eq!(records[2].record_type, NTS_KE_RECORD_END_OF_MESSAGE);
+        assert!(
+            (records[2].record_type & !NTS_KE_RECORD_CRITICAL_BIT) == NTS_KE_RECORD_END_OF_MESSAGE
+        );
+        assert!(records[2].record_type & NTS_KE_RECORD_CRITICAL_BIT != 0);
+        assert!(trailing.is_empty());
     }
 
     #[test]
     fn test_decode_all() {
-        // Extended decode_all test with multiple record types.
+        // Extended decode_all test with multiple record types and trailing data.
         let rec1 = NtsKeRecord::new(NTS_KE_RECORD_AEAD_ALGORITHM, vec![0, 1]);
         let rec2 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![10, 20, 30]);
-        let eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let mut data = rec1.encode();
         data.extend_from_slice(&rec2.encode());
         data.extend_from_slice(&eom.encode());
-        // Add trailing data that should be ignored after EOM
-        let trailing = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![99]);
-        data.extend_from_slice(&trailing.encode());
+        // Add trailing data — decode_all returns it as the second element.
+        let trailing_rec = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![99]);
+        data.extend_from_slice(&trailing_rec.encode());
 
-        let records = NtsKeRecord::decode_all(&data);
-        assert_eq!(records.len(), 3);
+        let (records, trailing) = NtsKeRecord::decode_all(&data);
+        // All 4 records are parsed (the trailing cookie is now a 4th record).
+        assert_eq!(records.len(), 4);
         assert_eq!(records[0].record_type, NTS_KE_RECORD_AEAD_ALGORITHM);
         assert_eq!(records[1].record_type, NTS_KE_RECORD_NEW_COOKIE);
-        assert_eq!(records[2].record_type, NTS_KE_RECORD_END_OF_MESSAGE);
+        assert!(
+            (records[2].record_type & !NTS_KE_RECORD_CRITICAL_BIT) == NTS_KE_RECORD_END_OF_MESSAGE
+        );
+        assert_eq!(records[3].record_type, NTS_KE_RECORD_NEW_COOKIE);
+        assert!(trailing.is_empty(), "decode_all parsed everything");
     }
 
     #[test]
@@ -863,15 +929,15 @@ mod tests {
     fn test_nts_ke_client_handshake_with_data() {
         let mut client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
 
-        // Build a mock server response: MUST include Next Protocol (RFC 8915 §4.1.1).
-        let next_proto = NtsKeRecord::new(NTS_KE_RECORD_NEXT_PROTOCOL, vec![0u8]);
+        // Build a mock server response: MUST include Next Protocol with u16 body, critical EOM.
+        let next_proto = NtsKeRecord::new(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
         let aead_rec = NtsKeRecord::new(
             NTS_KE_RECORD_AEAD_ALGORITHM,
             (15u16).to_be_bytes().to_vec(), // AEAD_AES_SIV_CMAC_256
         );
         let cookie1 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![0xAA; 32]);
         let cookie2 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![0xBB; 32]);
-        let eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
 
         let mut response = Vec::new();
         response.extend_from_slice(&next_proto.encode());
@@ -880,11 +946,12 @@ mod tests {
         response.extend_from_slice(&cookie2.encode());
         response.extend_from_slice(&eom.encode());
 
-        // Build a minimal request.
-        let req_next_proto = NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, vec![0u8]);
+        // Build a minimal request with critical records throughout.
+        let req_next_proto =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
         let req_aead =
             NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, (15u16).to_be_bytes().to_vec());
-        let req_eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let req_eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let mut request = Vec::new();
         request.extend_from_slice(&req_next_proto.encode());
         request.extend_from_slice(&req_aead.encode());
@@ -902,7 +969,7 @@ mod tests {
     #[test]
     fn test_nts_ke_client_handshake_with_data_empty_response() {
         let mut client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
-        let request = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let request = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
         let result = client.handshake_with_data(&request, &[]);
         assert!(result.is_err());
         assert!(client.state().error_message().is_some());
