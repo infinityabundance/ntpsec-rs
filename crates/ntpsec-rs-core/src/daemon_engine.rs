@@ -40,6 +40,7 @@ use crate::ntp_proto::*;
 use crate::ntp_restrict::*;
 use crate::ntp_timer::*;
 use crate::ntp_types::*;
+use crate::refclock_shm::ShmRefclock;
 
 /// A pending NTP request awaiting a server response.
 /// Keyed by (originate_ts, destination) to prevent cross-peer confusion
@@ -56,6 +57,67 @@ struct PendingRequest {
     destination: NetAddr,
     /// Expected response mode (Server for client polls, SymPassive for SymActive).
     expected_mode: NtpMode,
+}
+
+/// A single refclock instance managed by the daemon.
+#[derive(Debug)]
+pub struct RefclockInstance {
+    pub refclock_type: u8,
+    pub unit: u8,
+    pub shm: Option<ShmRefclock>,
+    pub active: bool,
+}
+
+/// Manages refclock lifecycle — open, poll, close.
+#[derive(Debug)]
+pub struct RefclockManager {
+    pub instances: Vec<RefclockInstance>,
+}
+
+impl RefclockManager {
+    pub fn new() -> Self {
+        Self {
+            instances: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, refclock_type: u8, unit: u8) {
+        self.instances.push(RefclockInstance {
+            refclock_type,
+            unit,
+            shm: None,
+            active: false,
+        });
+    }
+
+    pub fn open_all(&mut self) -> Vec<DaemonAction> {
+        let mut actions = Vec::new();
+        for inst in &mut self.instances {
+            // Only open refclock types that use SHM segments
+            match inst.refclock_type {
+                28 | 22 | 19 | 16 => {
+                    inst.active = true;
+                    actions.push(DaemonAction::Log(format!(
+                        "opened refclock type {} unit {}",
+                        inst.refclock_type, inst.unit
+                    )));
+                }
+                _ => {}
+            }
+        }
+        actions
+    }
+
+    pub fn close_all(&mut self) {
+        for inst in &mut self.instances {
+            if inst.active {
+                if let Some(ref mut shm) = inst.shm {
+                    let _ = shm.close();
+                }
+                inst.active = false;
+            }
+        }
+    }
 }
 
 /// The deterministic daemon state machine.
@@ -86,6 +148,9 @@ pub struct DaemonEngine {
 
     /// Pending requests awaiting server responses.
     pending_requests: Vec<PendingRequest>,
+
+    /// Refclock instances.
+    pub refclocks: RefclockManager,
 }
 
 impl DaemonEngine {
@@ -106,6 +171,7 @@ impl DaemonEngine {
             system_peer_id: None,
             next_associd: 1,
             pending_requests: Vec::new(),
+            refclocks: RefclockManager::new(),
         };
         engine.apply_config(config);
         engine
@@ -208,6 +274,13 @@ impl DaemonEngine {
                 ConfigOption::Keys(_path) => {
                     // Key file loading is done by the shell (main.rs).
                 }
+                ConfigOption::Refclock {
+                    refclock_type,
+                    unit,
+                    options: _,
+                } => {
+                    self.refclocks.add(*refclock_type, *unit);
+                }
                 ConfigOption::Restrict {
                     ref addr,
                     ref flags,
@@ -298,6 +371,7 @@ impl DaemonEngine {
     pub fn handle(&mut self, event: DaemonEvent) -> Vec<DaemonAction> {
         match event {
             DaemonEvent::Shutdown => {
+                self.refclocks.close_all();
                 vec![DaemonAction::Log("shutdown".to_string())]
             }
             DaemonEvent::TimerFired(timer_id) => self.handle_timer(timer_id),

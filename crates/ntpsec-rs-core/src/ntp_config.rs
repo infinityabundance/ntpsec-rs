@@ -333,6 +333,11 @@ pub enum ConfigOption {
         addr: String,
         options: Vec<String>,
     },
+    Refclock {
+        refclock_type: u8,
+        unit: u8,
+        options: Vec<String>,
+    },
     Restrict {
         addr: String,
         flags: Vec<String>,
@@ -358,6 +363,7 @@ impl ConfigOption {
             Self::Server { .. } => "server",
             Self::Peer { .. } => "peer",
             Self::Pool { .. } => "pool",
+            Self::Refclock { .. } => "refclock",
             Self::Restrict { .. } => "restrict",
             Self::DriftFile(_) => "driftfile",
             Self::StatsDir(_) => "statsdir",
@@ -486,18 +492,33 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
             if args.is_empty() {
                 return Err(format!("{d} requires an address"));
             }
+            let addr = args[0].clone();
+            // Check if this is a refclock address (127.127.x.y)
+            if addr.starts_with("127.127.") {
+                let parts: Vec<&str> = addr.split('.').collect();
+                if parts.len() == 4 {
+                    if let (Ok(driver), Ok(unit)) = (parts[2].parse::<u8>(), parts[3].parse::<u8>())
+                    {
+                        return Ok(ConfigOption::Refclock {
+                            refclock_type: driver,
+                            unit,
+                            options: args[1..].iter().map(|s| s.to_lowercase()).collect(),
+                        });
+                    }
+                }
+            }
             let opts: Vec<String> = args[1..].iter().map(|s| s.to_lowercase()).collect();
             match d {
                 "server" => Ok(ConfigOption::Server {
-                    addr: args[0].clone(),
+                    addr,
                     options: opts,
                 }),
                 "peer" => Ok(ConfigOption::Peer {
-                    addr: args[0].clone(),
+                    addr,
                     options: opts,
                 }),
                 _ => Ok(ConfigOption::Pool {
-                    addr: args[0].clone(),
+                    addr,
                     options: opts,
                 }),
             }
@@ -628,6 +649,25 @@ mod tests {
     fn test_parse_keys_and_auth() {
         let t = parse_config("keys /etc/ntp.keys\ntrustedkey 1\ncontrolkey 1\n");
         assert!(t.errors.is_empty(), "{:?}", t.errors);
+    }
+
+    #[test]
+    fn test_parse_refclock_config() {
+        let tree = parse_config("server 127.127.28.0\n");
+        assert!(tree.errors.is_empty(), "{:?}", tree.errors);
+        let refclocks = tree.find_all("refclock");
+        assert_eq!(refclocks.len(), 1);
+        if let ConfigOption::Refclock {
+            refclock_type,
+            unit,
+            ..
+        } = refclocks[0]
+        {
+            assert_eq!(*refclock_type, 28);
+            assert_eq!(*unit, 0);
+        } else {
+            panic!("expected Refclock config option");
+        }
     }
 
     #[test]

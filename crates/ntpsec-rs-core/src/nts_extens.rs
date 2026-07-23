@@ -24,10 +24,10 @@
 // ## NTS Extension Field Types (RFC 8915 §5)
 //
 // The following field types are used by NTS:
-//   - 0x0102  NTS Unique Identifier
-//   - 0x0104  NTS Cookie
-//   - 0x0105  NTS Cookie Placeholder
-//   - 0x0106  NTS Authenticator (AEAD encryption result)
+//   - 0x0104  NTS Unique Identifier
+//   - 0x0204  NTS Cookie
+//   - 0x0304  NTS Cookie Placeholder
+//   - 0x0404  NTS Authenticator (AEAD encryption result)
 //
 // ## Oracle
 //   - ntpsec ntpd/nts_extens.c (12K)
@@ -43,14 +43,14 @@ use crate::ntp_types::*;
 // Types registry.  They are distinct from, but related to, the NTS-KE
 // record types defined in `nts.rs`'s `nts_record` and `nts_ef` modules.
 
+/// NTS Unique Identifier extension field (RFC 8915 §5.1).
+pub const EXTENSION_FIELD_UNIQUE_IDENTIFIER: u16 = 0x0104;
 /// NTS Cookie extension field (RFC 8915 §5.2).
-pub const EXTENSION_FIELD_NTS_COOKIE: u16 = 0x0104;
+pub const EXTENSION_FIELD_NTS_COOKIE: u16 = 0x0204;
 /// NTS Cookie Placeholder extension field (RFC 8915 §5.2).
-pub const EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER: u16 = 0x0105;
+pub const EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER: u16 = 0x0304;
 /// NTS Authenticator — AEAD encryption result (RFC 8915 §5.3).
-pub const EXTENSION_FIELD_NTS_AUTHENTICATOR: u16 = 0x0106;
-/// NTS Unique Identifier (RFC 8915 §5.1).
-pub const EXTENSION_FIELD_NTS_UNIQUE_ID: u16 = 0x0102;
+pub const EXTENSION_FIELD_NTS_AUTHENTICATOR: u16 = 0x0404;
 
 // ──── NTP Extension Field Header ──────────────────────────────────────
 
@@ -146,7 +146,7 @@ impl ExtensionField {
             return None;
         }
 
-        let padded_len = ((length as usize + 3) & !3);
+        let padded_len = (length as usize + 3) & !3;
         if data.len() < padded_len {
             return None;
         }
@@ -234,42 +234,67 @@ impl NtsAuthResult {
     }
 }
 
-// ──── NTS Authenticator Header ────────────────────────────────────────
+// ──── NTS Authenticator ──────────────────────────────────────────────
 
-/// NTS Authenticator header for the AEAD encryption result field.
+/// NTS Authenticator payload (RFC 8915 §5.3, extension type 0x0404).
 ///
-/// The NTS Authenticator (RFC 8915 §5.3) contains:
-///   [ nonce_len: 2 bytes ][ nonce: variable ][ AEAD output: variable ]
-///
-/// This struct represents the 2-byte nonce length prefix.
+/// Wire format:
+///   [ nonce_len: 2 bytes ][ ciphertext_len: 2 bytes ]
+///   [ nonce: variable (padded to 4-byte boundary) ]
+///   [ ciphertext: variable (padded to 4-byte boundary) ]
 #[derive(Debug, Clone)]
-pub struct NtsAuthHeader {
-    pub nonce_len: u16,
+pub struct NtsAuthenticator {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
-impl NtsAuthHeader {
-    /// Size of the header in bytes (just the nonce_len field).
-    pub const SIZE: usize = 2;
-
-    /// Encode the nonce length as 2 bytes big-endian.
-    pub fn encode(&self) -> Vec<u8> {
-        self.nonce_len.to_be_bytes().to_vec()
+impl NtsAuthenticator {
+    /// Create a new NTS authenticator.
+    pub fn new(nonce: Vec<u8>, ciphertext: Vec<u8>) -> Self {
+        Self { nonce, ciphertext }
     }
 
-    /// Decode the nonce length from 2 bytes.
+    /// Encode the authenticator payload with proper padding.
+    pub fn encode(&self) -> Vec<u8> {
+        let nonce_len = self.nonce.len() as u16;
+        let ciphertext_len = self.ciphertext.len() as u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&nonce_len.to_be_bytes());
+        buf.extend_from_slice(&ciphertext_len.to_be_bytes());
+        buf.extend_from_slice(&self.nonce);
+        // Pad nonce to 4-byte boundary
+        let nonce_pad = (4 - (self.nonce.len() % 4)) % 4;
+        buf.extend(std::iter::repeat(0u8).take(nonce_pad));
+        buf.extend_from_slice(&self.ciphertext);
+        // Pad ciphertext to 4-byte boundary
+        let ciphertext_pad = (4 - (self.ciphertext.len() % 4)) % 4;
+        buf.extend(std::iter::repeat(0u8).take(ciphertext_pad));
+        buf
+    }
+
+    /// Decode an authenticator payload from wire format.
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < 2 {
+        if data.len() < 4 {
             return None;
         }
-        Some(Self {
-            nonce_len: u16::from_be_bytes([data[0], data[1]]),
-        })
-    }
+        let nonce_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+        let ciphertext_len = u16::from_be_bytes([data[2], data[3]]) as usize;
 
-    /// Total size of the Authenticator header including the nonce.
-    /// This is `Self::SIZE + nonce_len`.
-    pub fn header_size(&self) -> usize {
-        Self::SIZE + self.nonce_len as usize
+        let nonce_start = 4;
+        let nonce_end = nonce_start + nonce_len;
+        let nonce_padded_end = (nonce_end + 3) & !3;
+
+        let ciphertext_start = nonce_padded_end;
+        let ciphertext_end = ciphertext_start + ciphertext_len;
+
+        if data.len() < ciphertext_end {
+            return None;
+        }
+
+        let nonce = data[nonce_start..nonce_end].to_vec();
+        let ciphertext = data[ciphertext_start..ciphertext_end].to_vec();
+
+        Some(Self { nonce, ciphertext })
     }
 }
 
@@ -314,9 +339,9 @@ mod tests {
 
     #[test]
     fn test_extension_field_decode_all() {
-        let ef1 = ExtensionField::new(0x0104, vec![1, 2, 3, 4]);
-        let ef2 = ExtensionField::new(0x0105, vec![5, 6, 7, 8]);
-        let ef3 = ExtensionField::new(0x0106, vec![9, 10]);
+        let ef1 = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, vec![1, 2, 3, 4]);
+        let ef2 = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER, vec![5, 6, 7, 8]);
+        let ef3 = ExtensionField::new(EXTENSION_FIELD_NTS_AUTHENTICATOR, vec![9, 10]);
 
         let mut data = ef1.encode();
         data.extend_from_slice(&ef2.encode());
@@ -324,9 +349,9 @@ mod tests {
 
         let fields = ExtensionField::decode_all(&data);
         assert_eq!(fields.len(), 3);
-        assert_eq!(fields[0].field_type, 0x0104);
-        assert_eq!(fields[1].field_type, 0x0105);
-        assert_eq!(fields[2].field_type, 0x0106);
+        assert_eq!(fields[0].field_type, EXTENSION_FIELD_UNIQUE_IDENTIFIER);
+        assert_eq!(fields[1].field_type, EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER);
+        assert_eq!(fields[2].field_type, EXTENSION_FIELD_NTS_AUTHENTICATOR);
     }
 
     #[test]
@@ -363,29 +388,40 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_header_roundtrip() {
-        let hdr = NtsAuthHeader { nonce_len: 8 };
-        let encoded = hdr.encode();
-        assert_eq!(encoded.len(), 2);
-        assert_eq!(encoded, [0x00, 0x08]);
+    fn test_authenticator_roundtrip() {
+        let auth = NtsAuthenticator::new(vec![0x01, 0x02, 0x03, 0x04], vec![0xAA; 16]);
+        let encoded = auth.encode();
+        // 4 bytes header + 4 nonce + 0 pad + 16 ciphertext + 0 pad = 24
+        assert_eq!(encoded.len(), 24);
 
-        let decoded = NtsAuthHeader::decode(&encoded).unwrap();
-        assert_eq!(decoded.nonce_len, 8);
-        assert_eq!(decoded.header_size(), 10); // 2 + 8
+        let decoded = NtsAuthenticator::decode(&encoded).unwrap();
+        assert_eq!(decoded.nonce, vec![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(decoded.ciphertext, vec![0xAA; 16]);
     }
 
     #[test]
-    fn test_auth_header_zero_nonce() {
-        let hdr = NtsAuthHeader { nonce_len: 0 };
-        let encoded = hdr.encode();
-        let decoded = NtsAuthHeader::decode(&encoded).unwrap();
-        assert_eq!(decoded.nonce_len, 0);
-        assert_eq!(decoded.header_size(), 2);
+    fn test_authenticator_padding() {
+        // Nonce not aligned to 4 bytes => should have padding.
+        let auth = NtsAuthenticator::new(vec![0x01, 0x02, 0x03], vec![0xBB; 5]);
+        let encoded = auth.encode();
+        // 4 + 3 nonce + 1 pad + 5 ciphertext + 3 pad = 16
+        assert_eq!(encoded.len(), 16);
+
+        let decoded = NtsAuthenticator::decode(&encoded).unwrap();
+        assert_eq!(decoded.nonce, vec![0x01, 0x02, 0x03]);
+        assert_eq!(decoded.ciphertext, vec![0xBB; 5]);
     }
 
     #[test]
-    fn test_auth_header_decode_truncated() {
-        let result = NtsAuthHeader::decode(&[0x00]);
+    fn test_authenticator_decode_truncated() {
+        let result = NtsAuthenticator::decode(&[0x00, 0x03, 0x00, 0x05]);
+        // Says nonce_len=3, ciphertext_len=5, but no payload follows the header
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_authenticator_decode_too_short() {
+        let result = NtsAuthenticator::decode(&[0x00, 0x01]);
         assert!(result.is_none());
     }
 
@@ -419,10 +455,10 @@ mod tests {
 
     #[test]
     fn test_extension_field_constants() {
-        assert_eq!(EXTENSION_FIELD_NTS_COOKIE, 0x0104);
-        assert_eq!(EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER, 0x0105);
-        assert_eq!(EXTENSION_FIELD_NTS_AUTHENTICATOR, 0x0106);
-        assert_eq!(EXTENSION_FIELD_NTS_UNIQUE_ID, 0x0102);
+        assert_eq!(EXTENSION_FIELD_UNIQUE_IDENTIFIER, 0x0104);
+        assert_eq!(EXTENSION_FIELD_NTS_COOKIE, 0x0204);
+        assert_eq!(EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER, 0x0304);
+        assert_eq!(EXTENSION_FIELD_NTS_AUTHENTICATOR, 0x0404);
     }
 
     #[test]
@@ -445,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_debug_and_clone() {
-        let ef = ExtensionField::new(0x0104, vec![1, 2, 3]);
+        let ef = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, vec![1, 2, 3]);
         let _ = format!("{:?}", ef);
         let cloned = ef.clone();
         assert_eq!(cloned.field_type, ef.field_type);

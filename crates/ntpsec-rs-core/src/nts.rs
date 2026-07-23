@@ -84,44 +84,50 @@ pub mod nts_ef {
     pub const NTS_AUTHENTICATOR_ERROR: u16 = 0x0103;
 }
 
-/// AEAD algorithm IDs used in NTS (RFC 8915 §5.2, ntpsec's `nts.h`).
+/// AEAD algorithm IDs used in NTS (RFC 8915 §4.1.3).
 pub mod aead_algorithms {
-    /// AES-SIV-CMAC-256 (REQUIRED by RFC 8915).
-    pub const AES_SIV_CMAC_256: u16 = 1;
-    /// AES-128-GCM (not used by NTS).
+    /// AEAD_AES_SIV_CMAC_256 (REQUIRED by RFC 8915).
+    pub const AEAD_AES_SIV_CMAC_256: u16 = 15;
+    /// AEAD_AES_SIV_CMAC_512.
+    pub const AEAD_AES_SIV_CMAC_512: u16 = 16;
+    /// AEAD_AES_GCM_128.
+    pub const AEAD_AES_GCM_128: u16 = 18;
+
+    /// Old alias kept for compatibility.
+    pub const AES_SIV_CMAC_256: u16 = AEAD_AES_SIV_CMAC_256;
+    /// Old alias kept for compatibility.
     pub const AES_128_GCM: u16 = 2;
-    /// AES-256-GCM (not used by NTS).
+    /// Old alias kept for compatibility.
     pub const AES_256_GCM: u16 = 3;
 
-    /// All supported AEAD algorithms in ntpsec.
-    pub const SUPPORTED: &[u16] = &[AES_SIV_CMAC_256];
+    /// All supported AEAD algorithms.
+    pub const SUPPORTED: &[u16] = &[AEAD_AES_SIV_CMAC_256];
 }
 
 /// Strongly-typed AEAD algorithm identifiers (RFC 8915 §4.1.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AeadAlgorithm {
-    AeadAesSivCmac256 = 1,
-    AeadAesSivCmac512 = 2,
-    AeadAesGcm128 = 3,
+    AeadAesSivCmac256 = 15, // 32-byte key
+    AeadAesSivCmac512 = 16, // 64-byte key
+    AeadAesGcm128 = 18,     // 16-byte key
 }
 
 impl AeadAlgorithm {
-    /// Return the key length in bytes required by this AEAD algorithm.
-    /// For SIV-based algorithms this is the combined key (e.g. 2× 32 bytes).
+    /// Return the key length in bytes required by this AEAD algorithm (RFC 8915 §4.1.3).
     pub fn key_length(&self) -> usize {
         match self {
-            AeadAlgorithm::AeadAesSivCmac256 => 64, // 2 × AES-256 keys
-            AeadAlgorithm::AeadAesSivCmac512 => 64, // 2 × AES-256 keys
+            AeadAlgorithm::AeadAesSivCmac256 => 32,
+            AeadAlgorithm::AeadAesSivCmac512 => 64,
             AeadAlgorithm::AeadAesGcm128 => 16,
         }
     }
 
-    /// Convert from the u16 wire-encoding used in NTS-KE records.
+    /// Convert from the u16 wire-encoding used in NTS-KE records (RFC 8915 §4.1.3).
     pub fn from_u16(v: u16) -> Option<Self> {
         match v {
-            1 => Some(AeadAlgorithm::AeadAesSivCmac256),
-            2 => Some(AeadAlgorithm::AeadAesSivCmac512),
-            3 => Some(AeadAlgorithm::AeadAesGcm128),
+            15 => Some(AeadAlgorithm::AeadAesSivCmac256),
+            16 => Some(AeadAlgorithm::AeadAesSivCmac512),
+            18 => Some(AeadAlgorithm::AeadAesGcm128),
             _ => None,
         }
     }
@@ -635,12 +641,21 @@ impl NtsState {
 
 // ──── NTS-KE record type constants (RFC 8915 §4.1, top-level aliases) ──
 
+// NTS-KE record type constants (RFC 8915 §4.1).
 pub const NTS_KE_RECORD_END_OF_MESSAGE: u16 = 0;
-pub const NTS_KE_RECORD_NEGOTIATION_REQUEST: u16 = 1;
-pub const NTS_KE_RECORD_NEGOTIATION_RESPONSE: u16 = 2;
-pub const NTS_KE_RECORD_NEW_COOKIE: u16 = 4;
-pub const NTS_KE_RECORD_SERVER_DENY: u16 = 5;
-pub const NTS_KE_RECORD_AEAD_ALGORITHM: u16 = 6;
+pub const NTS_KE_RECORD_NEXT_PROTOCOL: u16 = 1;
+pub const NTS_KE_RECORD_ERROR: u16 = 2;
+pub const NTS_KE_RECORD_WARNING: u16 = 3;
+pub const NTS_KE_RECORD_AEAD_ALGORITHM: u16 = 4;
+pub const NTS_KE_RECORD_NEW_COOKIE: u16 = 5;
+pub const NTS_KE_RECORD_NTPV4_SERVER: u16 = 6;
+pub const NTS_KE_RECORD_NTPV4_PORT: u16 = 7;
+pub const NTS_KE_RECORD_CRITICAL_BIT: u16 = 0x8000;
+
+// AEAD algorithm identifiers (RFC 8915 §4.1.3).
+pub const AEAD_AES_SIV_CMAC_256: u16 = 15;
+pub const AEAD_AES_SIV_CMAC_512: u16 = 16;
+pub const AEAD_AES_GCM_128: u16 = 18;
 
 // ──── Tests ───────────────────────────────────────────────────────────
 
@@ -746,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_aead_key_length() {
-        assert_eq!(AeadAlgorithm::AeadAesSivCmac256.key_length(), 64);
+        assert_eq!(AeadAlgorithm::AeadAesSivCmac256.key_length(), 32);
         assert_eq!(AeadAlgorithm::AeadAesSivCmac512.key_length(), 64);
         assert_eq!(AeadAlgorithm::AeadAesGcm128.key_length(), 16);
     }
@@ -758,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_aead_algorithm_from_to_u16() {
-        for v in [1u16, 2, 3] {
+        for v in [15u16, 16, 18] {
             let alg = AeadAlgorithm::from_u16(v).unwrap();
             assert_eq!(alg.to_u16(), v);
         }
@@ -820,7 +835,7 @@ mod tests {
         // Build a mock server response with one AEAD offer and two cookies.
         let aead_rec = NtsKeRecord::new(
             nts_record::NTS_AEAD,
-            (1u16).to_be_bytes().to_vec(), // AES-SIV-CMAC-256
+            (15u16).to_be_bytes().to_vec(), // AEAD_AES_SIV_CMAC_256
         );
         let cookie1 = NtsKeRecord::new(nts_record::COOKIE, vec![0xAA; 32]);
         let cookie2 = NtsKeRecord::new(nts_record::COOKIE, vec![0xBB; 32]);
@@ -833,7 +848,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         // Build a minimal request (just AEAD and EOM).
-        let req_aead = NtsKeRecord::new(nts_record::NTS_AEAD, (1u16).to_be_bytes().to_vec());
+        let req_aead = NtsKeRecord::new(nts_record::NTS_AEAD, (15u16).to_be_bytes().to_vec());
         let req_eom = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]);
         let mut request = Vec::new();
         request.extend_from_slice(&req_aead.encode());
@@ -920,10 +935,16 @@ mod tests {
     #[test]
     fn test_nts_ke_record_constants() {
         assert_eq!(NTS_KE_RECORD_END_OF_MESSAGE, 0);
-        assert_eq!(NTS_KE_RECORD_NEGOTIATION_REQUEST, 1);
-        assert_eq!(NTS_KE_RECORD_NEGOTIATION_RESPONSE, 2);
-        assert_eq!(NTS_KE_RECORD_NEW_COOKIE, 4);
-        assert_eq!(NTS_KE_RECORD_SERVER_DENY, 5);
-        assert_eq!(NTS_KE_RECORD_AEAD_ALGORITHM, 6);
+        assert_eq!(NTS_KE_RECORD_NEXT_PROTOCOL, 1);
+        assert_eq!(NTS_KE_RECORD_ERROR, 2);
+        assert_eq!(NTS_KE_RECORD_WARNING, 3);
+        assert_eq!(NTS_KE_RECORD_AEAD_ALGORITHM, 4);
+        assert_eq!(NTS_KE_RECORD_NEW_COOKIE, 5);
+        assert_eq!(NTS_KE_RECORD_NTPV4_SERVER, 6);
+        assert_eq!(NTS_KE_RECORD_NTPV4_PORT, 7);
+        assert_eq!(NTS_KE_RECORD_CRITICAL_BIT, 0x8000);
+        assert_eq!(AEAD_AES_SIV_CMAC_256, 15);
+        assert_eq!(AEAD_AES_SIV_CMAC_512, 16);
+        assert_eq!(AEAD_AES_GCM_128, 18);
     }
 }

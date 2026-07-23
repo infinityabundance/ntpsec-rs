@@ -1,10 +1,46 @@
 [package]
 name = "ntpsec-rs"
-description = "Umbrella facade crate for ntpsec-rs — re-exports ntpsec-rs-core as the public API"
+description = "Umbrella crate for ntpsec-rs — forensic Rust reconstruction of NTPsec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }
-ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.3.0" }
+ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.3.0", optional = true }
+ntpsec-rs-d = { path = "../ntpsec-rs-d", version = "0.3.0", optional = true }
+ntpsec-rs-query = { path = "../ntpsec-rs-query", version = "0.3.0", optional = true }
+ntpsec-rs-dig = { path = "../ntpsec-rs-dig", version = "0.3.0", optional = true }
+ntpsec-rs-keygen = { path = "../ntpsec-rs-keygen", version = "0.3.0", optional = true }
+ntpsec-rs-leapfetch = { path = "../ntpsec-rs-leapfetch", version = "0.3.0", optional = true }
+ntpsec-rs-mon = { path = "../ntpsec-rs-mon", version = "0.3.0", optional = true }
+ntpsec-rs-trace = { path = "../ntpsec-rs-trace", version = "0.3.0", optional = true }
+ntpsec-rs-wait = { path = "../ntpsec-rs-wait", version = "0.3.0", optional = true }
+ntpsec-rs-viz = { path = "../ntpsec-rs-viz", version = "0.3.0", optional = true }
+ntpsec-rs-frob = { path = "../ntpsec-rs-frob", version = "0.3.0", optional = true }
+ntpsec-rs-snmpd = { path = "../ntpsec-rs-snmpd", version = "0.3.0", optional = true }
+ntpsec-rs-time = { path = "../ntpsec-rs-time", version = "0.3.0", optional = true }
+ntpsec-rs-sweep = { path = "../ntpsec-rs-sweep", version = "0.3.0", optional = true }
+ntpsec-rs-loggps = { path = "../ntpsec-rs-loggps", version = "0.3.0", optional = true }
+ntpsec-rs-logtemp = { path = "../ntpsec-rs-logtemp", version = "0.3.0", optional = true }
+
+[features]
+default = []
+full = [
+    "ntpsec-rs-io",
+    "ntpsec-rs-d",
+    "ntpsec-rs-query",
+    "ntpsec-rs-dig",
+    "ntpsec-rs-keygen",
+    "ntpsec-rs-leapfetch",
+    "ntpsec-rs-mon",
+    "ntpsec-rs-trace",
+    "ntpsec-rs-wait",
+    "ntpsec-rs-viz",
+    "ntpsec-rs-frob",
+    "ntpsec-rs-snmpd",
+    "ntpsec-rs-time",
+    "ntpsec-rs-sweep",
+    "ntpsec-rs-loggps",
+    "ntpsec-rs-logtemp",
+]
