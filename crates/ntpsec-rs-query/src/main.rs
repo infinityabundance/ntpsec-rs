@@ -84,6 +84,9 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
         }
         "associations" | "as" => Ok(CliCommand::Associations),
         "peers" | "pe" => Ok(CliCommand::Peers),
+        "mrulist" => Err("MRU list not yet implemented (Phase 3.4)".to_string()),
+        "monitor" | "ntpmon" => Err("ntpmon not yet implemented (Phase 3.4)".to_string()),
+        "trace" | "ntptrace" => Err("ntptrace not yet implemented (Phase 3.4)".to_string()),
         _ => Err(format!("unknown command: {command}")),
     }
 }

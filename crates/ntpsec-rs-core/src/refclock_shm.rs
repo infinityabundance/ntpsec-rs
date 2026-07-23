@@ -268,10 +268,10 @@ pub fn shm_sample_to_packet(sample: &ShmSample, precision: i8) -> NtpPacket {
     pkt.stratum = 0; // stratum will be set by the engine
     pkt.precision = precision;
     pkt.reference_id = u32::from_be_bytes(*b"SHM\0");
-    pkt.reference_ts = sample.clock_time;
-    pkt.originate_ts = sample.receive_time;
-    pkt.receive_ts = sample.clock_time;
-    pkt.transmit_ts = sample.clock_time;
+    pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.clock_time);
+    pkt.originate_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.receive_time);
+    pkt.receive_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.clock_time);
+    pkt.transmit_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.clock_time);
     pkt
 }
 

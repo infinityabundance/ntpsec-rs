@@ -1,8 +1,33 @@
-// ──── nts_extens.rs ─────────────────────────────────────────────────────────
+// ──── nts_extens.rs — NTS Extension Fields ─────────────────────────
 // Forensic reconstruction of ntpd/nts_extens.c
 //
 // NTS extension field handling: encoding and decoding NTP extension fields
-// for cookie transport and authentication.
+// for cookie transport and authentication (RFC 8915 §5).
+//
+// ## NTP Extension Field Format
+//
+// All NTP extension fields share a common 4-byte header (RFC 7821):
+//
+//   0                   1                   2                   3
+//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//  ┌─────────────────────────────────────────────────────────────────┐
+//  │         Field Type (16)        │        Length (16)             │
+//  ├─────────────────────────────────────────────────────────────────┤
+//  │                          Payload (variable)                     │
+//  ├─────────────────────────────────────────────────────────────────┤
+//  │                      Padding (to 4-byte boundary)               │
+//  └─────────────────────────────────────────────────────────────────┘
+//
+// The Length field includes the 4-byte header.  The total field size
+// (including padding) must be a multiple of 4 bytes.
+//
+// ## NTS Extension Field Types (RFC 8915 §5)
+//
+// The following field types are used by NTS:
+//   - 0x0102  NTS Unique Identifier
+//   - 0x0104  NTS Cookie
+//   - 0x0105  NTS Cookie Placeholder
+//   - 0x0106  NTS Authenticator (AEAD encryption result)
 //
 // ## Oracle
 //   - ntpsec ntpd/nts_extens.c (12K)
@@ -12,7 +37,27 @@
 
 use crate::ntp_types::*;
 
+// ──── NTS Extension Field Type Constants ──────────────────────────────
+//
+// These constants match RFC 8915 §5 and the IANA NTP Extension Field
+// Types registry.  They are distinct from, but related to, the NTS-KE
+// record types defined in `nts.rs`'s `nts_record` and `nts_ef` modules.
+
+/// NTS Cookie extension field (RFC 8915 §5.2).
+pub const EXTENSION_FIELD_NTS_COOKIE: u16 = 0x0104;
+/// NTS Cookie Placeholder extension field (RFC 8915 §5.2).
+pub const EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER: u16 = 0x0105;
+/// NTS Authenticator — AEAD encryption result (RFC 8915 §5.3).
+pub const EXTENSION_FIELD_NTS_AUTHENTICATOR: u16 = 0x0106;
+/// NTS Unique Identifier (RFC 8915 §5.1).
+pub const EXTENSION_FIELD_NTS_UNIQUE_ID: u16 = 0x0102;
+
+// ──── NTP Extension Field Header ──────────────────────────────────────
+
 /// NTP extension field header (4 bytes).
+///
+/// The header consists of a 16-bit field type and a 16-bit length.
+/// The length includes the 4-byte header itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ExtensionFieldHeader {
@@ -22,19 +67,33 @@ pub struct ExtensionFieldHeader {
 
 impl ExtensionFieldHeader {
     pub fn new(field_type: u16, payload_len: u16) -> Self {
-        Self { field_type, length: payload_len + 4 } // total length including header
+        Self {
+            field_type,
+            length: payload_len + 4,
+        } // total length including header
     }
 
+    /// Return the payload length (total length minus the 4-byte header).
     pub fn payload_length(&self) -> u16 {
         self.length.saturating_sub(4)
     }
 
+    /// Return the total length (header + payload).
     pub fn total_length(&self) -> u16 {
         self.length
     }
+
+    /// Return the padded total length (rounded up to the next 4-byte boundary).
+    pub fn padded_length(&self) -> u16 {
+        let len = self.length as usize;
+        let padded = (len + 3) & !3;
+        padded as u16
+    }
 }
 
-/// An NTP extension field.
+// ──── Extension Field ─────────────────────────────────────────────────
+
+/// A single NTP extension field (RFC 7821).
 #[derive(Debug, Clone)]
 pub struct ExtensionField {
     pub field_type: u16,
@@ -43,13 +102,23 @@ pub struct ExtensionField {
 
 impl ExtensionField {
     pub fn new(field_type: u16, payload: Vec<u8>) -> Self {
-        Self { field_type, payload }
+        Self {
+            field_type,
+            payload,
+        }
     }
 
     /// Encode to wire format (padded to 4-byte boundary).
+    ///
+    /// The encoded output consists of:
+    ///   - 2 bytes: field type (big-endian)
+    ///   - 2 bytes: length = payload.len() + 4 (big-endian)
+    ///   - N bytes: payload
+    ///   - 0-3 bytes: zero padding to 4-byte boundary
     pub fn encode(&self) -> Vec<u8> {
         let header = ExtensionFieldHeader::new(self.field_type, self.payload.len() as u16);
-        let mut buf = Vec::with_capacity(header.total_length() as usize);
+        let padded_len = header.padded_length() as usize;
+        let mut buf = Vec::with_capacity(padded_len);
         buf.extend_from_slice(&header.field_type.to_be_bytes());
         buf.extend_from_slice(&header.length.to_be_bytes());
         buf.extend_from_slice(&self.payload);
@@ -57,45 +126,154 @@ impl ExtensionField {
         while buf.len() % 4 != 0 {
             buf.push(0);
         }
+        debug_assert_eq!(buf.len() % 4, 0);
         buf
     }
 
-    /// Decode from wire format.
+    /// Decode a single extension field from wire format.
+    ///
+    /// Returns `(field, remaining_bytes)` on success, or `None` if the
+    /// data is truncated or malformed.
     pub fn decode(data: &[u8]) -> Option<(Self, &[u8])> {
         if data.len() < 4 {
             return None;
         }
         let field_type = u16::from_be_bytes([data[0], data[1]]);
         let length = u16::from_be_bytes([data[2], data[3]]);
-        if length as usize > data.len() || length < 4 {
+
+        // Length must include at least the 4-byte header.
+        if length < 4 {
             return None;
         }
+
+        let padded_len = ((length as usize + 3) & !3);
+        if data.len() < padded_len {
+            return None;
+        }
+
+        // Payload is the data between the 4-byte header and the end of
+        // the unpadded field.
         let payload = data[4..length as usize].to_vec();
-        let remaining = &data[length as usize..];
-        Some((Self { field_type, payload }, remaining))
+        let remaining = &data[padded_len..];
+        Some((
+            Self {
+                field_type,
+                payload,
+            },
+            remaining,
+        ))
+    }
+
+    /// Decode all extension fields from a buffer.
+    ///
+    /// Parses as many complete extension fields as possible.  Returns
+    /// all successfully decoded fields; stops when remaining data is
+    /// too short for a valid header.
+    pub fn decode_all(data: &[u8]) -> Vec<Self> {
+        let mut fields = Vec::new();
+        let mut remain = data;
+        while !remain.is_empty() {
+            match Self::decode(remain) {
+                Some((field, rest)) => {
+                    fields.push(field);
+                    remain = rest;
+                }
+                None => break,
+            }
+        }
+        fields
+    }
+
+    /// Return the total wire size of this field including padding.
+    pub fn wire_size(&self) -> usize {
+        let header = ExtensionFieldHeader::new(self.field_type, self.payload.len() as u16);
+        header.padded_length() as usize
+    }
+
+    /// Return the payload size.
+    pub fn payload_len(&self) -> usize {
+        self.payload.len()
     }
 }
 
-/// NTS Authenticator Encryption (AEAD) field header.
+// ──── NTS Authentication Result ───────────────────────────────────────
+
+/// NTS authentication result, written by the server into the NTP response
+/// after verifying the NTS cookie (RFC 8915 §5.3).
+///
+/// The authentication result extension field (type 0x0106, NTS Authenticator)
+/// carries the AEAD output (encrypted S2C keys and a MAC) that proves the
+/// server successfully decrypted and verified the client's cookie.
+#[derive(Debug, Clone)]
+pub struct NtsAuthResult {
+    /// Server identity bytes — used by the client to verify it's talking
+    /// to the correct NTS-KE server (RFC 8915 §5.3).
+    pub server_id: Vec<u8>,
+}
+
+impl NtsAuthResult {
+    pub fn new(server_id: Vec<u8>) -> Self {
+        Self { server_id }
+    }
+
+    /// Encode as an NTS Authenticator extension field payload.
+    ///
+    /// The payload format is simply the server identifier bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        self.server_id.clone()
+    }
+
+    /// Decode from an NTS Authenticator extension field payload.
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.is_empty() {
+            return None;
+        }
+        Some(Self {
+            server_id: data.to_vec(),
+        })
+    }
+}
+
+// ──── NTS Authenticator Header ────────────────────────────────────────
+
+/// NTS Authenticator header for the AEAD encryption result field.
+///
+/// The NTS Authenticator (RFC 8915 §5.3) contains:
+///   [ nonce_len: 2 bytes ][ nonce: variable ][ AEAD output: variable ]
+///
+/// This struct represents the 2-byte nonce length prefix.
 #[derive(Debug, Clone)]
 pub struct NtsAuthHeader {
     pub nonce_len: u16,
 }
 
 impl NtsAuthHeader {
+    /// Size of the header in bytes (just the nonce_len field).
     pub const SIZE: usize = 2;
 
+    /// Encode the nonce length as 2 bytes big-endian.
     pub fn encode(&self) -> Vec<u8> {
         self.nonce_len.to_be_bytes().to_vec()
     }
 
+    /// Decode the nonce length from 2 bytes.
     pub fn decode(data: &[u8]) -> Option<Self> {
         if data.len() < 2 {
             return None;
         }
-        Some(Self { nonce_len: u16::from_be_bytes([data[0], data[1]]) })
+        Some(Self {
+            nonce_len: u16::from_be_bytes([data[0], data[1]]),
+        })
+    }
+
+    /// Total size of the Authenticator header including the nonce.
+    /// This is `Self::SIZE + nonce_len`.
+    pub fn header_size(&self) -> usize {
+        Self::SIZE + self.nonce_len as usize
     }
 }
+
+// ──── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -113,8 +291,168 @@ mod tests {
 
     #[test]
     fn test_extension_field_padding() {
+        // Payload not aligned to 4 bytes.
         let ef = ExtensionField::new(0x0104, vec![1, 2, 3]);
         let encoded = ef.encode();
         assert_eq!(encoded.len() % 4, 0);
+        // 4 header + 3 payload + 1 padding = 8 bytes
+        assert_eq!(encoded.len(), 8);
+
+        // Payload aligned to 4 bytes exactly.
+        let ef = ExtensionField::new(0x0104, vec![1, 2, 3, 4]);
+        let encoded = ef.encode();
+        assert_eq!(encoded.len() % 4, 0);
+        // 4 header + 4 payload = 8 bytes
+        assert_eq!(encoded.len(), 8);
+
+        // Empty payload.
+        let ef = ExtensionField::new(0x0104, vec![]);
+        let encoded = ef.encode();
+        assert_eq!(encoded.len() % 4, 0);
+        assert_eq!(encoded.len(), 4);
+    }
+
+    #[test]
+    fn test_extension_field_decode_all() {
+        let ef1 = ExtensionField::new(0x0104, vec![1, 2, 3, 4]);
+        let ef2 = ExtensionField::new(0x0105, vec![5, 6, 7, 8]);
+        let ef3 = ExtensionField::new(0x0106, vec![9, 10]);
+
+        let mut data = ef1.encode();
+        data.extend_from_slice(&ef2.encode());
+        data.extend_from_slice(&ef3.encode());
+
+        let fields = ExtensionField::decode_all(&data);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].field_type, 0x0104);
+        assert_eq!(fields[1].field_type, 0x0105);
+        assert_eq!(fields[2].field_type, 0x0106);
+    }
+
+    #[test]
+    fn test_extension_field_decode_truncated() {
+        // Only 2 bytes of data (need at least 4 for header).
+        let result = ExtensionField::decode(&[0x01, 0x04]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extension_field_decode_malformed_length() {
+        // Length < 4 is invalid.
+        let data = [0x01, 0x04, 0x00, 0x02, 0xFF, 0xFF];
+        let result = ExtensionField::decode(&data);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extension_field_padded_length() {
+        let hdr = ExtensionFieldHeader::new(0x0104, 3);
+        assert_eq!(hdr.payload_length(), 3);
+        assert_eq!(hdr.total_length(), 7);
+        assert_eq!(hdr.padded_length(), 8);
+
+        let hdr = ExtensionFieldHeader::new(0x0104, 4);
+        assert_eq!(hdr.payload_length(), 4);
+        assert_eq!(hdr.total_length(), 8);
+        assert_eq!(hdr.padded_length(), 8);
+
+        let hdr = ExtensionFieldHeader::new(0x0104, 0);
+        assert_eq!(hdr.payload_length(), 0);
+        assert_eq!(hdr.total_length(), 4);
+        assert_eq!(hdr.padded_length(), 4);
+    }
+
+    #[test]
+    fn test_auth_header_roundtrip() {
+        let hdr = NtsAuthHeader { nonce_len: 8 };
+        let encoded = hdr.encode();
+        assert_eq!(encoded.len(), 2);
+        assert_eq!(encoded, [0x00, 0x08]);
+
+        let decoded = NtsAuthHeader::decode(&encoded).unwrap();
+        assert_eq!(decoded.nonce_len, 8);
+        assert_eq!(decoded.header_size(), 10); // 2 + 8
+    }
+
+    #[test]
+    fn test_auth_header_zero_nonce() {
+        let hdr = NtsAuthHeader { nonce_len: 0 };
+        let encoded = hdr.encode();
+        let decoded = NtsAuthHeader::decode(&encoded).unwrap();
+        assert_eq!(decoded.nonce_len, 0);
+        assert_eq!(decoded.header_size(), 2);
+    }
+
+    #[test]
+    fn test_auth_header_decode_truncated() {
+        let result = NtsAuthHeader::decode(&[0x00]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_nts_auth_result_roundtrip() {
+        let server_id = b"ntp.example.com".to_vec();
+        let auth = NtsAuthResult::new(server_id.clone());
+        let encoded = auth.encode();
+        assert_eq!(encoded, server_id);
+
+        let decoded = NtsAuthResult::decode(&encoded).unwrap();
+        assert_eq!(decoded.server_id, b"ntp.example.com");
+    }
+
+    #[test]
+    fn test_nts_auth_result_empty() {
+        let result = NtsAuthResult::decode(&[]);
+        assert!(result.is_none(), "empty data should produce None");
+    }
+
+    #[test]
+    fn test_extension_field_wire_size() {
+        let ef = ExtensionField::new(0x0104, vec![1, 2, 3]);
+        assert_eq!(ef.wire_size(), 8); // 4 header + 3 payload + 1 pad
+        assert_eq!(ef.payload_len(), 3);
+
+        let ef = ExtensionField::new(0x0104, vec![1, 2, 3, 4]);
+        assert_eq!(ef.wire_size(), 8);
+        assert_eq!(ef.payload_len(), 4);
+    }
+
+    #[test]
+    fn test_extension_field_constants() {
+        assert_eq!(EXTENSION_FIELD_NTS_COOKIE, 0x0104);
+        assert_eq!(EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER, 0x0105);
+        assert_eq!(EXTENSION_FIELD_NTS_AUTHENTICATOR, 0x0106);
+        assert_eq!(EXTENSION_FIELD_NTS_UNIQUE_ID, 0x0102);
+    }
+
+    #[test]
+    fn test_decode_all_empty() {
+        let fields = ExtensionField::decode_all(&[]);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_decode_all_partial() {
+        // Valid field followed by truncated data.
+        let ef = ExtensionField::new(0x0104, vec![1, 2, 3, 4]);
+        let mut data = ef.encode();
+        data.extend_from_slice(&[0xFF, 0xFF]); // truncated header
+
+        let fields = ExtensionField::decode_all(&data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].field_type, 0x0104);
+    }
+
+    #[test]
+    fn test_debug_and_clone() {
+        let ef = ExtensionField::new(0x0104, vec![1, 2, 3]);
+        let _ = format!("{:?}", ef);
+        let cloned = ef.clone();
+        assert_eq!(cloned.field_type, ef.field_type);
+        assert_eq!(cloned.payload, ef.payload);
+
+        let ar = NtsAuthResult::new(vec![1, 2, 3]);
+        let _ = format!("{:?}", ar);
+        let _ = ar.clone();
     }
 }
