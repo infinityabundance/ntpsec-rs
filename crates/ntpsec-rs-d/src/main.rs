@@ -151,7 +151,10 @@ fn main() {
     }
 
     // ──── Load Key Files ────────────────────────────────────────────
-    load_key_files(&mut engine, &engine.config);
+    let key_paths = collect_key_paths(&engine.config);
+    if let Err(e) = load_key_files(&mut engine.auth, &key_paths) {
+        tracing::warn!("Key file loading issue: {e}");
+    }
 
     // ──── Bind Privileged Port ───────────────────────────────────────
     if let Err(e) = network.bind("0.0.0.0:123") {
@@ -215,11 +218,20 @@ fn main() {
                         new_engine.loop_filter = engine.loop_filter.clone();
                         new_engine.system = engine.system.clone();
                         new_engine.precision = engine.precision;
-                        // Load key files for the new config
-                        load_key_files(&mut new_engine, &new_engine.config);
-                        // Transactional swap
-                        engine = new_engine;
-                        tracing::info!("Configuration reloaded (transactional)");
+                        // Load key files for the new config — abort swap on failure
+                        let new_key_paths = collect_key_paths(&new_engine.config);
+                        match load_key_files(&mut new_engine.auth, &new_key_paths) {
+                            Ok(()) => {
+                                // Transactional swap
+                                engine = new_engine;
+                                tracing::info!("Configuration reloaded (transactional)");
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "SIGHUP key loading failed (keeping old config): {e}"
+                                );
+                            }
+                        }
                     } else {
                         tracing::error!("SIGHUP config has errors — keeping old config");
                         for err in &new_config.errors {
@@ -554,10 +566,9 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
 
 // ──── Key File Loading ──────────────────────────────────────────────────
 
-/// Load all key files referenced in the configuration into the engine.
-/// Called at startup and during SIGHUP reload.
-fn load_key_files(engine: &mut DaemonEngine, config: &ConfigTree) {
-    let keys_paths: Vec<String> = config
+/// Collect key file paths from configuration.
+fn collect_key_paths(config: &ConfigTree) -> Vec<String> {
+    config
         .options
         .iter()
         .filter_map(|opt| {
@@ -567,17 +578,29 @@ fn load_key_files(engine: &mut DaemonEngine, config: &ConfigTree) {
                 None
             }
         })
-        .collect();
+        .collect()
+}
 
-    for path in &keys_paths {
+/// Load all key files referenced in the configuration.
+/// Returns Err if any key file cannot be read (severe config error).
+fn load_key_files(
+    auth: &mut ntpsec_rs_core::ntp_auth::AuthKeyStore,
+    keys_paths: &[String],
+) -> Result<(), String> {
+    for path in keys_paths {
         match std::fs::read_to_string(path) {
-            Ok(content) => match engine.auth.parse_keys_file(&content) {
+            Ok(content) => match auth.parse_keys_file(&content) {
                 Ok(count) => tracing::info!("Loaded {} keys from '{}'", count, path),
-                Err(e) => tracing::warn!("Failed to parse keys from '{}': {}", path, e),
+                Err(e) => {
+                    return Err(format!("Failed to parse keys from '{}': {}", path, e));
+                }
             },
-            Err(e) => tracing::warn!("Cannot read key file '{}': {}", path, e),
+            Err(e) => {
+                return Err(format!("Cannot read key file '{}': {}", path, e));
+            }
         }
     }
+    Ok(())
 }
 
 // ──── Privilege Dropping ────────────────────────────────────────────────

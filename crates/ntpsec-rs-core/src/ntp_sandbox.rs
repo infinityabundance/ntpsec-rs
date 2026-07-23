@@ -73,9 +73,9 @@ const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
 
-// ──── x86_64 syscall allowlist (derived from strace of startup + steady-state) ─
-// Removed: execve, setuid, setgid, mkdir, link, symlink, fanotify_init,
-// fanotify_mark — these are either unused after init or pose security risk.
+// ──── x86_64 syscall allowlist (derived from full lifecycle strace) ───────
+// Covers: startup, polling, Mode 6, stats append, drift write+rename, shutdown.
+// Removed: execve, setuid, setgid, mkdir, link, symlink, fanotify_*.
 #[cfg(target_arch = "x86_64")]
 const ALLOWED_SYSCALLS: &[u64] = &[
     0,   // read
@@ -94,7 +94,7 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     15,  // rt_sigreturn
     16,  // ioctl
     21,  // access
-    23,  // select
+    23,  // pselect6/select
     28,  // madvise
     35,  // nanosleep
     39,  // getpid
@@ -108,14 +108,15 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     52,  // getpeername
     54,  // setsockopt
     55,  // getsockopt
-    56,  // clone (signal threads MUST be created before seccomp)
+    56,  // clone (signal threads created before seccomp)
     60,  // exit
     61,  // wait4
     62,  // kill
     63,  // uname
     72,  // fcntl
-    78,  // getdents
+    78,  // getdents64
     79,  // getcwd
+    82,  // rename (atomic drift write)
     96,  // gettimeofday
     97,  // getrlimit
     98,  // getrusage
@@ -134,7 +135,6 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     143, // getpriority
     157, // prctl
     158, // arch_prctl
-    186, // gettid (x32 alias on some kernels)
     202, // futex
     217, // getdents64
     228, // clock_gettime
@@ -144,7 +144,7 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     233, // epoll_ctl
     234, // tgkill
     243, // set_tid_address
-    247, // clock_adjtime (NTP clock discipline)
+    247, // clock_adjtime
     257, // openat
     262, // newfstatat
     267, // faccessat
@@ -154,10 +154,11 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     293, // signalfd4
     302, // prlimit64
     307, // sendmmsg
+    316, // renameat
     318, // getrandom
     332, // statx
     334, // rseq
-    435, // clone3 (used by modern glibc for thread creation)
+    435, // clone3 (modern glibc thread creation)
 ];
 
 /// Install seccomp BPF filter.
@@ -191,16 +192,26 @@ fn install_seccomp_filter() -> Result<(), String> {
         ));
 
         // ── Syscall number check ───────────────────────────────────────
+        // Load syscall number (once, before the jump chain)
         filter.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
 
+        // Jump chain: each syscall has JEQ nr, jt=0, jf=1 → RET ALLOW
+        // If match (jt=0): fall through to ALLOW
+        // If no match (jf=1): skip one (the ALLOW), continue to next JEQ
         for &nr in ALLOWED_SYSCALLS {
-            filter.push(bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr as u32, 1, 0));
+            filter.push(bpf_jump(
+                BPF_JMP | BPF_JEQ | BPF_K,
+                nr as u32,
+                0, // jt=0: if equal, fall through to ALLOW
+                1, // jf=1: if not equal, skip the next ALLOW instruction
+            ));
+            filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW as u32));
         }
+        // No syscall matched — kill process
         filter.push(bpf_stmt(
             BPF_RET | BPF_K,
             libc::SECCOMP_RET_KILL_PROCESS as u32,
         ));
-        filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW as u32));
 
         if filter.len() > 256 {
             return Err(format!(
@@ -214,11 +225,12 @@ fn install_seccomp_filter() -> Result<(), String> {
             filter: filter.as_ptr() as *mut libc::sock_filter,
         };
 
+        // Use TSYNC to propagate filter to all existing threads (signal handlers)
         let ret = unsafe {
             libc::syscall(
                 libc::SYS_seccomp,
                 libc::SECCOMP_SET_MODE_FILTER,
-                0i32,
+                libc::SECCOMP_FILTER_FLAG_TSYNC as i32,
                 &prog as *const libc::sock_fprog,
             )
         };
@@ -259,20 +271,22 @@ mod tests {
 
     #[test]
     fn test_enable_seccomp() {
-        // In CI or containers without CAP_SYS_ADMIN or seccomp, this may fail.
-        // We assert only that it returns Ok or a descriptive error.
-        match enable_sandbox() {
-            Ok(()) => {
-                assert!(is_sandbox_active());
-                assert!(is_seccomp_active(), "seccomp must be in FILTER mode");
-            }
-            Err(e) => {
-                // Acceptable failures: no seccomp support, missing CAP_SYS_ADMIN
-                assert!(
-                    e.contains("failed") || e.contains("supported"),
-                    "Unexpected error: {e}"
-                );
-            }
+        #[cfg(target_os = "linux")]
+        {
+            let result = enable_sandbox();
+            assert!(result.is_ok(), "seccomp enable failed: {:?}", result.err());
+            assert!(is_sandbox_active(), "NO_NEW_PRIVS must be set");
+            assert!(
+                is_seccomp_active(),
+                "seccomp must be in FILTER mode after enable"
+            );
+            // Verify an allowed syscall works
+            let allowed_pid = unsafe { libc::getpid() };
+            assert!(allowed_pid > 0, "allowed syscall must succeed");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(enable_sandbox().is_err());
         }
     }
 
@@ -281,8 +295,7 @@ mod tests {
         // Use a child process because SECCOMP_RET_KILL_PROCESS kills the caller.
         #[cfg(target_os = "linux")]
         {
-            match enable_sandbox() {
-                Ok(()) => {
+            enable_sandbox().expect("seccomp must be installed for this test");
                     // Fork a child that attempts a forbidden syscall (mount = 165 on x86_64)
                     let pid = unsafe { libc::fork() };
                     if pid == 0 {
@@ -319,10 +332,6 @@ mod tests {
                     } else {
                         panic!("fork failed");
                     }
-                }
-                Err(e) => {
-                    eprintln!("Sandbox not available, skipping test: {e}");
-                }
             }
         }
     }

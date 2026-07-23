@@ -469,13 +469,13 @@ impl StateStore for FileStateStore {
         let tmp_path = self.drift_path.with_extension("drift.tmp");
         std::fs::write(&tmp_path, format!("{:.3}\n", freq_ppm))
             .map_err(|e| IoError::FileFailed(format!("write drift: {e}")))?;
-        std::fs::rename(&tmp_path, &path)
+        std::fs::rename(&tmp_path, &self.drift_path)
             .map_err(|e| IoError::FileFailed(format!("rename drift: {e}")))?;
         Ok(())
     }
 
     fn load_leap(&self) -> Result<String, IoError> {
-        let path = self.base_path.join("leap-seconds");
+        let path = self.stats_dir.join("leap-seconds");
         std::fs::read_to_string(&path).map_err(|e| IoError::FileFailed(format!("read leap: {e}")))
     }
 
