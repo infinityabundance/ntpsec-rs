@@ -6,4 +6,5 @@
 // =============================================================================
 
 pub use ntpsec_rs_core::*;
+#[cfg(feature = "ntpsec-rs-io")]
 pub use ntpsec_rs_io as io;

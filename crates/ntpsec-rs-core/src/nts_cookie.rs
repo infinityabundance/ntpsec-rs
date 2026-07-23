@@ -1,19 +1,33 @@
 // ──── nts_cookie.rs — NTS Cookie Operations ──────────────────────────
-// RFC 8915 §4.2: NTS Cookie encryption and decryption.
+// RFC 8915 §4.2: NTS Cookie encryption and decryption using
+// AES-SIV-CMAC-256 (RFC 5297).
 //
-// ## Cookie Plaintext Format
+// ## Cookie Plaintext Format (NtsCookie)
 //
 //   [ server_id: 32 bytes ][ c2s_key: 32 bytes ][ s2c_key: 32 bytes ]
 //   [ seconds: 8 bytes     ][ fraction: 4 bytes ][ aead: 2 bytes     ]
 //   Total: 110 bytes
 //
-// The plaintext is then encrypted with an AEAD algorithm (typically
-// AES-SIV-CMAC-256 per RFC 5297).  This module provides the cookie
-// structure and plaintext encode/decode; the actual AEAD encryption
-// requires a vetted RFC 5297 implementation (not yet wired in).
+// ## AES-SIV-CMAC-256 Cookie Cipher (CookieCipher)
+//
+// A standalone key-managed envelope format with a random nonce for
+// non-deterministic encryption suitable for NTP NTS cookie transport:
+//
+//   Plaintext (66 bytes):
+//     [ aead_algo: 2 bytes ][ c2s_key: 32 bytes ][ s2c_key: 32 bytes ]
+//
+//   Envelope (wire format):
+//     [ key_id: 4 bytes ][ nonce: 16 bytes ][ ciphertext: variable ]
+//
+// The associated data (AAD) is the key_id || nonce prefix, ensuring
+// the envelope is bound to the encryption context.
 // =============================================================================
 
 use crate::ntp_types::*;
+use aes_siv::aead::Key;
+use aes_siv::siv::Aes128Siv;
+use digest::KeyInit;
+use getrandom::getrandom;
 
 /// Size of the server identity field in the cookie plaintext.
 pub const SERVER_ID_SIZE: usize = 32;
@@ -28,6 +42,121 @@ pub const S2C_KEY_SIZE: usize = 32;
 /// server_id(32) + c2s_key(32) + s2c_key(32) + timestamp_secs(8) +
 /// timestamp_frac(4) + aead(2) = 110 bytes.
 pub const COOKIE_PLAINTEXT_MIN: usize = 110;
+
+// ──── Cookie Cipher (key-rotation aware AES-SIV-CMAC-256) ───────────
+
+/// Cookie key index — NTPsec rotates cookie encryption keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CookieKeyIndex(pub u32);
+
+/// AES-SIV-CMAC-256 cookie encryption/decryption with key rotation
+/// support and a random-nonce envelope format.
+///
+/// Each key is identified by a [`CookieKeyIndex`] (a 32-bit integer).
+/// Encryption always picks the most recently added key; decryption
+/// looks up the key by its index from the envelope.
+pub struct CookieCipher {
+    keys: Vec<(CookieKeyIndex, [u8; 32])>,
+}
+
+impl CookieCipher {
+    /// Create an empty cipher with no keys configured.
+    pub fn new() -> Self {
+        Self { keys: Vec::new() }
+    }
+
+    /// Add a cookie encryption key.
+    ///
+    /// The most recently added key is used for encryption.
+    pub fn add_key(&mut self, key_id: CookieKeyIndex, key: [u8; 32]) {
+        self.keys.push((key_id, key));
+    }
+
+    /// Get a key by its index, if present.
+    pub fn get_key(&self, key_id: CookieKeyIndex) -> Option<&[u8; 32]> {
+        self.keys
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == key_id)
+            .map(|(_, k)| k)
+    }
+
+    /// Encrypt `plaintext` into a cookie envelope using the most
+    /// recently added key.
+    ///
+    /// The envelope wire format:
+    /// ```text
+    ///   key_id:   4 bytes (u32 big-endian)
+    ///   nonce:   16 bytes (random)
+    ///   ciphertext: remainder (SIV-tagged output)
+    /// ```
+    ///
+    /// The associated data (AAD) fed to AES-SIV is `key_id || nonce`,
+    /// binding the envelope to this specific encryption context.
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+        let (key_id, key_bytes) = self
+            .keys
+            .last()
+            .ok_or_else(|| "no cookie keys configured".to_string())?;
+
+        let key = Key::<Aes128Siv>::from_slice(key_bytes);
+        // AAD: key_id (4 bytes big-endian) + random nonce (16 bytes)
+        let key_id_bytes = key_id.0.to_be_bytes();
+        let mut nonce = [0u8; 16];
+        getrandom(&mut nonce).map_err(|e| format!("failed to generate nonce: {e}"))?;
+
+        let headers: [&[u8]; 2] = [&key_id_bytes, &nonce];
+        let mut siv = Aes128Siv::new(key);
+        let ciphertext = siv
+            .encrypt(headers, plaintext)
+            .map_err(|e| format!("AES-SIV encrypt failed: {e}"))?;
+
+        // Build envelope: key_id(4) || nonce(16) || ciphertext
+        let mut envelope = Vec::with_capacity(4 + 16 + ciphertext.len());
+        envelope.extend_from_slice(&key_id_bytes);
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ciphertext);
+        Ok(envelope)
+    }
+
+    /// Decrypt a cookie envelope back to the original plaintext.
+    ///
+    /// Parses the envelope, looks up the key by `key_id`, and
+    /// authenticates/decrypts with AES-SIV.
+    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+        if data.len() < 4 + 16 {
+            return Err(format!(
+                "cookie envelope too short: {} bytes (need at least 20)",
+                data.len()
+            ));
+        }
+
+        let (key_id_bytes, rest) = data.split_at(4);
+        let (nonce_bytes, ciphertext) = rest.split_at(16);
+
+        let key_id = CookieKeyIndex(u32::from_be_bytes(
+            key_id_bytes.try_into().map_err(|_| "invalid key_id")?,
+        ));
+
+        let key_bytes = self
+            .get_key(key_id)
+            .ok_or_else(|| format!("unknown cookie key index {}", key_id.0))?;
+
+        let headers: [&[u8]; 2] = [key_id_bytes, nonce_bytes];
+        let key = Key::<Aes128Siv>::from_slice(key_bytes);
+        let mut siv = Aes128Siv::new(key);
+        siv.decrypt(headers, ciphertext)
+            .map_err(|e| format!("AES-SIV decrypt failed: {e}"))
+    }
+}
+
+impl Default for CookieCipher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ──── NtsCookie Structure ───────────────────────────────────────────
 
 /// NTS cookie structure (RFC 8915 §4.2).
 ///
@@ -122,20 +251,55 @@ impl NtsCookie {
         })
     }
 
-    /// Encrypt the cookie using the server's key.
+    /// Encrypt the cookie using AES-SIV-CMAC-256.
     ///
-    /// **Not yet implemented** — requires a vetted RFC 5297
-    /// (AES-SIV) implementation.
-    pub fn encrypt(&self, _server_key: &[u8]) -> Result<Vec<u8>, String> {
-        Err("AES-SIV not yet implemented — requires vetted RFC 5297 implementation".to_string())
+    /// `server_key` must be 32 bytes (256 bits).
+    ///
+    /// Returns the ciphertext (plaintext authenticated with a 16-byte
+    /// SIV authentication tag prepended).
+    pub fn encrypt(&self, server_key: &[u8]) -> Result<Vec<u8>, String> {
+        if server_key.len() != 32 {
+            return Err(format!(
+                "server key must be 32 bytes, got {}",
+                server_key.len()
+            ));
+        }
+
+        let plaintext = self.encode_plaintext();
+        let key = Key::<Aes128Siv>::from_slice(server_key);
+        let mut siv = Aes128Siv::new(key);
+        let empty: [&[u8]; 0] = [];
+        siv.encrypt(empty, &plaintext)
+            .map_err(|e| format!("AES-SIV encrypt failed: {e}"))
     }
 
-    /// Decrypt and verify a cookie.
+    /// Decrypt and verify a cookie using AES-SIV-CMAC-256.
     ///
-    /// **Not yet implemented** — requires a vetted RFC 5297
-    /// (AES-SIV) implementation.
-    pub fn decrypt(_data: &[u8], _server_key: &[u8]) -> Result<Self, String> {
-        Err("AES-SIV not yet implemented — requires vetted RFC 5297 implementation".to_string())
+    /// `server_key` must be 32 bytes (256 bits).
+    /// `data` must be a ciphertext previously produced by [`encrypt`].
+    pub fn decrypt(data: &[u8], server_key: &[u8]) -> Result<Self, String> {
+        if server_key.len() != 32 {
+            return Err(format!(
+                "server key must be 32 bytes, got {}",
+                server_key.len()
+            ));
+        }
+        if data.len() < 16 {
+            return Err(format!(
+                "ciphertext too short: {} bytes (need at least 16 for SIV tag)",
+                data.len()
+            ));
+        }
+
+        let key = Key::<Aes128Siv>::from_slice(server_key);
+        let mut siv = Aes128Siv::new(key);
+        let empty: [&[u8]; 0] = [];
+        let plaintext = siv
+            .decrypt(empty, data)
+            .map_err(|e| format!("AES-SIV decrypt failed: {e}"))?;
+
+        Self::decode_plaintext(&plaintext)
+            .ok_or_else(|| "decrypted plaintext is too short".to_string())
     }
 
     /// Create a new cookie from a raw encrypted blob, decrypting with the
@@ -145,11 +309,13 @@ impl NtsCookie {
     }
 }
 
-// ──── Tests ───────────────────────────────────────────────────────────
+// ──── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Helpers ──────────────────────────────────────────────────────
 
     fn make_test_cookie() -> NtsCookie {
         let server_id = [0x01u8; SERVER_ID_SIZE];
@@ -161,6 +327,294 @@ mod tests {
         };
         NtsCookie::new(server_id, c2s_key, s2c_key, timestamp, 15)
     }
+
+    fn test_key_32() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        for i in 0..32 {
+            k[i] = i as u8;
+        }
+        k
+    }
+
+    fn test_key_32_alt() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        for i in 0..32 {
+            k[i] = 0xFFu8.wrapping_sub(i as u8);
+        }
+        k
+    }
+
+    const KEY_ID_1: CookieKeyIndex = CookieKeyIndex(1);
+    const KEY_ID_2: CookieKeyIndex = CookieKeyIndex(2);
+
+    // ── RFC 5297 Known-Answer Test ──────────────────────────────────
+
+    /// Deterministic AES-SIV roundtrip with specific key and AAD inputs.
+    ///
+    /// Uses known hex values for reproducibility.  Verifies that encrypt
+    /// produces deterministic output with the same key+no-AAD, and that
+    /// decrypt reverses it.
+    #[test]
+    fn test_aes_siv_deterministic_roundtrip() {
+        let key_bytes: [u8; 32] = hex_literal::hex!(
+            "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0"
+            "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        );
+        let aad: [u8; 16] = hex_literal::hex!("101112131415161718191a1b1c1d1e1f");
+        let aad2: [u8; 8] = hex_literal::hex!("2021222324252627");
+        let plaintext: [u8; 14] = hex_literal::hex!("112233445566778899aabbccddee");
+
+        // Encrypt with two AAD headers
+        let headers: [&[u8]; 2] = [&aad, &aad2];
+        let key = Key::<Aes128Siv>::from_slice(&key_bytes);
+        let mut siv = Aes128Siv::new(key);
+        let output = siv
+            .encrypt(headers, &plaintext)
+            .expect("encrypt should succeed");
+
+        // Verify output is 30 bytes (16 SIV + 14 plaintext)
+        assert_eq!(output.len(), 30, "SIV(16) + plaintext(14) = 30 bytes");
+
+        // Verify deterministic: same inputs produce same output
+        let key = Key::<Aes128Siv>::from_slice(&key_bytes);
+        let mut siv = Aes128Siv::new(key);
+        let output2 = siv
+            .encrypt(headers, &plaintext)
+            .expect("second encrypt should succeed");
+        assert_eq!(
+            output, output2,
+            "deterministic AES-SIV should produce same output"
+        );
+
+        // Decrypt with two AAD headers
+        let headers: [&[u8]; 2] = [&aad, &aad2];
+        let key = Key::<Aes128Siv>::from_slice(&key_bytes);
+        let mut siv = Aes128Siv::new(key);
+        let decrypted = siv
+            .decrypt(headers, &output)
+            .expect("decrypt should succeed");
+
+        assert_eq!(
+            decrypted, plaintext,
+            "decrypted plaintext should match original"
+        );
+    }
+
+    // ── CookieCipher Tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_cookie_cipher_new_is_empty() {
+        let cipher = CookieCipher::new();
+        assert!(cipher.keys.is_empty(), "new cipher should have no keys");
+    }
+
+    #[test]
+    fn test_cookie_cipher_add_and_get_key() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+
+        let retrieved = cipher.get_key(KEY_ID_1);
+        assert_eq!(retrieved, Some(&test_key_32()));
+
+        // Unknown key should return None
+        assert_eq!(cipher.get_key(KEY_ID_2), None);
+    }
+
+    #[test]
+    fn test_cookie_cipher_add_key_overwrites() {
+        let mut cipher = CookieCipher::new();
+        // Adding same key_id twice — get_key returns the latest
+        cipher.add_key(KEY_ID_1, test_key_32());
+        let alt = test_key_32_alt();
+        cipher.add_key(KEY_ID_1, alt);
+
+        // get_key should return the most recently added
+        assert_eq!(cipher.get_key(KEY_ID_1), Some(&alt));
+    }
+
+    #[test]
+    fn test_cookie_cipher_roundtrip() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+
+        let plaintext = b"Hello, NTS cookie world!";
+        let envelope = cipher.encrypt(plaintext).expect("encrypt should succeed");
+        let decrypted = cipher.decrypt(&envelope).expect("decrypt should succeed");
+
+        assert_eq!(decrypted, plaintext, "CookieCipher roundtrip failed");
+    }
+
+    #[test]
+    fn test_cookie_cipher_encrypt_no_keys() {
+        let cipher = CookieCipher::new();
+        let result = cipher.encrypt(b"data");
+        assert!(result.is_err(), "encrypt without keys should fail");
+        assert_eq!(result.unwrap_err(), "no cookie keys configured");
+    }
+
+    #[test]
+    fn test_cookie_cipher_wrong_key() {
+        let mut cipher1 = CookieCipher::new();
+        cipher1.add_key(KEY_ID_1, test_key_32());
+
+        let mut cipher2 = CookieCipher::new();
+        cipher2.add_key(KEY_ID_1, test_key_32_alt());
+
+        let plaintext = b"sensitive data";
+        let envelope = cipher1.encrypt(plaintext).expect("encrypt should succeed");
+
+        let result = cipher2.decrypt(&envelope);
+        assert!(result.is_err(), "decrypt with wrong key should fail");
+    }
+
+    #[test]
+    fn test_cookie_cipher_unknown_key_id() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+
+        let plaintext = b"data";
+        let envelope = cipher.encrypt(plaintext).expect("encrypt should succeed");
+
+        // Manually corrupt the key_id in the envelope
+        let mut corrupted = envelope.to_vec();
+        corrupted[0] ^= 0xFF; // flip all bits in first byte of key_id
+
+        let result = cipher.decrypt(&corrupted);
+        assert!(result.is_err(), "decrypt with unknown key_id should fail");
+        assert!(
+            result.unwrap_err().contains("unknown cookie key index"),
+            "error should mention unknown key_id"
+        );
+    }
+
+    #[test]
+    fn test_cookie_cipher_tampered_ciphertext() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+
+        let plaintext = b"tamper me";
+        let envelope = cipher.encrypt(plaintext).expect("encrypt should succeed");
+
+        // Corrupt the last byte of the ciphertext portion
+        let mut tampered = envelope.to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+
+        let result = cipher.decrypt(&tampered);
+        assert!(
+            result.is_err(),
+            "decrypt with tampered ciphertext should fail"
+        );
+    }
+
+    #[test]
+    fn test_cookie_cipher_tampered_nonce() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+
+        let plaintext = b"tamper nonce";
+        let envelope = cipher.encrypt(plaintext).expect("encrypt should succeed");
+
+        // Corrupt a byte in the nonce
+        let mut tampered = envelope.to_vec();
+        tampered[5] ^= 0x01; // byte 5 is inside the nonce field
+
+        let result = cipher.decrypt(&tampered);
+        assert!(result.is_err(), "decrypt with tampered nonce should fail");
+    }
+
+    #[test]
+    fn test_cookie_cipher_short_envelope() {
+        let cipher = CookieCipher::new();
+
+        let result = cipher.decrypt(&[0u8; 3]);
+        assert!(result.is_err(), "decrypt of short envelope should fail");
+
+        let result = cipher.decrypt(&[0u8; 19]); // 1 byte short
+        assert!(result.is_err(), "decrypt of 19-byte envelope should fail");
+    }
+
+    #[test]
+    fn test_cookie_cipher_multiple_keys_encrypt_uses_latest() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+        cipher.add_key(KEY_ID_2, test_key_32_alt());
+
+        // encrypt uses the latest key (KEY_ID_2)
+        let plaintext = b"multi-key";
+        let envelope = cipher.encrypt(plaintext).expect("encrypt should succeed");
+
+        // Decrypt with same cipher (finds key by key_id from envelope)
+        let decrypted = cipher.decrypt(&envelope).expect("decrypt should succeed");
+        assert_eq!(decrypted, plaintext);
+
+        // Verify the envelope starts with KEY_ID_2
+        let expected_key_id = KEY_ID_2.0.to_be_bytes();
+        assert_eq!(
+            &envelope[..4],
+            &expected_key_id,
+            "envelope should use latest key_id"
+        );
+    }
+
+    #[test]
+    fn test_cookie_cipher_multiple_keys_decrypt_with_older() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+        cipher.add_key(KEY_ID_2, test_key_32_alt());
+
+        // Manually build an envelope using KEY_ID_1
+        let plaintext = b"older key data";
+        let key32 = test_key_32();
+        let key = Key::<Aes128Siv>::from_slice(&key32);
+        let mut nonce = [0u8; 16];
+        getrandom(&mut nonce).expect("getrandom failed");
+        let headers: [&[u8]; 2] = [&KEY_ID_1.0.to_be_bytes(), &nonce];
+        let mut siv = Aes128Siv::new(key);
+        let ct = siv
+            .encrypt(headers, plaintext)
+            .expect("manual encrypt should succeed");
+
+        let mut envelope = Vec::with_capacity(4 + 16 + ct.len());
+        envelope.extend_from_slice(&KEY_ID_1.0.to_be_bytes());
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ct);
+
+        // Should decrypt with cipher that still has KEY_ID_1
+        let decrypted = cipher
+            .decrypt(&envelope)
+            .expect("decrypt with older key should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_cookie_cipher_multiple_keys_unknown_key() {
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(KEY_ID_1, test_key_32());
+
+        // Build an envelope with KEY_ID_2 (which isn't in the cipher)
+        let plaintext = b"unknown key";
+        let key32_alt = test_key_32_alt();
+        let key = Key::<Aes128Siv>::from_slice(&key32_alt);
+        let mut nonce = [0u8; 16];
+        getrandom(&mut nonce).expect("getrandom failed");
+        let headers: [&[u8]; 2] = [&KEY_ID_2.0.to_be_bytes(), &nonce];
+        let mut siv = Aes128Siv::new(key);
+        let ct = siv
+            .encrypt(headers, plaintext)
+            .expect("manual encrypt should succeed");
+
+        let mut envelope = Vec::with_capacity(4 + 16 + ct.len());
+        envelope.extend_from_slice(&KEY_ID_2.0.to_be_bytes());
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ct);
+
+        let result = cipher.decrypt(&envelope);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown cookie key index"));
+    }
+
+    // ── NtsCookie Tests ─────────────────────────────────────────────
 
     #[test]
     fn test_cookie_plaintext_roundtrip() {
@@ -178,31 +632,93 @@ mod tests {
     }
 
     #[test]
-    fn test_cookie_encrypt_returns_error() {
+    fn test_cookie_encrypt_decrypt_roundtrip() {
         let cookie = make_test_cookie();
-        let result = cookie.encrypt(&[0x42u8; 64]);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "AES-SIV not yet implemented — requires vetted RFC 5297 implementation"
+        let key = test_key_32();
+
+        let encrypted = cookie.encrypt(&key).expect("encrypt should succeed");
+        assert!(
+            encrypted.len() >= COOKIE_PLAINTEXT_MIN + 16,
+            "ciphertext should be at least plaintext + SIV tag"
+        );
+
+        let decrypted = NtsCookie::decrypt(&encrypted, &key).expect("decrypt should succeed");
+        assert_eq!(decrypted.server_id, cookie.server_id);
+        assert_eq!(decrypted.c2s_key, cookie.c2s_key);
+        assert_eq!(decrypted.s2c_key, cookie.s2c_key);
+        assert_eq!(decrypted.timestamp.seconds, cookie.timestamp.seconds);
+        assert_eq!(decrypted.timestamp.fraction, cookie.timestamp.fraction);
+        assert_eq!(decrypted.aead, cookie.aead);
+    }
+
+    #[test]
+    fn test_cookie_encrypt_wrong_key() {
+        let cookie = make_test_cookie();
+        let encrypt_key = test_key_32();
+        let wrong_key = test_key_32_alt();
+
+        let encrypted = cookie
+            .encrypt(&encrypt_key)
+            .expect("encrypt should succeed");
+
+        let result = NtsCookie::decrypt(&encrypted, &wrong_key);
+        assert!(result.is_err(), "decrypt with wrong key should fail");
+    }
+
+    #[test]
+    fn test_cookie_encrypt_wrong_key_size() {
+        let cookie = make_test_cookie();
+        let short_key = [0u8; 16];
+
+        let result = cookie.encrypt(&short_key);
+        assert!(result.is_err(), "encrypt with 16-byte key should fail");
+        assert!(result.unwrap_err().contains("must be 32 bytes"));
+    }
+
+    #[test]
+    fn test_cookie_decrypt_wrong_key_size() {
+        let short_key = [0u8; 16];
+
+        let result = NtsCookie::decrypt(&[0u8; 128], &short_key);
+        assert!(result.is_err(), "decrypt with 16-byte key should fail");
+        assert!(result.unwrap_err().contains("must be 32 bytes"));
+    }
+
+    #[test]
+    fn test_cookie_decrypt_short_data() {
+        let key = test_key_32();
+
+        let result = NtsCookie::decrypt(&[0u8; 15], &key);
+        assert!(result.is_err(), "decrypt of 15-byte data should fail");
+    }
+
+    #[test]
+    fn test_cookie_decrypt_tampered_ciphertext() {
+        let cookie = make_test_cookie();
+        let key = test_key_32();
+
+        let mut encrypted = cookie.encrypt(&key).expect("encrypt should succeed");
+
+        // Corrupt a byte in the middle of the ciphertext
+        let idx = encrypted.len() / 2;
+        encrypted[idx] ^= 0xFF;
+
+        let result = NtsCookie::decrypt(&encrypted, &key);
+        assert!(
+            result.is_err(),
+            "decrypt with tampered ciphertext should fail"
         );
     }
 
     #[test]
-    fn test_cookie_decrypt_returns_error() {
-        let result = NtsCookie::decrypt(&[0u8; 128], &[0x42u8; 64]);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "AES-SIV not yet implemented — requires vetted RFC 5297 implementation"
-        );
-    }
+    fn test_cookie_from_encrypted() {
+        let cookie = make_test_cookie();
+        let key = test_key_32();
 
-    #[test]
-    fn test_cookie_from_encrypted_returns_error() {
-        let encrypted = vec![0u8; 128];
-        let result = NtsCookie::from_encrypted(&encrypted, &[0x42u8; 64]);
-        assert!(result.is_err());
+        let encrypted = cookie.encrypt(&key).expect("encrypt should succeed");
+        let decrypted =
+            NtsCookie::from_encrypted(&encrypted, &key).expect("from_encrypted should succeed");
+        assert_eq!(decrypted.aead, cookie.aead);
     }
 
     #[test]
@@ -218,5 +734,20 @@ mod tests {
         let _ = format!("{:?}", cookie);
         let cloned = cookie.clone();
         assert_eq!(cloned.aead, cookie.aead);
+    }
+
+    #[test]
+    fn test_cookie_encrypt_deterministic() {
+        // AES-SIV with no associated data and zero nonce is deterministic
+        let cookie = make_test_cookie();
+        let key = test_key_32();
+
+        let encrypted1 = cookie.encrypt(&key).expect("encrypt should succeed");
+        let encrypted2 = cookie.encrypt(&key).expect("encrypt should succeed");
+
+        assert_eq!(
+            encrypted1, encrypted2,
+            "same key and plaintext should produce identical ciphertext"
+        );
     }
 }

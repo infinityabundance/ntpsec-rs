@@ -17,6 +17,7 @@ use std::time::Duration;
 pub const GPSD_DEFAULT_PORT: u16 = 2947;
 
 /// GPSD refclock driver instance.
+#[derive(Debug)]
 pub struct GpsdRefclock {
     unit: u8,
     host: String,

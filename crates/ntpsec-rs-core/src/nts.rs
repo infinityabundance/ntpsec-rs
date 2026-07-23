@@ -46,44 +46,6 @@ pub const NTS_MAX_COOKIES: usize = 8;
 /// Maximum cookie size in bytes.
 pub const NTS_MAX_COOKIE_SIZE: usize = 256;
 
-/// NTS record types (RFC 8915 §4.1).
-pub mod nts_record {
-    /// End of message
-    pub const END_OF_MESSAGE: u16 = 0;
-    /// Negotiate NTPv4 server
-    pub const NTPV4_SERVER_NEGOTIATION: u16 = 1;
-    /// Negotiate NTPv4 port
-    pub const NTPV4_PORT_NEGOTIATION: u16 = 2;
-    /// NTS cookie
-    pub const COOKIE: u16 = 3;
-    /// NTS negotiation data
-    pub const NTS_NEGOTIATION: u16 = 4;
-    /// AEAD algorithm negotiation
-    pub const NTS_AEAD: u16 = 5;
-    /// Cookie placeholder (for empty cookie requests)
-    pub const NTS_COOKIE_PLACEHOLDER: u16 = 6;
-    /// Unassigned
-    pub const UNASSIGNED: u16 = 7;
-    /// Protocol warning
-    pub const WARNING: u16 = 0x7f00;
-    /// Protocol error
-    pub const ERROR: u16 = 0x7f01;
-    /// Protocol alarm
-    pub const ALARM: u16 = 0x7f02;
-}
-
-/// NTS extension field types used in NTP packets (RFC 8915 §5).
-pub mod nts_ef {
-    /// NTS Cookie extension field
-    pub const NTS_COOKIE: u16 = 0x0104;
-    /// NTS Cookie Placeholder
-    pub const NTS_COOKIE_PLACEHOLDER: u16 = 0x0105;
-    /// NTS Authenticator (AEAD encryption)
-    pub const NTS_AUTHENTICATOR: u16 = 0x0102;
-    /// NTS Authenticator Error
-    pub const NTS_AUTHENTICATOR_ERROR: u16 = 0x0103;
-}
-
 /// AEAD algorithm IDs used in NTS (RFC 8915 §4.1.3).
 pub mod aead_algorithms {
     /// AEAD_AES_SIV_CMAC_256 (REQUIRED by RFC 8915).
@@ -257,7 +219,7 @@ impl NtsKeRecord {
             }
             match Self::decode(remain) {
                 Some((rec, rest)) => {
-                    if rec.record_type == nts_record::END_OF_MESSAGE {
+                    if rec.record_type == NTS_KE_RECORD_END_OF_MESSAGE {
                         break;
                     }
                     records.push(rec);
@@ -332,17 +294,14 @@ impl NtsKeClient {
             .to_u16()
             .to_be_bytes()
             .to_vec();
-        request_records.push(NtsKeRecord::new(nts_record::NTS_AEAD, aead_body));
+        request_records.push(NtsKeRecord::new(NTS_KE_RECORD_AEAD_ALGORITHM, aead_body));
 
         // Optionally request NTPv4 server negotiation (RFC 8915 §4.1.2).
         // In the simplest case this is an empty body.
-        request_records.push(NtsKeRecord::new(
-            nts_record::NTPV4_SERVER_NEGOTIATION,
-            vec![],
-        ));
+        request_records.push(NtsKeRecord::new(NTS_KE_RECORD_NTPV4_SERVER, vec![]));
 
         // End-of-message marks the end of the client's request.
-        request_records.push(NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]));
+        request_records.push(NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]));
 
         // ── Serialize the request ──────────────────────────────────────
         let _request_wire: Vec<u8> = request_records.iter().flat_map(|r| r.encode()).collect();
@@ -398,7 +357,7 @@ impl NtsKeClient {
 
         for rec in &resp_records {
             match rec.record_type {
-                t if t == nts_record::NTS_AEAD => {
+                t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
                     // The AEAD algorithm offer body is the u16 algorithm ID
                     // in network byte order.
                     if rec.body.len() >= 2 {
@@ -406,11 +365,11 @@ impl NtsKeClient {
                         aead_algorithm = AeadAlgorithm::from_u16(alg_id);
                     }
                 }
-                t if t == nts_record::COOKIE => {
-                    // Each COOKIE record body *is* the encrypted cookie.
+                t if t == NTS_KE_RECORD_NEW_COOKIE => {
+                    // Each NEW_COOKIE record body *is* the encrypted cookie.
                     cookies.push(rec.body.clone());
                 }
-                t if t == nts_record::END_OF_MESSAGE => {
+                t if t == NTS_KE_RECORD_END_OF_MESSAGE => {
                     // Stop processing; server terminates with EOM.
                     break;
                 }
@@ -703,36 +662,36 @@ mod tests {
 
     #[test]
     fn test_nts_ke_record_new() {
-        let rec = NtsKeRecord::new(nts_record::COOKIE, vec![1, 2, 3, 4]);
-        assert_eq!(rec.record_type, nts_record::COOKIE);
+        let rec = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![1, 2, 3, 4]);
+        assert_eq!(rec.record_type, NTS_KE_RECORD_NEW_COOKIE);
         assert_eq!(rec.body, vec![1, 2, 3, 4]);
     }
 
     #[test]
     fn test_record_encode_decode_roundtrip() {
-        let rec = NtsKeRecord::new(nts_record::COOKIE, vec![1, 2, 3, 4]);
+        let rec = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![1, 2, 3, 4]);
         let encoded = rec.encode();
         let (decoded, remaining) = NtsKeRecord::decode(&encoded).unwrap();
-        assert_eq!(decoded.record_type, nts_record::COOKIE);
+        assert_eq!(decoded.record_type, NTS_KE_RECORD_NEW_COOKIE);
         assert_eq!(decoded.body, vec![1, 2, 3, 4]);
         assert!(remaining.is_empty());
     }
 
     #[test]
     fn test_nts_ke_record_roundtrip() {
-        let rec = NtsKeRecord::new(nts_record::COOKIE, vec![1, 2, 3, 4]);
+        let rec = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![1, 2, 3, 4]);
         let encoded = rec.encode();
         let (decoded, remaining) = NtsKeRecord::decode(&encoded).unwrap();
-        assert_eq!(decoded.record_type, nts_record::COOKIE);
+        assert_eq!(decoded.record_type, NTS_KE_RECORD_NEW_COOKIE);
         assert_eq!(decoded.body, vec![1, 2, 3, 4]);
         assert!(remaining.is_empty());
     }
 
     #[test]
     fn test_nts_ke_record_decode_all() {
-        let rec1 = NtsKeRecord::new(nts_record::COOKIE, vec![1, 2, 3]);
-        let rec2 = NtsKeRecord::new(nts_record::NTPV4_SERVER_NEGOTIATION, vec![1]);
-        let eom = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]);
+        let rec1 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![1, 2, 3]);
+        let rec2 = NtsKeRecord::new(NTS_KE_RECORD_NTPV4_SERVER, vec![1]);
+        let eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let mut data = rec1.encode();
         data.extend_from_slice(&rec2.encode());
         data.extend_from_slice(&eom.encode());
@@ -743,20 +702,20 @@ mod tests {
     #[test]
     fn test_decode_all() {
         // Extended decode_all test with multiple record types.
-        let rec1 = NtsKeRecord::new(nts_record::NTS_AEAD, vec![0, 1]);
-        let rec2 = NtsKeRecord::new(nts_record::COOKIE, vec![10, 20, 30]);
-        let eom = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]);
+        let rec1 = NtsKeRecord::new(NTS_KE_RECORD_AEAD_ALGORITHM, vec![0, 1]);
+        let rec2 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![10, 20, 30]);
+        let eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let mut data = rec1.encode();
         data.extend_from_slice(&rec2.encode());
         data.extend_from_slice(&eom.encode());
         // Add trailing data that should be ignored after EOM
-        let trailing = NtsKeRecord::new(nts_record::COOKIE, vec![99]);
+        let trailing = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![99]);
         data.extend_from_slice(&trailing.encode());
 
         let records = NtsKeRecord::decode_all(&data);
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].record_type, nts_record::NTS_AEAD);
-        assert_eq!(records[1].record_type, nts_record::COOKIE);
+        assert_eq!(records[0].record_type, NTS_KE_RECORD_AEAD_ALGORITHM);
+        assert_eq!(records[1].record_type, NTS_KE_RECORD_NEW_COOKIE);
     }
 
     #[test]
@@ -834,12 +793,12 @@ mod tests {
 
         // Build a mock server response with one AEAD offer and two cookies.
         let aead_rec = NtsKeRecord::new(
-            nts_record::NTS_AEAD,
+            NTS_KE_RECORD_AEAD_ALGORITHM,
             (15u16).to_be_bytes().to_vec(), // AEAD_AES_SIV_CMAC_256
         );
-        let cookie1 = NtsKeRecord::new(nts_record::COOKIE, vec![0xAA; 32]);
-        let cookie2 = NtsKeRecord::new(nts_record::COOKIE, vec![0xBB; 32]);
-        let eom = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]);
+        let cookie1 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![0xAA; 32]);
+        let cookie2 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![0xBB; 32]);
+        let eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
 
         let mut response = Vec::new();
         response.extend_from_slice(&aead_rec.encode());
@@ -848,8 +807,9 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         // Build a minimal request (just AEAD and EOM).
-        let req_aead = NtsKeRecord::new(nts_record::NTS_AEAD, (15u16).to_be_bytes().to_vec());
-        let req_eom = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]);
+        let req_aead =
+            NtsKeRecord::new(NTS_KE_RECORD_AEAD_ALGORITHM, (15u16).to_be_bytes().to_vec());
+        let req_eom = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let mut request = Vec::new();
         request.extend_from_slice(&req_aead.encode());
         request.extend_from_slice(&req_eom.encode());
@@ -866,7 +826,7 @@ mod tests {
     #[test]
     fn test_nts_ke_client_handshake_with_data_empty_response() {
         let mut client = NtsKeClient::new("ntp.example.com", NTS_KE_PORT);
-        let request = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]).encode();
+        let request = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
         let result = client.handshake_with_data(&request, &[]);
         assert!(result.is_err());
         assert!(client.state().error_message().is_some());
@@ -912,11 +872,11 @@ mod tests {
     #[test]
     fn test_record_encode_decode_minimal() {
         // Empty body
-        let rec = NtsKeRecord::new(nts_record::END_OF_MESSAGE, vec![]);
+        let rec = NtsKeRecord::new(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
         let encoded = rec.encode();
         assert_eq!(encoded.len(), 4);
         let (decoded, remaining) = NtsKeRecord::decode(&encoded).unwrap();
-        assert_eq!(decoded.record_type, nts_record::END_OF_MESSAGE);
+        assert_eq!(decoded.record_type, NTS_KE_RECORD_END_OF_MESSAGE);
         assert!(decoded.body.is_empty());
         assert!(remaining.is_empty());
     }

@@ -462,6 +462,7 @@ pub fn nmea_sample_to_packet(sample: &NmeaSample, precision: i8) -> NtpPacket {
 /// }
 /// clock.close();
 /// ```
+#[derive(Debug)]
 pub struct NmeaRefclock {
     /// Refclock unit number.
     unit: u8,

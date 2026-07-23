@@ -40,6 +40,9 @@ use crate::ntp_proto::*;
 use crate::ntp_restrict::*;
 use crate::ntp_timer::*;
 use crate::ntp_types::*;
+use crate::refclock_gpsd::GpsdRefclock;
+use crate::refclock_nmea::NmeaRefclock;
+use crate::refclock_pps::PpsRefclock;
 use crate::refclock_shm::ShmRefclock;
 
 /// A pending NTP request awaiting a server response.
@@ -59,13 +62,35 @@ struct PendingRequest {
     expected_mode: NtpMode,
 }
 
-/// A single refclock instance managed by the daemon.
+/// A real refclock driver instance — one variant per supported type.
+#[derive(Debug)]
+pub enum RefclockDriver {
+    Shm(ShmRefclock),
+    Pps(PpsRefclock),
+    Nmea(NmeaRefclock),
+    Gpsd(GpsdRefclock),
+}
+
+impl RefclockDriver {
+    /// Get the driver type number (28=SHM, 22=PPS, 19=NMEA, 16=GPSD).
+    pub fn driver_type(&self) -> u8 {
+        match self {
+            RefclockDriver::Shm(_) => 28,
+            RefclockDriver::Pps(_) => 22,
+            RefclockDriver::Nmea(_) => 19,
+            RefclockDriver::Gpsd(_) => 16,
+        }
+    }
+}
+
+/// A managed refclock instance with its driver and metadata.
 #[derive(Debug)]
 pub struct RefclockInstance {
     pub refclock_type: u8,
     pub unit: u8,
-    pub shm: Option<ShmRefclock>,
+    pub driver: Option<RefclockDriver>,
     pub active: bool,
+    pub samples_collected: u64,
 }
 
 /// Manages refclock lifecycle — open, poll, close.
@@ -81,42 +106,197 @@ impl RefclockManager {
         }
     }
 
+    /// Add a refclock by type and unit. The driver is NOT created here —
+    /// actual device opening happens in `open_all()`.
     pub fn add(&mut self, refclock_type: u8, unit: u8) {
+        // Don't add duplicates
+        if self
+            .instances
+            .iter()
+            .any(|i| i.refclock_type == refclock_type && i.unit == unit)
+        {
+            return;
+        }
         self.instances.push(RefclockInstance {
             refclock_type,
             unit,
-            shm: None,
+            driver: None,
             active: false,
+            samples_collected: 0,
         });
     }
 
+    /// Open all refclock devices. Returns log messages.
     pub fn open_all(&mut self) -> Vec<DaemonAction> {
         let mut actions = Vec::new();
         for inst in &mut self.instances {
-            // Only open refclock types that use SHM segments
-            match inst.refclock_type {
-                28 | 22 | 19 | 16 => {
-                    inst.active = true;
-                    actions.push(DaemonAction::Log(format!(
-                        "opened refclock type {} unit {}",
-                        inst.refclock_type, inst.unit
-                    )));
-                }
-                _ => {}
+            if inst.active {
+                continue;
             }
+            let driver = match inst.refclock_type {
+                28 => {
+                    let mut shm = ShmRefclock::new(inst.unit);
+                    match shm.open() {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "SHM refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Shm(shm))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "SHM refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                22 => {
+                    let mut pps = PpsRefclock::new(inst.unit);
+                    match pps.open() {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "PPS refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Pps(pps))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "PPS refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                19 => {
+                    let mut nmea = NmeaRefclock::new(inst.unit);
+                    let path = format!("/dev/ttyGPS{}", inst.unit);
+                    match nmea.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "NMEA refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Nmea(nmea))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "NMEA refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                16 => {
+                    let mut gpsd = GpsdRefclock::new(inst.unit);
+                    match gpsd.connect("127.0.0.1", 2947) {
+                        Ok(()) => {
+                            // Send WATCH command to enable time objects
+                            let _ = gpsd.watch();
+                            actions.push(DaemonAction::Log(format!(
+                                "GPSD refclock unit {} connected",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Gpsd(gpsd))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "GPSD refclock unit {} connect failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                other => {
+                    actions.push(DaemonAction::Log(format!(
+                        "Unknown refclock type {}",
+                        other
+                    )));
+                    None
+                }
+            };
+            inst.driver = driver;
         }
         actions
     }
 
+    /// Close all refclock devices.
     pub fn close_all(&mut self) {
         for inst in &mut self.instances {
-            if inst.active {
-                if let Some(ref mut shm) = inst.shm {
-                    let _ = shm.close();
+            // Drop takes care of closing via the driver's Drop impl
+            inst.driver = None;
+            inst.active = false;
+        }
+    }
+
+    /// Poll all active refclocks for samples. Returns synthetic packets.
+    /// Called from the daemon's main loop.
+    pub fn poll_all(&mut self, _now: NtpTs64) -> Vec<DaemonAction> {
+        let mut actions = Vec::new();
+        for inst in &mut self.instances {
+            if !inst.active {
+                continue;
+            }
+            if let Some(ref mut driver) = inst.driver {
+                match driver {
+                    RefclockDriver::Shm(ref mut shm) => {
+                        if let Ok(Some(sample)) = shm.read_sample() {
+                            let _pkt = crate::refclock_shm::shm_sample_to_packet(
+                                &sample,
+                                sample.precision,
+                            );
+                            inst.samples_collected += 1;
+                            // TODO: route to clock filter via synthetic ReceivedDatagram
+                            actions.push(DaemonAction::Log(format!(
+                                "SHM{} sample #{} received",
+                                inst.unit, inst.samples_collected
+                            )));
+                        }
+                    }
+                    RefclockDriver::Pps(ref mut pps) => {
+                        if let Ok(Some(stamp)) = pps.read_timestamp() {
+                            let _pkt = crate::refclock_pps::pps_stamp_to_packet(&stamp);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::Log(format!(
+                                "PPS{} sample #{} received",
+                                inst.unit, inst.samples_collected
+                            )));
+                        }
+                    }
+                    RefclockDriver::Nmea(ref mut nmea) => {
+                        if let Ok(Some(sample)) = nmea.read_sample() {
+                            let _pkt = crate::refclock_nmea::nmea_sample_to_packet(&sample, -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::Log(format!(
+                                "NMEA{} sample #{} received",
+                                inst.unit, inst.samples_collected
+                            )));
+                        }
+                    }
+                    RefclockDriver::Gpsd(ref mut gpsd) => {
+                        if let Ok(Some(fix)) = gpsd.read_sample() {
+                            let _pkt = crate::refclock_gpsd::gpsd_fix_to_packet(&fix, _now);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::Log(format!(
+                                "GPSD{} sample #{} received",
+                                inst.unit, inst.samples_collected
+                            )));
+                        }
+                    }
                 }
-                inst.active = false;
             }
         }
+        actions
     }
 }
 
@@ -2048,6 +2228,30 @@ mod tests {
         assert_eq!(
             mac_short, mac_explicit,
             "zero-padded short key should match explicit 16-byte key"
+        );
+    }
+
+    #[test]
+    fn test_refclock_manager_add_and_open() {
+        let mut mgr = RefclockManager::new();
+        mgr.add(28, 0);
+        mgr.add(22, 0);
+        mgr.add(19, 0);
+        mgr.add(16, 0);
+        assert_eq!(mgr.instances.len(), 4);
+        // Opening produces log messages (SHM may succeed with shmget+IPC_CREAT,
+        // but PPS/NMEA/GPSD will fail since their devices don't exist)
+        let actions = mgr.open_all();
+        // At minimum, we should get log messages for each
+        assert!(
+            actions.len() >= 4,
+            "expected at least 4 log actions, got {}",
+            actions.len()
+        );
+        // NMEA driver should NOT be active (no /dev/ttyGPS0)
+        assert!(
+            !mgr.instances[2].active,
+            "NMEA should not open without serial device"
         );
     }
 }

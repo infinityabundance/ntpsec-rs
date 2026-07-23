@@ -87,6 +87,7 @@ struct PpsFetchParams {
 ///
 /// Opens the kernel PPS device (`/dev/ppsN`) and reads precise assert
 /// timestamps.  On non-Linux platforms `open()` returns an error.
+#[derive(Debug)]
 pub struct PpsRefclock {
     /// Refclock unit number (determines the device path, e.g. unit 0 → `/dev/pps0`).
     unit: u8,
