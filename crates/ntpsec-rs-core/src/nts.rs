@@ -392,7 +392,7 @@ impl NtsKeProtocolClient {
         let mut aead_algorithm: Option<AeadAlgorithm> = None;
         let mut cookies: Vec<Vec<u8>> = Vec::new();
         let mut server_offer: Vec<NtsKeRecord> = Vec::new();
-        let mut has_next_proto = false;
+        let mut next_proto_count: usize = 0;
         let mut has_eom = false;
         let mut eom_position = usize::MAX;
 
@@ -426,6 +426,17 @@ impl NtsKeProtocolClient {
             let raw_type = rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT;
             match raw_type {
                 t if t == NTS_KE_RECORD_NEXT_PROTOCOL => {
+                    // RFC 8915 §4.1.1: exactly one Next Protocol record, critical bit set.
+                    next_proto_count += 1;
+                    if rec.record_type & NTS_KE_RECORD_CRITICAL_BIT == 0 {
+                        self.state =
+                            NtsKeState::Error("Next Protocol missing critical bit".to_string());
+                        return Err("Next Protocol record missing critical bit".to_string());
+                    }
+                    if next_proto_count > 1 {
+                        self.state = NtsKeState::Error("duplicate Next Protocol".to_string());
+                        return Err("duplicate Next Protocol record".to_string());
+                    }
                     // Body is a sequence of u16 protocol IDs in network byte order.
                     if rec.body.len() < 2 || rec.body.len() % 2 != 0 {
                         self.state = NtsKeState::Error(format!(
@@ -436,12 +447,6 @@ impl NtsKeProtocolClient {
                             "Next Protocol has invalid body length: {} bytes",
                             rec.body.len()
                         ));
-                    }
-                    for chunk in rec.body.chunks(2) {
-                        let proto_id = u16::from_be_bytes([chunk[0], chunk[1]]);
-                        if proto_id == 0 {
-                            has_next_proto = true;
-                        }
                     }
                 }
                 t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
@@ -488,7 +493,7 @@ impl NtsKeProtocolClient {
             return Err("EOM record is not the final record".to_string());
         }
 
-        if !has_next_proto {
+        if next_proto_count == 0 {
             self.state = NtsKeState::Error("missing Next Protocol".to_string());
             return Err("server did not include mandatory Next Protocol Negotiation".to_string());
         }
@@ -929,8 +934,9 @@ mod tests {
     fn test_nts_ke_client_handshake_with_data() {
         let mut client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
 
-        // Build a mock server response: MUST include Next Protocol with u16 body, critical EOM.
-        let next_proto = NtsKeRecord::new(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        // Build a mock server response: MUST include critical Next Protocol with u16 body, critical EOM.
+        let next_proto =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
         let aead_rec = NtsKeRecord::new(
             NTS_KE_RECORD_AEAD_ALGORITHM,
             (15u16).to_be_bytes().to_vec(), // AEAD_AES_SIV_CMAC_256

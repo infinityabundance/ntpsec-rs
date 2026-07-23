@@ -180,7 +180,7 @@ impl NtsKeClient {
         let mut aead_algorithm: Option<AeadAlgorithm> = None;
         let mut cookies: Vec<Vec<u8>> = Vec::new();
         let mut server_offer: Vec<NtsKeRecord> = Vec::new();
-        let mut has_next_proto = false;
+        let mut next_proto_count: usize = 0;
         let mut has_eom = false;
         let mut eom_position = usize::MAX;
 
@@ -211,19 +211,20 @@ impl NtsKeClient {
             let raw_type = rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT;
             match raw_type {
                 t if t == NTS_KE_RECORD_NEXT_PROTOCOL => {
+                    // RFC 8915 §4.1.1: exactly one Next Protocol record, critical bit set.
+                    next_proto_count += 1;
+                    if rec.record_type & NTS_KE_RECORD_CRITICAL_BIT == 0 {
+                        return Err("Next Protocol record missing critical bit".to_string());
+                    }
+                    if next_proto_count > 1 {
+                        return Err("duplicate Next Protocol record".to_string());
+                    }
                     // Body is a sequence of u16 protocol IDs in network byte order.
-                    // NTPv4 = protocol ID 0.  Parse all protocol IDs.
                     if rec.body.len() < 2 || rec.body.len() % 2 != 0 {
                         return Err(format!(
                             "Next Protocol has invalid body length: {} bytes",
                             rec.body.len()
                         ));
-                    }
-                    for chunk in rec.body.chunks(2) {
-                        let proto_id = u16::from_be_bytes([chunk[0], chunk[1]]);
-                        if proto_id == 0 {
-                            has_next_proto = true;
-                        }
                     }
                 }
                 t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
@@ -263,7 +264,7 @@ impl NtsKeClient {
             return Err("EOM record is not the final record".to_string());
         }
 
-        if !has_next_proto {
+        if next_proto_count == 0 {
             return Err("server did not include mandatory Next Protocol Negotiation".to_string());
         }
         if !has_eom {
@@ -383,8 +384,9 @@ mod tests {
     fn test_nts_ke_negotiation_with_mock_response() {
         let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
 
-        // Build a mock server response: MUST include Next Protocol + AEAD + Cookie + critical EOM.
-        let next_proto = NtsKeRecord::new(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        // Build a mock server response: MUST include critical Next Protocol + AEAD + Cookie + critical EOM.
+        let next_proto =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
         let aead_rec =
             NtsKeRecord::new(NTS_KE_RECORD_AEAD_ALGORITHM, (15u16).to_be_bytes().to_vec());
         let cookie1 = NtsKeRecord::new(NTS_KE_RECORD_NEW_COOKIE, vec![0xAA; 32]);
@@ -473,6 +475,46 @@ mod tests {
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
         let result = proto_client.handshake_with_data(&req, &response);
         assert!(result.is_err());
+    }
+
+    /// Verify that a non-critical Next Protocol record is rejected.
+    #[test]
+    fn test_nts_ke_next_protocol_missing_critical_bit() {
+        let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
+
+        // Next Protocol without critical bit.
+        let next_proto = NtsKeRecord::new(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let mut response = Vec::new();
+        response.extend_from_slice(&next_proto.encode());
+        response.extend_from_slice(&eom.encode());
+
+        let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let result = proto_client.handshake_with_data(&req, &response);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("critical bit"));
+    }
+
+    /// Verify that duplicate Next Protocol records are rejected.
+    #[test]
+    fn test_nts_ke_duplicate_next_protocol_rejected() {
+        let mut proto_client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
+
+        // Two Next Protocol records.
+        let np1 =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        let np2 =
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec());
+        let eom = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]);
+        let mut response = Vec::new();
+        response.extend_from_slice(&np1.encode());
+        response.extend_from_slice(&np2.encode());
+        response.extend_from_slice(&eom.encode());
+
+        let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
+        let result = proto_client.handshake_with_data(&req, &response);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("duplicate"));
     }
 
     /// Verify that the TLS 1.3 builder is used (compile-time structural check).
