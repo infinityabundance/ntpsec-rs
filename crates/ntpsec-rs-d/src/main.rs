@@ -170,6 +170,35 @@ fn main() {
         return;
     }
 
+    // ──── Prepare State Paths Before Drop ─────────────────────────
+    if let Some(ref user) = cli.user {
+        // Look up target UID/GID for chown
+        let target_uid = lookup_uid(user).unwrap_or(0);
+        let target_gid = lookup_gid(user).unwrap_or(0);
+
+        // Ensure stats dir exists and is owned by the target user
+        std::fs::create_dir_all(&stats_dir).ok();
+        unsafe {
+            libc::chown(
+                stats_dir.to_string_lossy().as_bytes().as_ptr() as *const libc::c_char,
+                target_uid,
+                target_gid,
+            );
+        }
+
+        // Ensure drift file parent directory exists and is owned
+        if let Some(parent) = drift_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+            unsafe {
+                libc::chown(
+                    parent.to_string_lossy().as_bytes().as_ptr() as *const libc::c_char,
+                    target_uid,
+                    target_gid,
+                );
+            }
+        }
+    }
+
     // ──── Drop Privileges ──────────────────────────────────────────
     if let Some(ref user) = cli.user {
         match drop_privileges(user) {
@@ -214,9 +243,12 @@ fn main() {
                     if new_config.errors.is_empty() {
                         // Build new engine state atomically before swap
                         let mut new_engine = DaemonEngine::new(new_config);
-                        // Inherit non-config state (loop filter, system)
-                        new_engine.loop_filter = engine.loop_filter.clone();
-                        new_engine.system = engine.system.clone();
+                        // Inherit only portable discipline state — NOT system state
+                        // (peer_count, stratum, reference_id, etc. must be recomputed
+                        // from the new peer set after the next clock_update)
+                        new_engine.loop_filter.frequency = engine.loop_filter.frequency;
+                        new_engine.loop_filter.wander = engine.loop_filter.wander;
+                        new_engine.loop_filter.jitter = engine.loop_filter.jitter;
                         new_engine.precision = engine.precision;
                         // Load key files for the new config — abort swap on failure
                         let new_key_paths = collect_key_paths(&new_engine.config);
@@ -579,6 +611,28 @@ fn collect_key_paths(config: &ConfigTree) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Look up a user's UID by name.
+fn lookup_uid(user: &str) -> Option<u32> {
+    let cuser = std::ffi::CString::new(user).ok()?;
+    let pw = unsafe { libc::getpwnam(cuser.as_ptr()) };
+    if pw.is_null() {
+        None
+    } else {
+        Some(unsafe { (*pw).pw_uid })
+    }
+}
+
+/// Look up a user's primary GID by name.
+fn lookup_gid(user: &str) -> Option<u32> {
+    let cuser = std::ffi::CString::new(user).ok()?;
+    let pw = unsafe { libc::getpwnam(cuser.as_ptr()) };
+    if pw.is_null() {
+        None
+    } else {
+        Some(unsafe { (*pw).pw_gid })
+    }
 }
 
 /// Load all key files referenced in the configuration.

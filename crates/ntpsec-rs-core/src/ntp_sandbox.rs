@@ -270,69 +270,94 @@ mod tests {
     }
 
     #[test]
-    fn test_enable_seccomp() {
+    fn test_seccomp_inside_child() {
+        // All seccomp installations must happen inside a disposable child
+        // process because TSYNC propagates the filter to every test thread,
+        // which would kill the entire test harness on syscall denials.
+        //
+        // Child: install seccomp, verify it works, test forbidden syscall
         #[cfg(target_os = "linux")]
         {
-            let result = enable_sandbox();
-            assert!(result.is_ok(), "seccomp enable failed: {:?}", result.err());
-            assert!(is_sandbox_active(), "NO_NEW_PRIVS must be set");
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork failed");
+
+            if pid == 0 {
+                // ── Child: install seccomp and run tests ──
+                let result = enable_sandbox();
+                if result.is_err() {
+                    eprintln!("seccomp enable failed: {:?}", result);
+                    unsafe { libc::_exit(2) };
+                }
+
+                // Verify sandbox is active
+                if !is_seccomp_active() {
+                    eprintln!("seccomp not in FILTER mode");
+                    unsafe { libc::_exit(3) };
+                }
+
+                // Verify allowed syscall works
+                let allowed_pid = unsafe { libc::getpid() };
+                if allowed_pid <= 0 {
+                    eprintln!("allowed syscall getpid failed");
+                    unsafe { libc::_exit(4) };
+                }
+
+                // Verify forbidden syscall via grandchild
+                let gpid = unsafe { libc::fork() };
+                if gpid == 0 {
+                    // Grandchild: try mount (not in allowlist, syscall 165)
+                    let src = std::ffi::CString::new("").unwrap();
+                    let dst = std::ffi::CString::new("").unwrap();
+                    let fs = std::ffi::CString::new("").unwrap();
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_mount,
+                            src.as_ptr(),
+                            dst.as_ptr(),
+                            fs.as_ptr(),
+                            0u64,
+                            std::ptr::null::<u8>(),
+                        )
+                    };
+                    // If we reach here, seccomp didn't kill us
+                    unsafe { libc::_exit(42) };
+                } else if gpid > 0 {
+                    let mut gstatus: i32 = 0;
+                    unsafe { libc::waitpid(gpid, &mut gstatus, 0) };
+                    if !libc::WIFSIGNALED(gstatus) || libc::WTERMSIG(gstatus) != 31 {
+                        eprintln!(
+                            "grandchild should have died from SIGSYS, got status={}",
+                            gstatus
+                        );
+                        unsafe { libc::_exit(5) };
+                    }
+                } else {
+                    eprintln!("grandchild fork failed");
+                    unsafe { libc::_exit(6) };
+                }
+
+                // All assertions passed
+                unsafe { libc::_exit(0) };
+            }
+
+            // ── Parent: wait for child verdict ──
+            let mut status: i32 = 0;
+            unsafe { libc::waitpid(pid, &mut status, 0) };
             assert!(
-                is_seccomp_active(),
-                "seccomp must be in FILTER mode after enable"
+                libc::WIFEXITED(status),
+                "child should have exited normally, got signal={}",
+                libc::WTERMSIG(status)
             );
-            // Verify an allowed syscall works
-            let allowed_pid = unsafe { libc::getpid() };
-            assert!(allowed_pid > 0, "allowed syscall must succeed");
+            let exit_code = libc::WEXITSTATUS(status);
+            assert_eq!(
+                exit_code, 0,
+                "seccomp child test failed with exit code {}",
+                exit_code
+            );
         }
         #[cfg(not(target_os = "linux"))]
         {
             assert!(enable_sandbox().is_err());
-        }
-    }
-
-    #[test]
-    fn test_forbidden_syscall_with_child() {
-        // Use a child process because SECCOMP_RET_KILL_PROCESS kills the caller.
-        #[cfg(target_os = "linux")]
-        {
-            enable_sandbox().expect("seccomp must be installed for this test");
-                    // Fork a child that attempts a forbidden syscall (mount = 165 on x86_64)
-                    let pid = unsafe { libc::fork() };
-                    if pid == 0 {
-                        // Child: try mount (not in allowlist)
-                        let src = std::ffi::CString::new("").unwrap();
-                        let dst = std::ffi::CString::new("").unwrap();
-                        let fs = std::ffi::CString::new("").unwrap();
-                        unsafe {
-                            libc::syscall(
-                                libc::SYS_mount,
-                                src.as_ptr(),
-                                dst.as_ptr(),
-                                fs.as_ptr(),
-                                0u64,
-                                std::ptr::null::<u8>(),
-                            )
-                        };
-                        // If we reach here, seccomp didn't kill us — exit with failure
-                        unsafe { libc::_exit(42) };
-                    } else if pid > 0 {
-                        // Parent: wait for child
-                        let mut status: i32 = 0;
-                        unsafe { libc::waitpid(pid, &mut status, 0) };
-                        // Child should have been killed by SIGSYS (signal 31)
-                        assert!(
-                            libc::WIFSIGNALED(status),
-                            "child should have been killed by signal"
-                        );
-                        assert_eq!(
-                            libc::WTERMSIG(status),
-                            31, // SIGSYS
-                            "child should have died from SIGSYS (seccomp violation)"
-                        );
-                    } else {
-                        panic!("fork failed");
-                    }
-            }
         }
     }
 }
