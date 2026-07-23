@@ -53,6 +53,9 @@ enum CliCommand {
     ReadVar { associd: u16 },
     Associations,
     Peers,
+    MruList,
+    Monitor,
+    Trace,
 }
 
 fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
@@ -84,9 +87,9 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
         }
         "associations" | "as" => Ok(CliCommand::Associations),
         "peers" | "pe" => Ok(CliCommand::Peers),
-        "mrulist" => Err("MRU list not yet implemented (Phase 3.4)".to_string()),
-        "monitor" | "ntpmon" => Err("ntpmon not yet implemented (Phase 3.4)".to_string()),
-        "trace" | "ntptrace" => Err("ntptrace not yet implemented (Phase 3.4)".to_string()),
+        "mrulist" => Ok(CliCommand::MruList),
+        "monitor" | "ntpmon" => Ok(CliCommand::Monitor),
+        "trace" | "ntptrace" => Ok(CliCommand::Trace),
         _ => Err(format!("unknown command: {command}")),
     }
 }
@@ -149,6 +152,50 @@ fn main() {
                             }
                         }
                         Ok(format_peers(&rows))
+                    }
+                    Err(e) => Err(format!("{e}")),
+                }
+            }
+            Ok(CliCommand::MruList) => client
+                .read_mru_list(&cli.host, cli.port)
+                .map(|entries| ntpsec_rs_core::control_client::MruEntry::format_list(&entries))
+                .map_err(|e| format!("{e}")),
+            Ok(CliCommand::Monitor) => match client.read_system_vars(&cli.host, cli.port) {
+                Ok(sys) => match client.read_associations(&cli.host, cli.port) {
+                    Ok(assocs) => {
+                        let mut output =
+                            format!("=== System Variables ===\n{}", format_readvar(&sys));
+                        output.push_str(&format!(
+                            "\n=== Associations ({} total) ===\n",
+                            assocs.len()
+                        ));
+                        for a in &assocs {
+                            output.push_str(&format!(
+                                "  associd={} status={:04x} configured={} reachable={}\n",
+                                a.associd, a.status, a.configured, a.reachable
+                            ));
+                        }
+                        Ok(output)
+                    }
+                    Err(e) => Err(format!("{e}")),
+                },
+                Err(e) => Err(format!("{e}")),
+            },
+            Ok(CliCommand::Trace) => {
+                let sys_result = client.read_system_vars(&cli.host, cli.port);
+                match sys_result {
+                    Ok(sys) => {
+                        let stratum = sys.stratum();
+                        let refid = sys.get("refid").unwrap_or("").to_string();
+                        let offset_val = sys
+                            .get("offset")
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .unwrap_or(0.0);
+                        let syspeer = sys.get("syspeer").unwrap_or("").to_string();
+                        Ok(format!(
+                            "{:>15}  {:>15}  {:>3}  {:>10.6}  syspeer={}\n",
+                            cli.host, refid, stratum, offset_val, syspeer
+                        ))
                     }
                     Err(e) => Err(format!("{e}")),
                 }

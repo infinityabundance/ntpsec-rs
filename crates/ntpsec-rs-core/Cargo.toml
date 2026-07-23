@@ -8,8 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/ntpsec-rs-core"
 readme = "README.md"
-categories = ["science", "simulation"]
-keywords = ["ntp", "ntpsec", "time", "synchronization"]
+categories = ["science", "simulation", "embedded", "network-programming"]
+keywords = ["ntp", "ntpsec", "time", "synchronization", "protocol"]
 
 [dependencies]
 bitflags = "2"
@@ -28,3 +28,7 @@ digest = "0.10"
 aes-siv = { version = "0.7", default-features = false, features = ["alloc"] }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 getrandom = "0.2"
+
+# NTS-KE TLS transport
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "0.26"

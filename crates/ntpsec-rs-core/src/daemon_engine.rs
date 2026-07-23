@@ -1252,13 +1252,11 @@ impl DaemonEngine {
         let select_actions = self.run_selection(rx_time);
         actions.extend(select_actions);
 
-        // If this refclock IS the system peer, apply clock discipline
+        // If this refclock IS the system peer, log selection status.
+        // NOTE: run_selection() above already calls local_clock() for the
+        // combined system offset, so we do NOT call local_clock() again here.
         if let Some(sys_id) = self.system_peer_associd {
             if sys_id == associd {
-                let adj = self.loop_filter.local_clock(offset, rx_time);
-                if !matches!(adj, Adjustment::Ignore) {
-                    actions.push(DaemonAction::AdjustClock(adj));
-                }
                 actions.push(DaemonAction::Log(format!(
                     "refclock {} offset={:.6}s delay={:.6}s selected",
                     associd, offset, delay

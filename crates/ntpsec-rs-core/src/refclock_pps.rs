@@ -424,6 +424,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn test_pps_unavailable_on_non_linux() {
+        let mut pps = PpsRefclock::new(0);
+        assert!(pps.open().is_err());
+    }
+
+    #[test]
     fn test_pps_read_timestamp_not_open() {
         // Reading without opening should produce an error.
         let mut pps = PpsRefclock::new(0);

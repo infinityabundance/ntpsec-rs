@@ -737,6 +737,101 @@ mod tests {
     }
 
     #[test]
+    // ── NTPsec cookie interoperability test ─────────────────────────
+
+    /// Verifies the cookie envelope format matches NTPsec expectations.
+    ///
+    /// NTPsec's cookie envelope (nts_cookie.c):
+    ///   key_index: 4 bytes (clear, u32 big-endian)
+    ///   nonce:     16 bytes (random, used as AEAD nonce)
+    ///   ciphertext: remainder (SIV-tagged output, includes encrypted
+    ///               plaintext + SIV authentication tag)
+    ///
+    /// The associated data (AAD) fed to AES-SIV is:
+    ///   key_id || nonce
+    ///
+    /// The NTPsec plaintext structure inside the cookie:
+    ///   aead_id (2 bytes) || c2s_key (32 bytes) || s2c_key (32 bytes)
+    #[test]
+    fn test_ntpsec_cookie_interop() {
+        // ── Setup: create CookieCipher and register a key ────────────
+        let mut cipher = CookieCipher::new();
+        let key_id = CookieKeyIndex(42);
+        let key = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        cipher.add_key(key_id, key);
+
+        // ── Build NTPsec-structured plaintext ────────────────────────
+        // NTPsec plaintext: aead_id (u16) || c2s_key (32) || s2c_key (32)
+        let aead_id: u16 = 15u16; // AEAD_AES_SIV_CMAC_256
+        let c2s_key: [u8; 32] = [
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+            0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+            0x3c, 0x3d, 0x3e, 0x3f,
+        ];
+        let s2c_key: [u8; 32] = [
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d,
+            0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b,
+            0x5c, 0x5d, 0x5e, 0x5f,
+        ];
+
+        let mut plaintext = Vec::with_capacity(2 + 32 + 32);
+        plaintext.extend_from_slice(&aead_id.to_be_bytes());
+        plaintext.extend_from_slice(&c2s_key);
+        plaintext.extend_from_slice(&s2c_key);
+        assert_eq!(plaintext.len(), 66);
+
+        // ── Encrypt (produces NTPsec-compatible envelope) ────────────
+        let envelope = cipher.encrypt(&plaintext).expect("encrypt should succeed");
+
+        // Verify envelope structure (NTPsec format):
+        //   [key_id: 4][nonce: 16][ciphertext: N]
+        assert!(
+            envelope.len() >= 4 + 16 + 16,
+            "envelope too short: {} bytes (need at least 36)",
+            envelope.len()
+        );
+
+        // Key index should match what we registered.
+        let parsed_key_id = u32::from_be_bytes(envelope[0..4].try_into().unwrap());
+        assert_eq!(parsed_key_id, key_id.0);
+
+        // Nonce should be exactly 16 bytes.
+        let _nonce = &envelope[4..20];
+        assert_eq!(_nonce.len(), 16);
+
+        // Ciphertext must include the 16-byte SIV authentication tag.
+        let _ciphertext = &envelope[20..];
+        assert!(!_ciphertext.is_empty(), "ciphertext must not be empty");
+
+        // ── Decrypt back ─────────────────────────────────────────────
+        let decrypted = cipher.decrypt(&envelope).expect("decrypt should succeed");
+        assert_eq!(
+            decrypted, plaintext,
+            "decrypted plaintext must match original"
+        );
+
+        // ── Parse the decrypted NTPsec-structured plaintext ──────────
+        assert!(
+            decrypted.len() >= 2 + 32 + 32,
+            "decrypted plaintext too short: {} bytes",
+            decrypted.len()
+        );
+
+        let recovered_aead = u16::from_be_bytes([decrypted[0], decrypted[1]]);
+        assert_eq!(recovered_aead, aead_id, "AEAD ID mismatch");
+
+        let recovered_c2s: [u8; 32] = decrypted[2..34].try_into().unwrap();
+        assert_eq!(recovered_c2s, c2s_key, "C2S key mismatch");
+
+        let recovered_s2c: [u8; 32] = decrypted[34..66].try_into().unwrap();
+        assert_eq!(recovered_s2c, s2c_key, "S2C key mismatch");
+    }
+
+    #[test]
     fn test_rfc5297_known_answer() {
         // RFC 5297 Appendix A.1 known-answer test
         // Uses Aes128Siv directly (not the AEAD wrapper) for exact input control.

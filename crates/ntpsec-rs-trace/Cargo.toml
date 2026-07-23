@@ -8,7 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/ntpsec-rs-trace"
 readme = "README.md"
-keywords = ["ntp", "ntpsec", "time", "synchronization"]
+categories = ["command-line-utilities", "network-programming"]
+keywords = ["ntp", "ntpsec", "time", "synchronization", "network-time-protocol"]
 
 [dependencies]
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }

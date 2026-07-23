@@ -565,9 +565,11 @@ dependencies = [
  "hex-literal",
  "libc",
  "md-5",
+ "rustls",
  "sha-1",
  "sha2",
  "thiserror",
+ "webpki-roots 0.26.11",
  "zeroize",
 ]
 

@@ -701,6 +701,144 @@ impl ControlClient {
         Err(QueryError::Timeout)
     }
 
+    /// Send a Mode 6 request with a body payload and collect fragments.
+    fn query_with_body(
+        &mut self,
+        host: &str,
+        port: u16,
+        msg: ControlMessage,
+        body: &str,
+    ) -> Result<(Vec<u8>, u16, u16), QueryError> {
+        let addr = Self::resolve(host, port)?;
+
+        let local = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket =
+            UdpSocket::bind(local).map_err(|e| QueryError::Network(format!("bind: {e}")))?;
+        socket
+            .set_read_timeout(Some(self.timeout))
+            .map_err(|e| QueryError::Network(format!("set timeout: {e}")))?;
+        socket
+            .connect(addr)
+            .map_err(|e| QueryError::Network(format!("connect: {e}")))?;
+
+        let seq = self.next_sequence();
+        let req = ControlMessage {
+            li_vn_mode: NtpPacket::set_li_vn_mode(
+                LeapIndicator::NoWarning,
+                NtpVersion::V4,
+                NtpMode::NtpControl,
+            ),
+            opcode: msg.opcode,
+            sequence: seq,
+            status: 0,
+            associd: msg.associd,
+            offset: 0,
+            count: body.len() as u16,
+        };
+
+        let mut request_bytes = req.encode().to_vec();
+        request_bytes.extend_from_slice(body.as_bytes());
+        let expected_op = ControlOpcode::from_u8(msg.opcode).op;
+
+        for attempt in 0..=self.retries {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+
+            socket
+                .send(&request_bytes)
+                .map_err(|e| QueryError::Network(format!("send: {e}")))?;
+
+            let mut collector = FragmentCollector::new();
+
+            loop {
+                let mut buf = vec![0u8; 512];
+                match socket.recv(&mut buf) {
+                    Ok(n) => {
+                        let raw = &buf[..n];
+                        let (resp, after_header) = ControlMessage::decode(raw)
+                            .ok_or_else(|| QueryError::BadResponse("short header".to_string()))?;
+
+                        if resp.sequence != seq {
+                            continue;
+                        }
+                        let oc = resp.decode_opcode();
+                        if oc.error {
+                            let err_code = (resp.status >> 8) as u8;
+                            return match err_code {
+                                1 => Err(QueryError::AuthFailure),
+                                2 => Err(QueryError::ProtocolError(
+                                    "invalid message format".to_string(),
+                                )),
+                                3 => Err(QueryError::NotSupported("invalid opcode".to_string())),
+                                4 => Err(QueryError::NotFound),
+                                5 => Err(QueryError::NotSupported("unknown variable".to_string())),
+                                6 => Err(QueryError::ProtocolError(
+                                    "invalid variable value".to_string(),
+                                )),
+                                7 => Err(QueryError::ProtocolError(
+                                    "administratively prohibited".to_string(),
+                                )),
+                                _ => Err(QueryError::ProtocolError(format!("error {err_code}"))),
+                            };
+                        }
+
+                        let count = resp.count as usize;
+                        let data = if count <= after_header.len() {
+                            after_header[..count].to_vec()
+                        } else {
+                            return Err(QueryError::BadResponse(
+                                "fragment count exceeds datagram".to_string(),
+                            ));
+                        };
+
+                        let complete = collector.add_fragment(
+                            resp.offset,
+                            resp.count,
+                            &data,
+                            oc.more,
+                            resp.status,
+                            resp.associd,
+                        )?;
+
+                        if complete {
+                            let assembled = collector.assemble()?;
+                            return Ok((assembled, resp.status, resp.associd));
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(QueryError::Network(e.to_string()));
+                    }
+                }
+            }
+        }
+
+        Err(QueryError::Timeout)
+    }
+
+    /// Parse a nonce value from a textual NTP Mode 6 response.
+    /// Expects: nonce=XXXXXXXX
+    fn parse_nonce_value(text: &str) -> Option<String> {
+        let text = text.trim();
+        if let Some(eq_pos) = text.find('=') {
+            let value = text[eq_pos + 1..].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
     /// Read system variables (ntpq -c rv).
     ///
     /// Real C ntpq issues a separate status-summary request (READVAR
@@ -781,6 +919,216 @@ impl ControlClient {
         };
         let (data, _status, _associd) = self.query(host, port, msg)?;
         AssociationStatus::from_bytes(&data)
+    }
+
+    /// Read the MRU (Most Recently Used) list from the daemon.
+    ///
+    /// Uses the NTPsec-compatible nonce protocol:
+    ///   1. REQ_NONCE (opcode 12) to acquire a nonce
+    ///   2. READ_MRU (opcode 10) with the nonce to retrieve entries
+    ///
+    /// The response uses textual Mode 6 variable lists with indexed
+    /// entries (addr.N, last.N, first.N, ct.N).
+    pub fn read_mru_list(&mut self, host: &str, port: u16) -> Result<Vec<MruEntry>, QueryError> {
+        // ── 1. Acquire nonce via REQ_NONCE (opcode 12) ────────────────
+        let nonce_msg = ControlMessage {
+            li_vn_mode: 0,
+            opcode: ControlOpcode::new(false, false, false, opcodes::OP_REQ_NONCE).to_u8(),
+            sequence: 0,
+            status: 0,
+            associd: 0,
+            offset: 0,
+            count: 0,
+        };
+        let (nonce_data, _status, _associd) = self.query(host, port, nonce_msg)?;
+        let nonce_text = String::from_utf8_lossy(&nonce_data);
+        let nonce = Self::parse_nonce_value(&nonce_text).ok_or_else(|| {
+            QueryError::BadResponse("MRU nonce response did not contain nonce=".to_string())
+        })?;
+
+        // ── 2. Request MRU list with nonce ────────────────────────────
+        // The request body contains the nonce as a text variable.
+        let request_body = format!("nonce={nonce}");
+        let msg = ControlMessage {
+            li_vn_mode: 0,
+            opcode: ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8(),
+            sequence: 0,
+            status: 0,
+            associd: 0,
+            offset: 0,
+            count: request_body.len() as u16,
+        };
+        let (data, _status, _associd) = self.query_with_body(host, port, msg, &request_body)?;
+        let response_text = String::from_utf8_lossy(&data);
+
+        // ── 3. Parse textual indexed entries ──────────────────────────
+        MruEntry::parse_textual(&response_text)
+    }
+}
+
+// ──── MRU Entry Model ────────────────────────────────────────────────────
+
+/// MRU (Most Recently Used) entry from the daemon.
+/// Represents a single client entry in the daemon's MRU list.
+#[derive(Debug, Clone)]
+pub struct MruEntry {
+    pub addr: String,
+    pub port: u16,
+    pub last_pkt_secs: i64,
+    pub last_pkt_frac: u32,
+    pub first_pkt_secs: i64,
+    pub first_pkt_frac: u32,
+    pub count: u32,
+    pub flags: u8,
+}
+
+impl MruEntry {
+    /// Parse MRU entries from a textual Mode 6 READ_MRU response.
+    ///
+    /// NTPsec returns indexed entries in text format:
+    ///   addr.0=192.168.1.1 last.0=3771763200.000000 first.0=3771763100.000000 ct.0=42 mv.0=2 rs.0=0
+    ///   addr.1=10.0.0.1 last.1=3771763300.000000 first.1=3771763200.000000 ct.1=100
+    ///
+    /// Indexed variables are grouped by their numeric index into entries.
+    pub fn parse_textual(text: &str) -> Result<Vec<MruEntry>, QueryError> {
+        // Split into variables and group by index
+        let mut entries_map: std::collections::BTreeMap<u32, MruEntry> =
+            std::collections::BTreeMap::new();
+
+        for token in text.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            // Split on '=' to get key=value
+            let parts: Vec<&str> = token.splitn(2, '=').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+
+            // Parse indexed keys like "addr.0", "last.1", "ct.2"
+            let dot_pos = key.rfind('.');
+            if let Some(dot) = dot_pos {
+                let base = &key[..dot];
+                let index: u32 = match key[dot + 1..].parse() {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+
+                let entry = entries_map.entry(index).or_insert_with(|| MruEntry {
+                    addr: String::new(),
+                    port: 0,
+                    last_pkt_secs: 0,
+                    last_pkt_frac: 0,
+                    first_pkt_secs: 0,
+                    first_pkt_frac: 0,
+                    count: 0,
+                    flags: 0,
+                });
+
+                match base {
+                    "addr" => entry.addr = value.to_string(),
+                    "last" => {
+                        // Format: seconds.fraction
+                        if let Some(dot) = value.find('.') {
+                            if let Ok(secs) = value[..dot].parse::<i64>() {
+                                entry.last_pkt_secs = secs;
+                            }
+                            if value.len() > dot + 1 {
+                                let frac_str = &value[dot + 1..];
+                                // Pad or truncate to 6 fractional digits for NTP frac
+                                let frac_padded = format!("{:<6}", frac_str);
+                                if let Ok(frac) = frac_padded[..6].parse::<u32>() {
+                                    entry.last_pkt_frac = frac * 4295; // approx: 10^6 / 2^32 * frac
+                                }
+                            }
+                        } else if let Ok(secs) = value.parse::<i64>() {
+                            entry.last_pkt_secs = secs;
+                        }
+                    }
+                    "first" => {
+                        if let Some(dot) = value.find('.') {
+                            if let Ok(secs) = value[..dot].parse::<i64>() {
+                                entry.first_pkt_secs = secs;
+                            }
+                        } else if let Ok(secs) = value.parse::<i64>() {
+                            entry.first_pkt_secs = secs;
+                        }
+                    }
+                    "ct" => {
+                        if let Ok(count) = value.parse::<u32>() {
+                            entry.count = count;
+                        }
+                    }
+                    "mv" | "rs" => {
+                        if let Ok(flags) = value.parse::<u8>() {
+                            entry.flags = flags;
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                // Non-indexed keys (like nonce=...)
+                if key == "nonce" {
+                    // skip nonce in response
+                }
+            }
+        }
+
+        // Filter out empty entries and collect
+        let entries: Vec<MruEntry> = entries_map
+            .into_values()
+            .filter(|e| !e.addr.is_empty() || e.count > 0)
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Format a single MRU entry as a line of text.
+    pub fn format_entry(&self) -> String {
+        let last_f = self.last_pkt_secs as f64 + (self.last_pkt_frac as f64 / 4294967296.0);
+        let first_f = self.first_pkt_secs as f64 + (self.first_pkt_frac as f64 / 4294967296.0);
+        let interval = if self.count > 1 {
+            (last_f - first_f) / (self.count.saturating_sub(1) as f64)
+        } else {
+            0.0
+        };
+        let typ = if self.flags & 0x01 != 0 {
+            "cast"
+        } else {
+            "clnt"
+        };
+        format!(
+            "{:>21} {:>5} {:>8.0}s {:>8} {:>4}",
+            self.addr, self.port, interval, self.count, typ
+        )
+    }
+
+    /// Format the column header for MRU list output.
+    pub fn format_header() -> String {
+        format!(
+            "{:>21} {:>5} {:>8} {:>8} {:>4}",
+            "addr", "port", "avg_int", "count", "type"
+        )
+    }
+
+    /// Format a full MRU list as a table.
+    pub fn format_list(entries: &[MruEntry]) -> String {
+        if entries.is_empty() {
+            return "(empty MRU list)".to_string();
+        }
+        let mut output = String::new();
+        output.push_str(&Self::format_header());
+        output.push('\n');
+        output.push_str(&"-".repeat(50));
+        output.push('\n');
+        for entry in entries {
+            output.push_str(&entry.format_entry());
+            output.push('\n');
+        }
+        output
     }
 }
 
@@ -2287,5 +2635,72 @@ mod tests {
         assert!(out.contains("associd=49723 status=9614"));
         assert!(out.contains("srcaddr=192.168.1.1"));
         assert!(out.contains("stratum=2"));
+    }
+
+    // ──── MRU List Tests (textual format) ───────────────────────────
+
+    #[test]
+    fn test_mru_parse_ipv4_entry() {
+        let text =
+            "addr.0=192.168.1.1,last.0=3771763200.000000,first.0=3771763100.000000,ct.0=42,mv.0=0";
+        let entries = MruEntry::parse_textual(text).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].addr, "192.168.1.1");
+        assert_eq!(entries[0].port, 0);
+        assert_eq!(entries[0].last_pkt_secs, 3771763200);
+        assert_eq!(entries[0].first_pkt_secs, 3771763100);
+        assert_eq!(entries[0].count, 42);
+        assert_eq!(entries[0].flags, 0);
+        assert!(entries[0].format_entry().contains("clnt"));
+    }
+
+    #[test]
+    fn test_mru_parse_multiple_entries() {
+        let text = concat!(
+            "addr.0=192.168.1.1,last.0=3771763200.000000,first.0=3771763100.000000,ct.0=42,mv.0=0,",
+            "addr.1=10.0.0.1,last.1=3771763300.000000,first.1=3771763200.000000,ct.1=100,mv.1=1"
+        );
+        let entries = MruEntry::parse_textual(text).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].addr, "192.168.1.1");
+        assert_eq!(entries[0].count, 42);
+        assert_eq!(entries[0].flags, 0);
+        assert_eq!(entries[1].addr, "10.0.0.1");
+        assert_eq!(entries[1].count, 100);
+        assert_eq!(entries[1].flags, 1);
+    }
+
+    #[test]
+    fn test_mru_parse_empty() {
+        let entries = MruEntry::parse_textual("").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_mru_format_list_empty() {
+        let output = MruEntry::format_list(&[]);
+        assert_eq!(output, "(empty MRU list)");
+    }
+
+    #[test]
+    fn test_mru_format_list_has_header() {
+        let text =
+            "addr.0=192.168.1.1,last.0=3771763200.000000,first.0=3771763100.000000,ct.0=1,mv.0=0";
+        let entries = MruEntry::parse_textual(text).unwrap();
+        let output = MruEntry::format_list(&entries);
+        assert!(output.contains("addr"));
+        assert!(output.contains("port"));
+        assert!(output.contains("count"));
+        assert!(output.contains("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_mru_parse_with_nonce() {
+        let text =
+            "nonce=abc123,addr.0=192.168.1.1,last.0=3771763200.000000,first.0=3771763100.000000,ct.0=42,mv.0=0";
+        let entries = MruEntry::parse_textual(text).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].addr, "192.168.1.1");
+        assert_eq!(entries[0].count, 42);
     }
 }

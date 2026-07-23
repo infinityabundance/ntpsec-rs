@@ -275,6 +275,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn test_seccomp_unavailable_on_non_linux() {
+        assert!(enable_sandbox().is_err());
+    }
+
+    #[test]
     fn test_seccomp_inside_child() {
         // All seccomp installations must happen inside a disposable child
         // process because TSYNC propagates the filter to every test thread,
