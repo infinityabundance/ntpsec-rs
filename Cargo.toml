@@ -32,4 +32,4 @@ homepage = "https://github.com/infinityabundance/ntpsec-rs"
 documentation = "https://github.com/infinityabundance/ntpsec-rs"
 readme = "README.md"
 keywords = ["ntp", "ntpsec", "time", "synchronization"]
-categories = ["network", "science", "simulation"]
+categories = ["science", "simulation"]
