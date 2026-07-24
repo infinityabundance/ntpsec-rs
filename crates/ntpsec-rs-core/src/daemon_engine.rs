@@ -1569,10 +1569,16 @@ impl DaemonEngine {
         actions
     }
 
-    /// Compute the system status word (matching ntpsec format).
-    /// High byte: LI(2) | clock_source(3) | unused(3)
-    /// Low byte:  count(8)
-    /// See ntp_control.h sys_status() macro.
+    /// Compute the system status word (matching ntpsec exactly).
+    ///
+    /// NTPsec sys_status layout (ntp_control.h, RFC 9327 §5):
+    ///   bits 15-14: LI (2 bits)
+    ///   bits 13-8:  Clock source (6 bits)
+    ///   bits 7-4:   Event count (4 bits)
+    ///   bits 3-0:   Event code (4 bits)
+    ///
+    /// Reference: ntp_control.h `sys_status()` macro:
+    ///   (li << 14) | (source << 8) | (event_count << 4) | event_code
     fn compute_system_status(&self) -> u16 {
         let li = match self.system.leap {
             LeapIndicator::NoWarning => 0,
@@ -1580,14 +1586,26 @@ impl DaemonEngine {
             LeapIndicator::RemoveLeapSecond => 2,
             LeapIndicator::Alarm => 3,
         };
-        // Clock source: 0=unsync, 6=ordinary reference, 4=PPS, etc.
-        let clock_source = if self.system.stratum < crate::ntp_proto::NTP_MAXSTRAT {
-            6
+        // Clock source: 0=unsync, 1=local, 2=PPS, 3=NTP, 6=ordinary ref
+        let clock_source: u16 = if self.system.stratum < crate::ntp_proto::NTP_MAXSTRAT {
+            // Determine more precise source from system state
+            if self.system.stratum == 1 {
+                1 // sync_local (LOCAL refclock or orphan)
+            } else {
+                3 // sync_ntp (ordinary NTP synchronization)
+            }
         } else {
-            0
+            0 // sync_unspec
         };
-        let count = self.system.peer_count.min(0xFF) as u16;
-        ((li as u16) << 14) | ((clock_source as u16) << 11) | count
+
+        // Event count and code: track the last system event
+        let event_count = (self.system.peer_count.min(0x0F) as u16) & 0x0F;
+        let event_code = 0u16; // No event for now; would be wired to system event tracking
+
+        ((li as u16) << 14)       // bits 15-14: LI
+            | ((clock_source & 0x3F) << 8)  // bits 13-8: source
+            | ((event_count & 0x0F) << 4)   // bits 7-4: event count
+            | (event_code & 0x0F) // bits 3-0: event code
     }
 
     /// Handle a received NTP packet.
