@@ -1299,8 +1299,8 @@ pub fn build_kod_packet(
     resp.root_dispersion = 0;
     resp.reference_id = crate::ntp_types::kiss_codes::RATE;
     resp.originate_ts = request.transmit_ts;
-    resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(now);
-    resp.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(now);
+    resp.receive_ts = ntp_fp::ntp_ts64_to_wire(now);
+    resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(now);
     resp
 }
 
@@ -1423,7 +1423,7 @@ mod tests {
         let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
 
         let t1 = ntp_fp::ts_to_ntp(1000, 0);
-        let t1_wire = ntp_fp::ntp_ts64_to_ntpts(t1);
+        let t1_wire = ntp_fp::ntp_ts64_to_wire(t1);
 
         // Register a pending request manually (as tick() would)
         engine.pending_requests.push(PendingRequest {
@@ -1440,8 +1440,8 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp.stratum = 2;
         resp.originate_ts = t1_wire;
-        resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1001, 0));
-        resp.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1001, 500_000_000));
+        resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1001, 0));
+        resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1001, 500_000_000));
 
         let dgram = ReceivedDatagram::test(
             resp.encode_header().to_vec(),
@@ -1497,8 +1497,8 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp_b.stratum = 3;
         resp_b.originate_ts = t1_b;
-        resp_b.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp_b.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 250_000_000));
+        resp_b.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp_b.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 250_000_000));
 
         let dgram_b = ReceivedDatagram::test(
             resp_b.encode_header().to_vec(),
@@ -1530,8 +1530,8 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp_a.stratum = 2;
         resp_a.originate_ts = t1_a;
-        resp_a.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp_a.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 500_000_000));
+        resp_a.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp_a.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
         let dgram_a = ReceivedDatagram::test(
             resp_a.encode_header().to_vec(),
@@ -1596,9 +1596,9 @@ mod tests {
             );
             resp.stratum = 4;
             resp.originate_ts = req.wire_t1;
-            resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(next_due + 1, 0));
+            resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(next_due + 1, 0));
             resp.transmit_ts =
-                ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(next_due + 1, 500_000_000));
+                ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(next_due + 1, 500_000_000));
 
             let dgram = ReceivedDatagram {
                 bytes: resp.encode_header().to_vec(),
@@ -1698,7 +1698,7 @@ mod tests {
         let mut req = NtpPacket::zeroed();
         req.li_vn_mode =
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
-        req.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(2000, 0));
+        req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(2000, 0));
 
         let dgram = ReceivedDatagram {
             bytes: req.encode_header().to_vec(),
@@ -1776,7 +1776,7 @@ mod tests {
         let mut req = NtpPacket::zeroed();
         req.li_vn_mode =
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
-        req.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(500, 0));
+        req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(500, 0));
 
         let system = SystemState::new();
         let now = ntp_fp::ts_to_ntp(501, 0);
@@ -1803,7 +1803,7 @@ mod tests {
         let pkt = build_request(&peer, &system, now, -20);
         assert_eq!(pkt.mode(), NtpMode::Client);
         assert_eq!(pkt.version(), NtpVersion::V4);
-        assert_eq!(pkt.transmit_ts, ntp_fp::ntp_ts64_to_ntpts(now));
+        assert_eq!(pkt.transmit_ts, ntp_fp::ntp_ts64_to_wire(now));
     }
 
     /// Decisive court: full pipeline with two peers, poll, response,
@@ -1853,8 +1853,10 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp_b.stratum = 3;
         resp_b.originate_ts = req_b.wire_t1;
-        resp_b.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp_b.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 500_000_000));
+        resp_b.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp_b.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 250_000_000));
+        // Set root_dispersion so synch > offset difference (5ms dispersion)
+        resp_b.root_dispersion = crate::ntp_proto::f64_to_ntp_short(0.005);
 
         let dgram_b = ReceivedDatagram {
             bytes: resp_b.encode_header().to_vec(),
@@ -1876,8 +1878,10 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp_a.stratum = 2; // peer A is lower stratum → becomes system peer
         resp_a.originate_ts = req_a.wire_t1;
-        resp_a.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp_a.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 250_000_000));
+        resp_a.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp_a.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 250_000_000));
+        // Same root_dispersion as peer B for consistent synch
+        resp_a.root_dispersion = crate::ntp_proto::f64_to_ntp_short(0.005);
 
         let dgram_a = ReceivedDatagram {
             bytes: resp_a.encode_header().to_vec(),
@@ -1945,8 +1949,8 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp.stratum = 3;
         resp.originate_ts = req.wire_t1;
-        resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 500_000_000));
+        resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
         // Source is 10.0.0.1, but we polled 192.168.1.1
         let dgram = ReceivedDatagram {
@@ -1984,8 +1988,8 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Broadcast);
         resp.stratum = 3;
         resp.originate_ts = req.wire_t1;
-        resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 500_000_000));
+        resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
         let dgram = ReceivedDatagram {
             bytes: resp.encode_header().to_vec(),
@@ -2061,8 +2065,8 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
         resp.stratum = 3;
         resp.originate_ts = req.wire_t1;
-        resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 0));
-        resp.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(ntp_fp::ts_to_ntp(1, 500_000_000));
+        resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
+        resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
         // Manually provide the response datagram to the engine
         let dgram = ReceivedDatagram {

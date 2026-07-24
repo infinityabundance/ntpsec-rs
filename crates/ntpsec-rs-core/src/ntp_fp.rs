@@ -177,12 +177,23 @@ pub fn ntp_ts64_to_double(ts: NtpTs64) -> f64 {
     ts.seconds as f64 + ts.fraction as f64 / NTP_FRAC_PER_SEC as f64
 }
 
-/// Convert NTP 64-bit timestamp to the on-wire 32.32 NtpTs format.
-pub fn ntp_ts64_to_ntpts(ts: NtpTs64) -> NtpTs {
+/// Convert an i64 NTP timestamp to wire format (u32 seconds + u32 fraction).
+/// Handles NTP era rollover by wrapping at 2^32 seconds.
+pub fn ntp_ts64_to_wire(ts: NtpTs64) -> NtpTs {
     NtpTs {
-        seconds: ts.seconds as u32,
+        seconds: ts.seconds as u32, // Wraps at 2^32 (NTP era rollover)
         fraction: ts.fraction,
     }
+}
+
+/// Convert an `NtpTs64` to an `NtpTs`, preserving the full 64-bit seconds
+/// value.  This is the inverse of [`ntp_ts_to_ntpts`] and does **not**
+/// truncate to u32; it retains era information for internal use.
+///
+/// For wire-format encoding that properly handles NTP era rollover,
+/// use [`ntp_ts64_to_wire`] instead.
+pub fn ntp_ts64_to_ntpts(ts: NtpTs64) -> NtpTs64 {
+    ts
 }
 
 /// Convert wire-format NtpTs (u32 seconds) to NtpTs64 (i64 seconds).

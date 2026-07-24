@@ -332,42 +332,95 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
         return 0;
     }
 
-    // A falseticker is a peer whose interval doesn't overlap with the majority.
-    let mut survivors = 0;
-    // Majority is ceil(n/2) — at least half the peers must agree.
-    // Each peer is trivially counted as overlapping with itself.
-    let majority = (n + 1) / 2;
-
-    // Precompute (offset, root_dist, lo) tuples to avoid borrow conflicts
-    let meta: Vec<(f64, f64, f64)> = peers
+    // Compute synch (half-width of confidence interval) for each peer.
+    //   synch = max(MINDISTANCE, root_delay/2 + root_dispersion + peer_jitter)
+    // This matches ntpsec's confidence interval computation for the intersection
+    // algorithm — using peer_jitter (clock-filter jitter) rather than the
+    // dispersion + phi*elapsed terms used by root_distance().
+    let synch: Vec<f64> = peers
         .iter()
-        .map(|p| {
-            let rd = root_distance(p, now);
-            (p.offset, rd, p.offset - rd)
-        })
+        .map(|p| (p.root_delay / 2.0 + p.root_dispersion + p.jitter).max(NTP_MINDIST))
         .collect();
 
-    for (i, peer) in peers.iter_mut().enumerate() {
-        let (offset, rd, lo) = meta[i];
-        let hi = offset + rd;
+    // Build sorted endpoints: (value, type, peer_index)
+    //   type = -1 for lower bound, +1 for upper bound
+    let mut endpoints: Vec<(f64, i8, usize)> = Vec::with_capacity(2 * n);
+    for (i, p) in peers.iter().enumerate() {
+        endpoints.push((p.offset - synch[i], -1, i));
+        endpoints.push((p.offset + synch[i], 1, i));
+    }
+    // Sort by offset; when equal, lower bound (-1) comes first.
+    endpoints.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
 
-        // Count ALL peers that overlap with this peer (including itself)
-        let mut overlaps = 0usize;
-        for k in 0..meta.len() {
-            let (jb, jrd, jlo) = meta[k];
-            let jhi = jb + jrd;
-            if hi >= jlo && lo <= jhi {
-                overlaps += 1;
+    // Marzullo's intersection algorithm (RFC 5905 §10.2).
+    // Scan endpoints with increasing allow count (falseticker tolerance).
+    // The first allow that yields a valid intersection is the minimum number
+    // of falseticker peers whose intervals must be excluded.
+    let mut intersection_start = 0.0f64;
+    let mut intersection_end = 0.0f64;
+    let mut found = false;
+
+    for allow in 0..n {
+        let mut count = 0usize;
+        let mut start = f64::NAN;
+        let mut end = f64::NAN;
+
+        for (val, typ, _) in &endpoints {
+            // typ is -1 (lower) → count += 1; +1 (upper) → count -= 1
+            if *typ < 0 {
+                count = count.wrapping_add(1);
+            } else {
+                count = count.wrapping_sub(1);
+            }
+
+            if count >= n - allow {
+                if start.is_nan() {
+                    start = *val;
+                }
+            } else if !start.is_nan() && end.is_nan() {
+                end = *val;
+                break;
             }
         }
 
-        if overlaps >= majority {
-            peer.flash &= !FlashBits::TEST5.bits();
-            survivors += 1;
-        } else {
+        // If we scanned past the last endpoint while still inside the intersection
+        if !start.is_nan() && end.is_nan() {
+            end = endpoints.last().unwrap().0;
+        }
+
+        if !start.is_nan() && !end.is_nan() {
+            intersection_start = start;
+            intersection_end = end;
+            found = true;
+            break;
+        }
+    }
+
+    // Mark peers whose confidence interval does NOT overlap with the
+    // intersection interval as falsetickers (TEST5).
+    let mut survivors = 0;
+    if found {
+        for (i, peer) in peers.iter_mut().enumerate() {
+            let lo = peer.offset - synch[i];
+            let hi = peer.offset + synch[i];
+            if hi >= intersection_start && lo <= intersection_end {
+                peer.flash &= !FlashBits::TEST5.bits();
+                survivors += 1;
+            } else {
+                peer.flash |= FlashBits::TEST5.bits();
+            }
+        }
+    } else {
+        // No intersection found — all are falsetickers
+        for peer in peers.iter_mut() {
             peer.flash |= FlashBits::TEST5.bits();
         }
     }
+
     survivors
 }
 
@@ -395,6 +448,12 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
         return indices;
     }
 
+    // Identify the prefer peer among the candidates (if any).
+    // The prefer peer is always kept during pruning.
+    let mut prefer_pos = indices
+        .iter()
+        .position(|&i| peers[i].flags.contains(PeerFlags::PREFER));
+
     // Compute jitter for each survivor relative to the others (RFC 5905 §11 eq 6).
     let mut peer_jitter = vec![0.0f64; indices.len()];
     for i in 0..indices.len() {
@@ -417,13 +476,19 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
     const MAXCLOCK_JITTER: f64 = 3.0;
 
     while indices.len() > NTP_MINCLOCK {
-        // Find the worst survivor (highest peer jitter)
+        // Find the worst survivor (highest peer jitter), skipping the prefer peer
         let worst_idx = peer_jitter
             .iter()
             .enumerate()
+            .filter(|(idx, _)| prefer_pos.map_or(true, |p| *idx != p))
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| idx)
-            .unwrap();
+            .map(|(idx, _)| idx);
+
+        // If the only remaining candidate(s) are the prefer peer, stop
+        let worst_idx = match worst_idx {
+            Some(idx) => idx,
+            None => break,
+        };
 
         // Recompute select jitter (φ_jitter) — RMS of the peer jitters
         // of the current survivors.
@@ -438,7 +503,13 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
             break;
         }
 
-        // Remove the worst
+        // Remove the worst; adjust prefer_pos if removal happens before it
+        if prefer_pos.map_or(false, |p| worst_idx < p) {
+            prefer_pos = prefer_pos.map(|p| p - 1);
+        } else if prefer_pos.map_or(false, |p| worst_idx == p) {
+            // Should not happen since we skip the prefer peer, but guard anyway
+            prefer_pos = None;
+        }
         indices.remove(worst_idx);
         peer_jitter.remove(worst_idx);
     }
@@ -650,16 +721,16 @@ pub fn build_response(
     resp.reference_id = system.reference_id;
 
     // Reference timestamp
-    resp.reference_ts = ntp_fp::ntp_ts64_to_ntpts(system.reference_time);
+    resp.reference_ts = ntp_fp::ntp_ts64_to_wire(system.reference_time);
 
     // Originate = request transmit timestamp
     resp.originate_ts = request.transmit_ts;
 
     // Receive = current time
-    resp.receive_ts = ntp_fp::ntp_ts64_to_ntpts(now);
+    resp.receive_ts = ntp_fp::ntp_ts64_to_wire(now);
 
     // Transmit = current time (will be read by client)
-    resp.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(now);
+    resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(now);
 
     resp
 }
@@ -681,7 +752,7 @@ pub fn build_request(peer: &Peer, system: &SystemState, now: NtpTs64, precision:
     pkt.precision = precision;
     // The transmit timestamp is the only one we set; the rest are zero
     // (which tells the server this is a request, not a response).
-    pkt.transmit_ts = ntp_fp::ntp_ts64_to_ntpts(now);
+    pkt.transmit_ts = ntp_fp::ntp_ts64_to_wire(now);
     pkt
 }
 
@@ -775,8 +846,14 @@ impl SystemState {
         // 4. Run combining algorithm
         let (combined_offset, combined_jitter) = clock_combine(peers, &survivors);
 
-        // 5. Pick the system peer (the first survivor, or the prefer peer)
-        let sys_peer = &peers[survivors[0]];
+        // 5. Pick the system peer — prefer the PREFER peer if any survivor has the flag,
+        //    otherwise use the first survivor.
+        let sys_peer_idx = survivors
+            .iter()
+            .copied()
+            .find(|&i| peers[i].flags.contains(PeerFlags::PREFER))
+            .unwrap_or(survivors[0]);
+        let sys_peer = &peers[sys_peer_idx];
 
         // 6. Update system variables
         self.leap = sys_peer.leap;
@@ -789,14 +866,14 @@ impl SystemState {
         self.sys_offset = combined_offset;
         self.sys_rootdist = root_distance(sys_peer, now);
         self.peer_count = survivors.len() as u32;
-        survivors[0]
+        sys_peer_idx
     }
 }
 
 // ──── Helper: f64 → NTP short format ──────────────────────────────────
 
 /// Convert a f64 seconds value to NTP short format (16.16 fixed-point).
-fn f64_to_ntp_short(v: f64) -> u32 {
+pub fn f64_to_ntp_short(v: f64) -> u32 {
     if v < 0.0 {
         return 0;
     }

@@ -28,6 +28,7 @@ use aes_siv::aead::Key;
 use aes_siv::siv::Aes128Siv;
 use digest::KeyInit;
 use getrandom::getrandom;
+use std::time::SystemTime;
 
 /// Size of the server identity field in the cookie plaintext.
 pub const SERVER_ID_SIZE: usize = 32;
@@ -42,6 +43,10 @@ pub const S2C_KEY_SIZE: usize = 32;
 /// server_id(32) + c2s_key(32) + s2c_key(32) + timestamp_secs(8) +
 /// timestamp_frac(4) + aead(2) = 110 bytes.
 pub const COOKIE_PLAINTEXT_MIN: usize = 110;
+
+/// Maximum age for an NTS cookie in seconds (1 day).
+/// Cookies older than this are rejected during decryption.
+pub const NTS_COOKIE_MAX_AGE: u64 = 86400;
 
 // ──── Cookie Cipher (key-rotation aware AES-SIV-CMAC-256) ───────────
 
@@ -255,6 +260,9 @@ impl NtsCookie {
     ///
     /// `server_key` must be 32 bytes (256 bits).
     ///
+    /// The cookie's `timestamp` field is automatically set to the current
+    /// time before encryption to allow expiration checks on decryption.
+    ///
     /// Returns the ciphertext (plaintext authenticated with a 16-byte
     /// SIV authentication tag prepended).
     pub fn encrypt(&self, server_key: &[u8]) -> Result<Vec<u8>, String> {
@@ -265,7 +273,16 @@ impl NtsCookie {
             ));
         }
 
-        let plaintext = self.encode_plaintext();
+        // Set the cookie timestamp to the current time for expiration.
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let ntp_now = crate::ntp_fp::ts_to_ntp(now.as_secs() as i64, now.subsec_nanos() as i64);
+        let cookie = NtsCookie {
+            timestamp: ntp_now,
+            ..self.clone()
+        };
+        let plaintext = cookie.encode_plaintext();
         let key = Key::<Aes128Siv>::from_slice(server_key);
         let mut siv = Aes128Siv::new(key);
         let empty: [&[u8]; 0] = [];
@@ -277,6 +294,9 @@ impl NtsCookie {
     ///
     /// `server_key` must be 32 bytes (256 bits).
     /// `data` must be a ciphertext previously produced by [`encrypt`].
+    ///
+    /// Validates the cookie's timestamp against [`NTS_COOKIE_MAX_AGE`].
+    /// Cookies older than the maximum age are rejected.
     pub fn decrypt(data: &[u8], server_key: &[u8]) -> Result<Self, String> {
         if server_key.len() != 32 {
             return Err(format!(
@@ -298,8 +318,23 @@ impl NtsCookie {
             .decrypt(empty, data)
             .map_err(|e| format!("AES-SIV decrypt failed: {e}"))?;
 
-        Self::decode_plaintext(&plaintext)
-            .ok_or_else(|| "decrypted plaintext is too short".to_string())
+        let cookie = Self::decode_plaintext(&plaintext)
+            .ok_or_else(|| "decrypted plaintext is too short".to_string())?;
+
+        // Validate cookie timestamp.
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_ntp = now.as_secs() as i64 + NTP_EPOCH_OFFSET as i64;
+        let cookie_age = now_ntp - cookie.timestamp.seconds;
+        if cookie_age < 0 || cookie_age as u64 > NTS_COOKIE_MAX_AGE {
+            return Err(format!(
+                "cookie expired: age={}s (max={}s)",
+                cookie_age, NTS_COOKIE_MAX_AGE,
+            ));
+        }
+
+        Ok(cookie)
     }
 
     /// Create a new cookie from a raw encrypted blob, decrypting with the
@@ -321,10 +356,11 @@ mod tests {
         let server_id = [0x01u8; SERVER_ID_SIZE];
         let c2s_key = [0xABu8; C2S_KEY_SIZE];
         let s2c_key = [0xCDu8; S2C_KEY_SIZE];
-        let timestamp = NtpTs64 {
-            seconds: 1_000_000,
-            fraction: 500,
-        };
+        // Use a recent timestamp so the cookie passes age validation.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let timestamp = crate::ntp_fp::ts_to_ntp(now.as_secs() as i64, now.subsec_nanos() as i64);
         NtsCookie::new(server_id, c2s_key, s2c_key, timestamp, 15)
     }
 
@@ -626,8 +662,7 @@ mod tests {
         assert_eq!(decoded.server_id, [0x01u8; SERVER_ID_SIZE]);
         assert_eq!(decoded.c2s_key, [0xABu8; C2S_KEY_SIZE]);
         assert_eq!(decoded.s2c_key, [0xCDu8; S2C_KEY_SIZE]);
-        assert_eq!(decoded.timestamp.seconds, 1_000_000);
-        assert_eq!(decoded.timestamp.fraction, 500);
+        // Timestamp and AEAD are set by make_test_cookie.
         assert_eq!(decoded.aead, 15);
     }
 
@@ -643,12 +678,25 @@ mod tests {
         );
 
         let decrypted = NtsCookie::decrypt(&encrypted, &key).expect("decrypt should succeed");
+
+        // Keys and AEAD algorithm should match.
         assert_eq!(decrypted.server_id, cookie.server_id);
         assert_eq!(decrypted.c2s_key, cookie.c2s_key);
         assert_eq!(decrypted.s2c_key, cookie.s2c_key);
-        assert_eq!(decrypted.timestamp.seconds, cookie.timestamp.seconds);
-        assert_eq!(decrypted.timestamp.fraction, cookie.timestamp.fraction);
         assert_eq!(decrypted.aead, cookie.aead);
+
+        // The timestamp is auto-set by encrypt() to the current time,
+        // so it won't match the original cookie's timestamp.  Just
+        // verify it's recent (within NTS_COOKIE_MAX_AGE).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_ntp = now.as_secs() as i64 + crate::ntp_types::NTP_EPOCH_OFFSET as i64;
+        let age = now_ntp - decrypted.timestamp.seconds;
+        assert!(
+            age >= 0 && (age as u64) < NTS_COOKIE_MAX_AGE,
+            "decrypted cookie timestamp should be recent"
+        );
     }
 
     #[test]
@@ -725,6 +773,53 @@ mod tests {
     fn test_cookie_decode_plaintext_short() {
         let result = NtsCookie::decode_plaintext(&[0u8; COOKIE_PLAINTEXT_MIN - 1]);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_cookie_expired_rejected() {
+        // Build an encrypted cookie with an ancient timestamp
+        // (NTP epoch = 1900) and verify that NtsCookie::decrypt()
+        // rejects it as expired.
+        //
+        // We encrypt manually (bypassing NtsCookie::encrypt() which
+        // auto-sets the timestamp to current time) to embed an old
+        // timestamp in the plaintext.
+        use aes_siv::siv::Aes128Siv;
+        use aes_siv::Key;
+
+        let key = test_key_32();
+        let aead_algo: u16 = 15;
+
+        let server_id = [0x01u8; SERVER_ID_SIZE];
+        let c2s_key = [0xABu8; C2S_KEY_SIZE];
+        let s2c_key = [0xCDu8; S2C_KEY_SIZE];
+        let secs: i64 = 0i64; // NTP epoch = 1900-01-01, way older than 1 day
+        let frac: u32 = 0;
+
+        let mut plaintext = Vec::with_capacity(COOKIE_PLAINTEXT_MIN);
+        plaintext.extend_from_slice(&server_id);
+        plaintext.extend_from_slice(&c2s_key);
+        plaintext.extend_from_slice(&s2c_key);
+        plaintext.extend_from_slice(&secs.to_be_bytes());
+        plaintext.extend_from_slice(&frac.to_be_bytes());
+        plaintext.extend_from_slice(&aead_algo.to_be_bytes());
+
+        let aes_key = Key::<Aes128Siv>::from_slice(&key);
+        let mut siv = Aes128Siv::new(aes_key);
+        let empty: [&[u8]; 0] = [];
+        let encrypted = siv
+            .encrypt(empty, &plaintext)
+            .expect("encrypt should succeed");
+
+        let result = NtsCookie::decrypt(&encrypted, &key);
+        assert!(
+            result.is_err(),
+            "decrypt with expired cookie timestamp should fail"
+        );
+        assert!(
+            result.unwrap_err().contains("expired"),
+            "error should mention cookie expiration"
+        );
     }
 
     #[test]

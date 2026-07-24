@@ -26,7 +26,7 @@ use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ntp_fp::{ntp_ts64_to_ntpts, ntp_ts_to_ntpts};
+use crate::ntp_fp::{ntp_ts64_to_wire, ntp_ts_to_ntpts};
 use crate::ntp_types::*;
 
 // ──── Constants ─────────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ impl NtpDigClient {
         let mut pkt = NtpPacket::zeroed();
         pkt.li_vn_mode =
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
-        pkt.transmit_ts = ntp_ts64_to_ntpts(Self::get_ntp_time());
+        pkt.transmit_ts = ntp_ts64_to_wire(Self::get_ntp_time());
 
         // T1: the transmit timestamp we are sending.
         let t1 = Self::get_ntp_time();

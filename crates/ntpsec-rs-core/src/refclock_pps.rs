@@ -17,7 +17,7 @@
 //     deduplication, packet-field mapping.
 // =============================================================================
 
-use crate::ntp_fp::{ntp_ts64_to_ntpts, ts_to_ntp};
+use crate::ntp_fp::{ntp_ts64_to_wire, ts_to_ntp};
 use crate::ntp_types::*;
 
 // ──── PPS kernel API constants and structures ───────────────────────────────
@@ -299,7 +299,7 @@ pub fn pps_stamp_to_packet(stamp: &PpsStamp) -> NtpPacket {
 
     // Convert from the 64-bit NtpTs64 used internally to the
     // 32.32 on-wire NtpTs format.
-    let wire_ts = ntp_ts64_to_ntpts(stamp.assert_time);
+    let wire_ts = ntp_ts64_to_wire(stamp.assert_time);
     pkt.reference_ts = wire_ts;
     pkt.receive_ts = wire_ts;
     pkt.transmit_ts = wire_ts;
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(pkt.reference_id, u32::from_be_bytes(*b"PPS\0"));
 
         // Verify timestamp conversion: NtpTs64 -> on-wire NtpTs.
-        let expected_wire = ntp_ts64_to_ntpts(stamp.assert_time);
+        let expected_wire = ntp_ts64_to_wire(stamp.assert_time);
         assert_eq!(pkt.reference_ts, expected_wire);
         assert_eq!(pkt.receive_ts, expected_wire);
         assert_eq!(pkt.transmit_ts, expected_wire);

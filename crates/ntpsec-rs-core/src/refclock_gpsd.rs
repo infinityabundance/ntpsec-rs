@@ -337,22 +337,16 @@ pub fn gpsd_fix_to_packet(fix: &GpsdFix, receive_time: NtpTs64) -> NtpPacket {
     pkt.root_dispersion = 0;
 
     // Reference timestamp: the GPS fix time.
-    pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_ntpts(fix.time);
+    pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_wire(fix.time);
 
     // Reference identifier: "GPSD" in ASCII.
     pkt.reference_id = u32::from_be_bytes(*b"GPSD");
 
     // Transmit timestamp: the GPS time from the fix.
-    pkt.transmit_ts = NtpTs {
-        seconds: fix.time.seconds as u32,
-        fraction: fix.time.fraction,
-    };
+    pkt.transmit_ts = crate::ntp_fp::ntp_ts64_to_wire(fix.time);
 
     // Receive timestamp: when we got the data from gpsd.
-    pkt.receive_ts = NtpTs {
-        seconds: receive_time.seconds as u32,
-        fraction: receive_time.fraction,
-    };
+    pkt.receive_ts = crate::ntp_fp::ntp_ts64_to_wire(receive_time);
 
     pkt
 }

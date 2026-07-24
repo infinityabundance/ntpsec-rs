@@ -456,7 +456,7 @@ pub struct NmeaSample {
 ///   - reference_id: NMEA ASCII
 ///   - reference/receive/transmit timestamps: GPS time
 pub fn nmea_sample_to_packet(sample: &NmeaSample, precision: i8) -> NtpPacket {
-    let ref_ts = ntp_ts64_to_ntpts(sample.gps_time);
+    let ref_ts = ntp_ts64_to_wire(sample.gps_time);
     NtpPacket {
         li_vn_mode: NtpPacket::set_li_vn_mode(sample.leap, NtpVersion::V4, NtpMode::Server),
         stratum: 0, // Refclock; stratum determined upstream
@@ -723,11 +723,8 @@ fn sentence_to_unix(
 }
 
 /// Convert an `NtpTs64` to the wire-format `NtpTs` (truncating to u32 seconds).
-fn ntp_ts64_to_ntpts(ts: NtpTs64) -> NtpTs {
-    NtpTs {
-        seconds: ts.seconds as u32,
-        fraction: ts.fraction,
-    }
+fn ntp_ts64_to_wire(ts: NtpTs64) -> NtpTs {
+    crate::ntp_fp::ntp_ts64_to_wire(ts)
 }
 
 // =============================================================================
@@ -929,7 +926,7 @@ mod tests {
         assert_eq!(packet.reference_id, 0x4E_4D_45_41);
 
         // GPS time should appear in reference/receive/transmit timestamps.
-        let expected_ref_ts = ntp_ts64_to_ntpts(ts_to_ntp(gps_unixtime, 0));
+        let expected_ref_ts = ntp_ts64_to_wire(ts_to_ntp(gps_unixtime, 0));
         assert_eq!(packet.reference_ts, expected_ref_ts);
         assert_eq!(packet.receive_ts, expected_ref_ts);
         assert_eq!(packet.transmit_ts, expected_ref_ts);

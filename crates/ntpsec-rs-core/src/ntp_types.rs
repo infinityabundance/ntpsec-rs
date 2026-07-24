@@ -70,6 +70,18 @@ pub struct NtpTs64 {
     pub fraction: u32,
 }
 
+impl NtpTs64 {
+    /// Return the seconds component of the NTP timestamp.
+    pub fn secs(&self) -> i64 {
+        self.seconds
+    }
+
+    /// Return the fractional component of the NTP timestamp.
+    pub fn frac(&self) -> u32 {
+        self.fraction
+    }
+}
+
 /// Absolute-precision timestamp (l_fp in ntpsec C — "long fixed-point").
 pub type LFP = NtpTs64;
 
