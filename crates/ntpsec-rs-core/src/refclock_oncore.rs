@@ -48,6 +48,7 @@ enum OncoreState {
 ///
 /// ## C-oracle struct
 ///   `struct instance` in ntpd/refclock_oncore.c
+#[derive(Debug)]
 pub struct OncoreRefclock {
     pub unit: u8,
     path: String,

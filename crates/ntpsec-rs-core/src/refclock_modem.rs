@@ -35,6 +35,7 @@ enum ModemState {
 ///
 /// ## C-oracle struct
 ///   `struct modemunit` in ntpd/refclock_modem.c
+#[derive(Debug)]
 pub struct ModemRefclock {
     pub unit: u8,
     path: String,

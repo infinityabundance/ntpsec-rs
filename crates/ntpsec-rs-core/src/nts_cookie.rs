@@ -60,6 +60,7 @@ pub struct CookieKeyIndex(pub u32);
 /// Each key is identified by a [`CookieKeyIndex`] (a 32-bit integer).
 /// Encryption always picks the most recently added key; decryption
 /// looks up the key by its index from the envelope.
+#[derive(Debug)]
 pub struct CookieCipher {
     keys: Vec<(CookieKeyIndex, [u8; 32])>,
 }

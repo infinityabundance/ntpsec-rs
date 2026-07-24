@@ -26,6 +26,7 @@ use crate::ntp_types::LeapIndicator;
 ///
 /// ## C-oracle struct
 ///   `struct zyferunit` in ntpd/refclock_zyfer.c
+#[derive(Debug)]
 pub struct ZyferRefclock {
     pub unit: u8,
     path: String,

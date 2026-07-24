@@ -54,6 +54,7 @@ impl JjyReceiverType {
 ///
 /// ## C-oracle struct
 ///   `struct jjyunit` in ntpd/refclock_jjy.c
+#[derive(Debug)]
 pub struct JjyRefclock {
     pub unit: u8,
     path: String,

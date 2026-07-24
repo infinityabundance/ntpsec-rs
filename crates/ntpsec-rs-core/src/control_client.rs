@@ -440,7 +440,7 @@ impl SystemVariables {
         let ev_cnt = sys_status::decode_event_count(s);
         let ev_code = sys_status::decode_event_code(s);
 
-        let ev_name = ntpq_event_name(ev_code);
+        let ev_name = system_event_name(ev_code);
         let freq_mode = if s & 0x0080 != 0 { ", freq_mode" } else { "" };
         format!(
             "{}, {}, {} {}{}",
@@ -1491,6 +1491,27 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
     out
 }
 
+/// Map a system event code (0-15) to its ntpq display name.
+///
+/// NTPsec C ntpq uses a different event name table for system status
+/// vs. peer status.  System events (from sys_event[] in ntp_control.c):
+///   0=unspec, 1=no_reply, 2=no_reach, 3=fault, 4=freq_mode
+///
+/// Without this separate function, system event code 4 (freq_mode)
+/// would incorrectly display as "reach_brd" (peer event code 4).
+fn system_event_name(code: u16) -> &'static str {
+    match code {
+        0 => "unspec",
+        1 => "no_reply",
+        2 => "no_reach",
+        3 => "fault",
+        4 => "freq_mode",
+        5 => "xleave",
+        6 => "xtime",
+        _ => "event",
+    }
+}
+
 /// Map a peer event code (0-15) to its ntpq display name.
 fn ntpq_event_name(code: u16) -> &'static str {
     match code {
@@ -1554,7 +1575,7 @@ pub fn format_peers(rows: &[PeerRow]) -> String {
         };
         let reach_str = format!("{:o}", row.reach); // Octal display
         out.push_str(&format!(
-            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.2} {:>8.2} {:>7.2}\n",
+            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
             row.tally,
             row.remote,
             row.refid,
@@ -2065,7 +2086,7 @@ mod tests {
         let sv = SystemVariables::from_text(text, 0, 0x0622);
         let out = format_readvar(&sv);
         assert!(out.contains("associd=0"));
-        assert!(out.contains("leap_none, sync_ntp, 2 no_reply"));
+        assert!(out.contains("leap_none, sync_ntp, 2 no_reach"));
         assert!(out.contains("stratum=2"));
     }
 
@@ -2088,7 +2109,7 @@ mod tests {
         let sv = SystemVariables::from_text(text, 0, 0x0322);
         let out = format_readvar(&sv);
         let expected = concat!(
-            "associd=0 status=0322 leap_none, sync_ntp, 2 no_reply,\n",
+            "associd=0 status=0322 leap_none, sync_ntp, 2 no_reach,\n",
             "version=ntpd 4.2.8p3, processor=x86_64, system=Linux/4.19.0,\n",
             "stratum=2, precision=-24, rootdelay=0.001, rootdisp=0.005,\n",
             "refid=.NTP., reftime=0, peer=0, tc=6, offset=0.002,\n",
@@ -2309,12 +2330,12 @@ mod tests {
         );
         // Row 1
         expected.push_str(&format!(
-            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.2} {:>8.2} {:>7.2}\n",
+            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
             '*', "time.example.com", ".NTP.", 2, 'u', "10", 64, "377", 0.001, 0.002, 0.001,
         ));
         // Row 2
         expected.push_str(&format!(
-            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.2} {:>8.2} {:>7.2}\n",
+            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
             ' ', "192.168.1.100", ".GPS.", 1, 'u', "-", 64, "377", 0.003, -0.001, 0.002,
         ));
         assert_eq!(out, expected, "frozen peers output mismatch");
@@ -2606,7 +2627,7 @@ mod tests {
         // Status 0x0622: li=0(none), source=6(CTL_SST_TS_NTP), count=2, event=2(no_reply)
         let out = format_readvar(&sv);
         assert!(out.starts_with("associd=0 status=0622 "));
-        assert!(out.contains("leap_none, sync_ntp, 2 no_reply"));
+        assert!(out.contains("leap_none, sync_ntp, 2 no_reach"));
         assert!(out.contains("stratum=2"));
         assert!(out.contains("offset=0.005"));
     }

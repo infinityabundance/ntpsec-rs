@@ -52,6 +52,7 @@ pub enum TrimbleClockType {
 ///
 /// ## C-oracle struct
 ///   `struct trimble_unit` in ntpd/refclock_trimble.c
+#[derive(Debug)]
 pub struct TrimbleRefclock {
     pub unit: u8,
     path: String,

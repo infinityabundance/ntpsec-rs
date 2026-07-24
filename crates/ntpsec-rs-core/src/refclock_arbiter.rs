@@ -24,6 +24,7 @@ use crate::ntp_types::LeapIndicator;
 ///
 /// ## C-oracle struct
 ///   `struct arbunit` in ntpd/refclock_arbiter.c
+#[derive(Debug)]
 pub struct ArbiterRefclock {
     pub unit: u8,
     path: String,

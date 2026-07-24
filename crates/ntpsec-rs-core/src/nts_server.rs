@@ -796,7 +796,7 @@ fn build_cookie_plaintext(aead_alg: u16, c2s_key: &[u8; 32], s2c_key: &[u8; 32])
 // ──── Configuration ────────────────────────────────────────────────────────
 
 /// Configuration for the NTS-KE server.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct NtsServerConfig {
     pub key_file: String,
     pub cert_file: String,

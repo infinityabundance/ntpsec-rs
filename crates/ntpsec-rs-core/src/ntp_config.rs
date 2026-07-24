@@ -2,6 +2,7 @@
 // Full NTPsec configuration parser — scanner + config tree.
 // =============================================================================
 
+use crate::nts_server::NtsServerConfig;
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,6 +275,7 @@ pub const RECOGNIZED_DIRECTIVES: &[&str] = &[
     "nopeer",
     "notrap",
     "notrust",
+    "nts",
     "ntpsigndsocket",
     "orphan",
     "peer",
@@ -351,6 +353,10 @@ pub enum ConfigOption {
     Keys(String),
     TrustedKey(u32),
     ControlKey(u32),
+    NtsServer {
+        key_file: String,
+        cert_file: String,
+    },
     Other {
         directive: String,
         args: Vec<String>,
@@ -374,6 +380,7 @@ impl ConfigOption {
             Self::Keys(_) => "keys",
             Self::TrustedKey(_) => "trustedkey",
             Self::ControlKey(_) => "controlkey",
+            Self::NtsServer { .. } => "nts",
             Self::Other { directive, .. } => directive,
         }
     }
@@ -383,6 +390,8 @@ impl ConfigOption {
 pub struct ConfigTree {
     pub options: Vec<ConfigOption>,
     pub errors: Vec<String>,
+    /// NTS-KE server configuration, if any.
+    pub nts_config: Option<NtsServerConfig>,
 }
 
 impl ConfigTree {
@@ -465,6 +474,22 @@ pub fn parse_config(input: &str) -> ConfigTree {
             _ => continue,
         }
     }
+
+    // ── Extract NTS-KE server configuration, if any ────────────────────
+    let nts_opts: Vec<&ConfigOption> = tree.find_all("nts");
+    if let Some(ConfigOption::NtsServer {
+        key_file,
+        cert_file,
+    }) = nts_opts.first()
+    {
+        tree.nts_config = Some(NtsServerConfig {
+            key_file: key_file.clone(),
+            cert_file: cert_file.clone(),
+            aead_algorithms: vec![15], // AES_SIV_CMAC_256 (RFC 5297)
+            cookie_cipher: crate::nts_cookie::CookieCipher::new(),
+        });
+    }
+
     tree
 }
 
@@ -570,6 +595,41 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
             .and_then(|s| s.parse::<u32>().ok())
             .ok_or("controlkey requires key ID".to_string())
             .map(ConfigOption::ControlKey),
+        "nts" => {
+            // nts key <path> cert <path>
+            let mut key_file = String::new();
+            let mut cert_file = String::new();
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "key" => {
+                        i += 1;
+                        if i < args.len() {
+                            key_file = args[i].clone();
+                        } else {
+                            return Err("nts key requires a path argument".to_string());
+                        }
+                    }
+                    "cert" => {
+                        i += 1;
+                        if i < args.len() {
+                            cert_file = args[i].clone();
+                        } else {
+                            return Err("nts cert requires a path argument".to_string());
+                        }
+                    }
+                    _ => return Err(format!("unknown nts option '{}'", args[i])),
+                }
+                i += 1;
+            }
+            if key_file.is_empty() || cert_file.is_empty() {
+                return Err("nts requires both 'key' and 'cert' options".to_string());
+            }
+            Ok(ConfigOption::NtsServer {
+                key_file,
+                cert_file,
+            })
+        }
         _ => Ok(ConfigOption::Other {
             directive: d.to_string(),
             args: args.to_vec(),

@@ -3,6 +3,19 @@
 // Forensic Rust reconstruction of ntpd.  Phase 2.5A: process lifecycle,
 // signal handling, graceful shutdown, configuration reload.
 //
+// ## Production daemon features
+//
+//   - Daemon mode: fork to background (default), `-n` to stay in foreground
+//   - PID file: `-p`/`--pidfile` writes PID to file, deleted on shutdown
+//   - Log file: `-l`/`--logfile` redirects stderr to file
+//   - chroot jail: `-i`/`--jaildir` (before privilege drop)
+//   - Interface binding: `-I`/--interface` for specific listen addresses
+//   - Key file: `-k`/--keyfile` loads symmetric keys
+//   - Trusted keys: `-t`/--trustedkey` marks key IDs as trusted
+//   - Wait-sync: `-w`/--wait-sync` blocks until clock synchronized
+//   - Nice: `-N`/--nice` sets high scheduling priority
+//   - IPv4/IPv6: `-4`/`-6` force address family
+//
 // ## Signal handling
 //
 //   SIGINT / SIGTERM  → graceful shutdown (drift persist, socket close, exit 0)
@@ -16,6 +29,7 @@
 //
 // =============================================================================
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -23,10 +37,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use ntpsec_rs_core::daemon_engine::*;
-use ntpsec_rs_core::daemon_engine::*;
 use ntpsec_rs_core::ntp_config::*;
-use ntpsec_rs_core::ntp_config::*;
-use ntpsec_rs_core::ntp_io::*;
 use ntpsec_rs_core::ntp_io::*;
 use ntpsec_rs_core::ntp_sandbox;
 
@@ -61,7 +72,7 @@ struct Cli {
     driftfile: Option<PathBuf>,
 
     /// Lab daemon mode (deterministic, no real I/O)
-    #[arg(short = 'l', long)]
+    #[arg(long)]
     lab_daemon: bool,
 
     /// Enable trace recording
@@ -79,6 +90,75 @@ struct Cli {
     /// Drop privileges to this user after binding
     #[arg(short = 'u', long)]
     user: Option<String>,
+
+    // ──── Production daemon flags ────────────────────────────────────
+    /// Path to PID file (e.g. /var/run/ntpd.pid)
+    #[arg(short = 'p', long)]
+    pidfile: Option<PathBuf>,
+
+    /// Path to log file
+    #[arg(short = 'l', long)]
+    logfile: Option<PathBuf>,
+
+    /// chroot jail directory
+    #[arg(short = 'i', long)]
+    jaildir: Option<PathBuf>,
+
+    /// Listen on a specific network interface (IP or interface name; repeatable)
+    #[arg(short = 'I', long)]
+    interface: Vec<String>,
+
+    /// Path to symmetric key file (ntp.keys)
+    #[arg(short = 'k', long)]
+    keyfile: Option<PathBuf>,
+
+    /// Trusted key numbers (repeatable)
+    #[arg(short = 't', long)]
+    trustedkey: Vec<u32>,
+
+    /// Wait for clock synchronization before entering main loop
+    #[arg(short = 'w', long)]
+    wait_sync: bool,
+
+    /// Run at high priority (nice -10)
+    #[arg(short = 'N', long)]
+    nice: bool,
+
+    /// Force IPv4 DNS resolution
+    #[arg(short = '4')]
+    ipv4: bool,
+
+    /// Force IPv6 DNS resolution
+    #[arg(short = '6')]
+    ipv6: bool,
+}
+
+/// Resolved listen addresses from CLI `-I` flags (empty = bind all).
+fn resolve_listen_addresses(cli: &Cli) -> Vec<String> {
+    if cli.interface.is_empty() {
+        // Default: bind all interfaces with address-family awareness
+        if cli.ipv6 {
+            vec!["[::]:123".to_string()]
+        } else if cli.ipv4 {
+            vec!["0.0.0.0:123".to_string()]
+        } else {
+            vec!["0.0.0.0:123".to_string()]
+        }
+    } else {
+        // User specified explicit interfaces/IPs
+        cli.interface
+            .iter()
+            .map(|iface| {
+                // If it already looks like an address with port, use as-is
+                if iface.contains(':') {
+                    iface.clone()
+                } else {
+                    // Otherwise treat as IP address on port 123
+                    format!("{iface}:123")
+                }
+            })
+            .collect()
+    }
 }
 
 // ──── Main ────────────────────────────────────────────────────────────────
@@ -162,18 +242,134 @@ fn main() {
         execute_actions(&refclock_actions, &mut clock, &mut network, &mut store);
     }
 
-    // ──── Bind Privileged Port ───────────────────────────────────────
-    if let Err(e) = network.bind("0.0.0.0:123") {
-        tracing::error!("Cannot bind to port 123: {e}");
+    // ──── Bind Privileged Port(s) ──────────────────────────────────────
+    let addrs = resolve_listen_addresses(&cli);
+    for addr in &addrs {
+        if let Err(e) = network.bind(addr) {
+            tracing::error!("Cannot bind to {addr}: {e}");
+            std::process::exit(2);
+        }
+        tracing::info!("Bound to {addr}");
+    }
+    if addrs.is_empty() {
+        tracing::error!("No listen addresses configured");
         std::process::exit(2);
     }
-    tracing::info!("Bound to port 123/udp");
 
-    // Query-only mode
+    // Query-only mode (no forking)
     if cli.query {
         tracing::info!("Query-only mode: polling peers and setting clock");
         run_query_mode(&mut engine, &mut clock, &mut network, &mut store);
         return;
+    }
+
+    // ──── Daemonize: fork to background ─────────────────────────────
+    // Unless `-n` is given, fork now.  The parent prints the child PID
+    // and exits immediately.  The child continues as a background daemon.
+    if !cli.nofork {
+        // fork() returns 0 to the child, the child's PID to the parent,
+        // or -1 on error.
+        let pid = unsafe { libc::fork() };
+        if pid == -1 {
+            eprintln!("fork failed: {}", std::io::Error::last_os_error());
+            std::process::exit(1);
+        } else if pid == 0 {
+            // ── Child ──
+            // Create a new session (become session leader, detach from terminal)
+            unsafe { libc::setsid() };
+        } else {
+            // ── Parent ──
+            // Print PID so init/supervisor can track the child
+            println!("ntpd-rs started, PID: {pid}");
+
+            // Write PID file from the parent (we know the child's PID)
+            if let Some(ref pidfile) = cli.pidfile {
+                write_pid_file(pidfile, pid);
+            }
+
+            std::process::exit(0);
+        }
+    }
+
+    // ── Child (or foreground) continues here ──
+
+    // Redirect stdin to /dev/null (daemon convention — never read from tty)
+    if !cli.nofork {
+        if let Ok(null) = std::fs::File::open("/dev/null") {
+            let fd = std::os::unix::io::IntoRawFd::into_raw_fd(null);
+            unsafe { libc::dup2(fd, libc::STDIN_FILENO) };
+        }
+    }
+
+    // Redirect stderr (and stdout) to log file if `-l` given
+    if let Some(ref logfile) = cli.logfile {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logfile)
+        {
+            let fd = std::os::unix::io::IntoRawFd::into_raw_fd(file);
+            unsafe {
+                libc::dup2(fd, libc::STDOUT_FILENO);
+                libc::dup2(fd, libc::STDERR_FILENO);
+            }
+            tracing::info!("Logging to {:?}", logfile);
+        } else {
+            eprintln!("Warning: cannot open logfile {:?}", logfile);
+        }
+    } else if !cli.nofork {
+        // Daemonized without explicit logfile: redirect stdout/stderr to /dev/null
+        if let Ok(null) = std::fs::File::open("/dev/null") {
+            let fd = std::os::unix::io::IntoRawFd::into_raw_fd(null);
+            unsafe {
+                libc::dup2(fd, libc::STDOUT_FILENO);
+                libc::dup2(fd, libc::STDERR_FILENO);
+            }
+        }
+    }
+
+    // ──── Write PID file (child PID) ────────────────────────────────
+    // If daemonized, the parent already wrote it above; this is for the
+    // foreground (`-n`) case where the PID file should still be written.
+    if cli.nofork {
+        if let Some(ref pidfile) = cli.pidfile {
+            let pid = unsafe { libc::getpid() };
+            write_pid_file(pidfile, pid);
+        }
+    }
+
+    // ──── Chroot Jail ──────────────────────────────────────────────
+    // Must happen BEFORE privilege drop (needs root / CAP_SYS_CHROOT).
+    // The admin must ensure all required paths (drift, stats, keys)
+    // exist inside the jail directory.
+    if let Some(ref jaildir) = cli.jaildir {
+        // Ensure the jail directory exists
+        if let Err(e) = std::fs::create_dir_all(jaildir) {
+            eprintln!("Cannot create jaildir {:?}: {e}", jaildir);
+            std::process::exit(1);
+        }
+        let c_jail = std::ffi::CString::new(jaildir.as_os_str().as_bytes()).unwrap_or_else(|_| {
+            eprintln!("Jaildir path contains NUL byte");
+            std::process::exit(1);
+        });
+        let ret = unsafe { libc::chroot(c_jail.as_ptr()) };
+        if ret != 0 {
+            eprintln!(
+                "chroot to {:?} failed: {}",
+                jaildir,
+                std::io::Error::last_os_error()
+            );
+            std::process::exit(1);
+        }
+        // Change working directory to root inside the jail
+        if unsafe { libc::chdir(std::ffi::CString::new("/").unwrap().as_ptr()) } != 0 {
+            eprintln!(
+                "chdir after chroot failed: {}",
+                std::io::Error::last_os_error()
+            );
+            std::process::exit(1);
+        }
+        tracing::info!("chroot to {:?}", jaildir);
     }
 
     // ──── Prepare State Paths Before Drop ─────────────────────────
@@ -215,6 +411,48 @@ fn main() {
         }
     }
 
+    // ──── Start NTS-KE Server (privileges already dropped) ──────────
+    if let Some(nts_config) = &engine.config.nts_config {
+        let nts_cfg = nts_config.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = ntpsec_rs_core::nts_server::start_nts_ke_server(nts_cfg) {
+                tracing::error!("NTS-KE server failed: {e}");
+            }
+        });
+        tracing::info!("NTS-KE server started on port 4460");
+    }
+
+    // ──── Apply Nice (high priority) ───────────────────────────────
+    if cli.nice {
+        // PRIO_PROCESS = 0, who = 0 (calling process)
+        let ret = unsafe { libc::setpriority(0, 0, -10) };
+        if ret != 0 {
+            tracing::warn!(
+                "setpriority failed (not root?): {}",
+                std::io::Error::last_os_error()
+            );
+        } else {
+            tracing::info!("Priority set to -10 (high)");
+        }
+    }
+
+    // ──── Load Key File from CLI (-k) ──────────────────────────────
+    if let Some(ref keyfile) = cli.keyfile {
+        match std::fs::read_to_string(keyfile) {
+            Ok(content) => match engine.auth.parse_keys_file(&content) {
+                Ok(count) => tracing::info!("Loaded {} keys from '{}'", count, keyfile.display()),
+                Err(e) => tracing::warn!("Failed to parse keys from '{}': {e}", keyfile.display()),
+            },
+            Err(e) => tracing::warn!("Cannot read key file '{}': {e}", keyfile.display()),
+        }
+    }
+
+    // ──── Mark Trusted Keys (-t) ───────────────────────────────────
+    for key_id in &cli.trustedkey {
+        engine.auth.add_trusted_key(*key_id);
+        tracing::info!("Trusted key {}", key_id);
+    }
+
     // ──── Signal Handling (must be BEFORE seccomp — threads need clone/clone3) ─
     let running = Arc::new(AtomicBool::new(true));
     let wants_reload = Arc::new(AtomicBool::new(false));
@@ -223,15 +461,53 @@ fn main() {
     init_signal_handlers(running.clone(), wants_reload.clone(), sig_exit_code.clone());
 
     // ──── Seccomp Sandbox (after signal threads are created) ────────
-    // When --seccomp is explicitly requested, fail closed — don't run
-    // without the sandbox. A hypothetical --seccomp-optional could permit
-    // fallback, but plain --seccomp means the filter is required.
     if cli.seccomp {
         ntp_sandbox::enable_sandbox().unwrap_or_else(|e| {
             tracing::error!("Seccomp requested but unavailable: {e}");
             std::process::exit(1);
         });
         tracing::info!("Seccomp sandbox enabled");
+    }
+
+    // ──── Wait for Synchronization (-w) ─────────────────────────────
+    if cli.wait_sync {
+        tracing::info!("Waiting for clock synchronization...");
+        let max_wait_secs = 300; // 5 minute timeout
+        let start = std::time::Instant::now();
+        loop {
+            // Process timers
+            let now = clock.now();
+            let timer_actions = engine.tick(now);
+            execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
+
+            // Process any arriving packets
+            match network.recv() {
+                Ok(dgram) => {
+                    let event = DaemonEvent::PacketReceived(dgram);
+                    let actions = engine.handle(event);
+                    execute_actions(&actions, &mut clock, &mut network, &mut store);
+                }
+                Err(IoError::RecvFailed(_)) => {}
+                Err(_) => {}
+            }
+
+            // Check if synchronized (stratum < 16 = synchronized)
+            if engine.system.stratum < 16 {
+                tracing::info!(
+                    "Clock synchronized (stratum={}, offset={:.6}s)",
+                    engine.system.stratum,
+                    engine.system.sys_offset,
+                );
+                break;
+            }
+
+            if start.elapsed().as_secs() > max_wait_secs as u64 {
+                tracing::warn!("Wait-sync timeout after {max_wait_secs}s — continuing anyway");
+                break;
+            }
+
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     // ──── Main Event Loop ────────────────────────────────────────────
@@ -260,6 +536,15 @@ fn main() {
                         let new_key_paths = collect_key_paths(&new_engine.config);
                         match load_key_files(&mut new_engine.auth, &new_key_paths) {
                             Ok(()) => {
+                                // Re-apply CLI trusted keys and keyfile on reload
+                                for key_id in &cli.trustedkey {
+                                    new_engine.auth.add_trusted_key(*key_id);
+                                }
+                                if let Some(ref keyfile) = cli.keyfile {
+                                    if let Ok(content) = std::fs::read_to_string(keyfile) {
+                                        let _ = new_engine.auth.parse_keys_file(&content);
+                                    }
+                                }
                                 // Transactional swap
                                 engine = new_engine;
                                 tracing::info!("Configuration reloaded (transactional)");
@@ -407,13 +692,35 @@ fn main() {
     drop(network);
     tracing::info!("Sockets closed");
 
-    // 4. Explicit exit code
+    // 4. Remove PID file
+    if let Some(ref pidfile) = cli.pidfile {
+        let _ = std::fs::remove_file(pidfile);
+        tracing::info!("Removed PID file {:?}", pidfile);
+    }
+
+    // 5. Explicit exit code
     let exit_code = {
         let guard = sig_exit_code.lock().unwrap();
         *guard
     };
     tracing::info!("ntpd-rs stopped (exit code {})", exit_code);
     std::process::exit(exit_code);
+}
+
+/// Write the given PID to the specified PID file.
+fn write_pid_file(path: &std::path::Path, pid: i32) {
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(path, format!("{pid}\n")) {
+        Ok(()) => {
+            // Best-effort: we already wrote the file
+        }
+        Err(e) => {
+            eprintln!("Warning: cannot write PID file {:?}: {e}", path);
+        }
+    }
 }
 
 // ──── Signal Handling ─────────────────────────────────────────────────────
@@ -875,6 +1182,70 @@ mod tests {
     fn test_cli_driftfile() {
         let cli = Cli::parse_from(["ntpd-rs", "-f", "/tmp/drift"]);
         assert_eq!(cli.driftfile, Some(PathBuf::from("/tmp/drift")));
+    }
+
+    #[test]
+    fn test_cli_production_flags() {
+        let cli = Cli::parse_from([
+            "ntpd-rs",
+            "-p",
+            "/var/run/ntpd.pid",
+            "-l",
+            "/var/log/ntp.log",
+            "-i",
+            "/var/empty",
+            "-I",
+            "192.168.1.1",
+            "-I",
+            "10.0.0.1",
+            "-k",
+            "/etc/ntp.keys",
+            "-t",
+            "1",
+            "-t",
+            "2",
+            "-w",
+            "-N",
+            "-4",
+        ]);
+        assert_eq!(cli.pidfile, Some(PathBuf::from("/var/run/ntpd.pid")));
+        assert_eq!(cli.logfile, Some(PathBuf::from("/var/log/ntp.log")));
+        assert_eq!(cli.jaildir, Some(PathBuf::from("/var/empty")));
+        assert_eq!(cli.interface, vec!["192.168.1.1", "10.0.0.1"]);
+        assert_eq!(cli.keyfile, Some(PathBuf::from("/etc/ntp.keys")));
+        assert_eq!(cli.trustedkey, vec![1, 2]);
+        assert!(cli.wait_sync);
+        assert!(cli.nice);
+        assert!(cli.ipv4);
+        assert!(!cli.ipv6);
+    }
+
+    #[test]
+    fn test_resolve_listen_addresses_default() {
+        let cli = Cli::parse_from(["ntpd-rs", "-n"]);
+        let addrs = resolve_listen_addresses(&cli);
+        assert_eq!(addrs, vec!["0.0.0.0:123"]);
+    }
+
+    #[test]
+    fn test_resolve_listen_addresses_ipv6() {
+        let cli = Cli::parse_from(["ntpd-rs", "-n", "-6"]);
+        let addrs = resolve_listen_addresses(&cli);
+        assert_eq!(addrs, vec!["[::]:123"]);
+    }
+
+    #[test]
+    fn test_resolve_listen_addresses_custom() {
+        let cli = Cli::parse_from(["ntpd-rs", "-n", "-I", "192.168.1.100", "-I", "10.0.0.1"]);
+        let addrs = resolve_listen_addresses(&cli);
+        assert_eq!(addrs, vec!["192.168.1.100:123", "10.0.0.1:123"]);
+    }
+
+    #[test]
+    fn test_resolve_listen_addresses_with_port() {
+        let cli = Cli::parse_from(["ntpd-rs", "-n", "-I", "192.168.1.100:456"]);
+        let addrs = resolve_listen_addresses(&cli);
+        assert_eq!(addrs, vec!["192.168.1.100:456"]);
     }
 
     #[test]

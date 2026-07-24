@@ -25,6 +25,7 @@ use crate::ntp_types::LeapIndicator;
 ///
 /// ## C-oracle struct
 ///   `struct hpgpsunit` in ntpd/refclock_hpgps.c
+#[derive(Debug)]
 pub struct HpGpsRefclock {
     pub unit: u8,
     path: String,

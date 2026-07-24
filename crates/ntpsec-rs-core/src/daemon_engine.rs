@@ -40,10 +40,20 @@ use crate::ntp_proto::*;
 use crate::ntp_restrict::*;
 use crate::ntp_timer::*;
 use crate::ntp_types::*;
+use crate::refclock_arbiter::ArbiterRefclock;
+use crate::refclock_generic::GenericRefclock;
 use crate::refclock_gpsd::GpsdRefclock;
+use crate::refclock_hpgps::HpGpsRefclock;
+use crate::refclock_jjy::JjyRefclock;
+use crate::refclock_modem::ModemRefclock;
 use crate::refclock_nmea::NmeaRefclock;
+use crate::refclock_oncore::OncoreRefclock;
 use crate::refclock_pps::PpsRefclock;
 use crate::refclock_shm::ShmRefclock;
+use crate::refclock_spectracom::SpectracomRefclock;
+use crate::refclock_trimble::TrimbleRefclock;
+use crate::refclock_truetime::TrueTimeRefclock;
+use crate::refclock_zyfer::ZyferRefclock;
 
 /// A pending NTP request awaiting a server response.
 /// Keyed by (originate_ts, destination) to prevent cross-peer confusion
@@ -69,16 +79,38 @@ pub enum RefclockDriver {
     Pps(PpsRefclock),
     Nmea(NmeaRefclock),
     Gpsd(GpsdRefclock),
+    Jjy(JjyRefclock),
+    Oncore(OncoreRefclock),
+    Trimble(TrimbleRefclock),
+    TrueTime(TrueTimeRefclock),
+    Spectracom(SpectracomRefclock),
+    Arbiter(ArbiterRefclock),
+    HpGps(HpGpsRefclock),
+    Modem(ModemRefclock),
+    Zyfer(ZyferRefclock),
+    Generic(GenericRefclock),
 }
 
 impl RefclockDriver {
-    /// Get the driver type number (28=SHM, 22=PPS, 19=NMEA, 16=GPSD).
+    /// Get the driver type number (28=SHM, 22=PPS, 19=NMEA, 16=GPSD,
+    /// 40=JJY, 30=Oncore, 29=Trimble, 5=TrueTime, 4=Spectracom,
+    /// 11=Arbiter, 26=HPGPS, 18=Modem, 42=Zyfer, 8=Generic).
     pub fn driver_type(&self) -> u8 {
         match self {
             RefclockDriver::Shm(_) => 28,
             RefclockDriver::Pps(_) => 22,
             RefclockDriver::Nmea(_) => 19,
             RefclockDriver::Gpsd(_) => 16,
+            RefclockDriver::Jjy(_) => 40,
+            RefclockDriver::Oncore(_) => 30,
+            RefclockDriver::Trimble(_) => 29,
+            RefclockDriver::TrueTime(_) => 5,
+            RefclockDriver::Spectracom(_) => 4,
+            RefclockDriver::Arbiter(_) => 11,
+            RefclockDriver::HpGps(_) => 26,
+            RefclockDriver::Modem(_) => 18,
+            RefclockDriver::Zyfer(_) => 42,
+            RefclockDriver::Generic(_) => 8,
         }
     }
 }
@@ -220,6 +252,228 @@ impl RefclockManager {
                         }
                     }
                 }
+                // ── JJY refclock (type 40) ─────────────────────────────
+                40 => {
+                    let mut jjy = JjyRefclock::new(inst.unit);
+                    let path = format!("/dev/jjy{}", inst.unit);
+                    match jjy.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "JJY refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Jjy(jjy))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "JJY refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Oncore refclock (type 30) ──────────────────────────
+                30 => {
+                    let mut oncore = OncoreRefclock::new(inst.unit);
+                    let path = format!("/dev/oncore{}", inst.unit);
+                    match oncore.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Oncore refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Oncore(oncore))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Oncore refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Trimble refclock (type 29) ─────────────────────────
+                29 => {
+                    let mut trimble = TrimbleRefclock::new(inst.unit);
+                    let path = format!("/dev/trimble{}", inst.unit);
+                    match trimble.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Trimble refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Trimble(trimble))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Trimble refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── TrueTime refclock (type 5) ────────────────────────
+                5 => {
+                    let mut truetime = TrueTimeRefclock::new(inst.unit);
+                    let path = format!("/dev/true{}", inst.unit);
+                    match truetime.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "TrueTime refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::TrueTime(truetime))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "TrueTime refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Spectracom refclock (type 4) ───────────────────────
+                4 => {
+                    let mut spectracom = SpectracomRefclock::new(inst.unit);
+                    let path = format!("/dev/spectracom{}", inst.unit);
+                    match spectracom.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Spectracom refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Spectracom(spectracom))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Spectracom refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Arbiter refclock (type 11) ─────────────────────────
+                11 => {
+                    let mut arbiter = ArbiterRefclock::new(inst.unit);
+                    let path = format!("/dev/arbiter{}", inst.unit);
+                    match arbiter.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Arbiter refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Arbiter(arbiter))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Arbiter refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── HP GPS refclock (type 26) ──────────────────────────
+                26 => {
+                    let mut hpgps = HpGpsRefclock::new(inst.unit);
+                    let path = format!("/dev/hpgps{}", inst.unit);
+                    match hpgps.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "HP GPS refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::HpGps(hpgps))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "HP GPS refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Modem refclock (type 18) ───────────────────────────
+                18 => {
+                    let mut modem = ModemRefclock::new(inst.unit);
+                    let path = format!("/dev/modem{}", inst.unit);
+                    match modem.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Modem refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Modem(modem))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Modem refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Zyfer refclock (type 42) ───────────────────────────
+                42 => {
+                    let mut zyfer = ZyferRefclock::new(inst.unit);
+                    let path = format!("/dev/zyfer{}", inst.unit);
+                    match zyfer.open(&path) {
+                        Ok(()) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Zyfer refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Zyfer(zyfer))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Zyfer refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
+                // ── Generic refclock (type 8) ─────────────────────────
+                8 => {
+                    match GenericRefclock::new(
+                        inst.unit,
+                        &format!("/dev/generic{}", inst.unit),
+                        "%H%M%S",
+                    ) {
+                        Ok(generic) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Generic refclock unit {} opened",
+                                inst.unit
+                            )));
+                            inst.active = true;
+                            Some(RefclockDriver::Generic(generic))
+                        }
+                        Err(e) => {
+                            actions.push(DaemonAction::Log(format!(
+                                "Generic refclock unit {} open failed: {}",
+                                inst.unit, e
+                            )));
+                            None
+                        }
+                    }
+                }
                 other => {
                     actions.push(DaemonAction::Log(format!(
                         "Unknown refclock type {}",
@@ -302,11 +556,217 @@ impl RefclockManager {
                             });
                         }
                     }
+                    // ── JJY ────────────────────────────────────────────
+                    RefclockDriver::Jjy(ref mut jjy) => {
+                        if let Ok(Some(sample)) = jjy.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"JJY0", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Oncore ─────────────────────────────────────────
+                    RefclockDriver::Oncore(ref mut oncore) => {
+                        if let Ok(Some(sample)) = oncore.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"ONCO", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Trimble ────────────────────────────────────────
+                    RefclockDriver::Trimble(ref mut trimble) => {
+                        if let Ok(Some(sample)) = trimble.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"TRIM", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── TrueTime ───────────────────────────────────────
+                    RefclockDriver::TrueTime(ref mut truetime) => {
+                        if let Ok(Some(sample)) = truetime.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"TRUE", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Spectracom ─────────────────────────────────────
+                    RefclockDriver::Spectracom(ref mut spectracom) => {
+                        if let Ok(Some(sample)) = spectracom.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"SPTR", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Arbiter ────────────────────────────────────────
+                    RefclockDriver::Arbiter(ref mut arbiter) => {
+                        if let Ok(Some(sample)) = arbiter.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"ARBT", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── HP GPS ─────────────────────────────────────────
+                    RefclockDriver::HpGps(ref mut hpgps) => {
+                        if let Ok(Some(sample)) = hpgps.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"HP  ", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Modem ──────────────────────────────────────────
+                    RefclockDriver::Modem(ref mut modem) => {
+                        if let Ok(Some(sample)) = modem.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"MODM", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Zyfer ──────────────────────────────────────────
+                    RefclockDriver::Zyfer(ref mut zyfer) => {
+                        if let Ok(Some(sample)) = zyfer.read_sample() {
+                            let pkt = sample_to_packet(&sample, *b"ZYFR", -6);
+                            inst.samples_collected += 1;
+                            actions.push(DaemonAction::RefclockSample {
+                                associd: inst.associd,
+                                packet: pkt,
+                                rx_time: now,
+                            });
+                        }
+                    }
+                    // ── Generic ────────────────────────────────────────
+                    RefclockDriver::Generic(ref mut generic) => {
+                        if let Ok(Some(tc)) = generic.read_timecode() {
+                            if let Some(sample) = parsed_timecode_to_sample(&tc) {
+                                let pkt = sample_to_packet(&sample, *b"GEN ", -6);
+                                inst.samples_collected += 1;
+                                actions.push(DaemonAction::RefclockSample {
+                                    associd: inst.associd,
+                                    packet: pkt,
+                                    rx_time: now,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
         actions
     }
+}
+
+// ──── Refclock sample conversion helpers ───────────────────────────────
+
+/// Convert a `RefClockSample` into a synthetic NTP packet suitable for
+/// feeding through the engine's `handle_refclock_sample` pipeline.
+fn sample_to_packet(
+    sample: &crate::ntp_refclock::RefClockSample,
+    ref_id: [u8; 4],
+    precision: i8,
+) -> crate::ntp_types::NtpPacket {
+    let mut pkt = crate::ntp_types::NtpPacket::zeroed();
+    pkt.li_vn_mode = crate::ntp_types::NtpPacket::set_li_vn_mode(
+        sample.leap,
+        crate::ntp_types::NtpVersion::V4,
+        crate::ntp_types::NtpMode::Server,
+    );
+    pkt.stratum = 0;
+    pkt.precision = precision;
+    pkt.root_delay = 0;
+    pkt.root_dispersion = 0;
+    pkt.reference_id = u32::from_ne_bytes(ref_id);
+    pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_wire(sample.time);
+    // The refclock sample's time goes into transmit_ts — the
+    // handle_refclock_sample pipeline computes offset as T3 - T4.
+    pkt.transmit_ts = crate::ntp_fp::ntp_ts64_to_wire(sample.time);
+    pkt
+}
+
+/// Convert a `ParsedTimecode` into a `RefClockSample`.
+pub fn parsed_timecode_to_sample(
+    tc: &crate::parse::ParsedTimecode,
+) -> Option<crate::ntp_refclock::RefClockSample> {
+    // Build a system time from the parsed fields.
+    // Use chrono-like arithmetic: year-month-day hour:min:sec + subsecond ns.
+    let (y, m, d) = (tc.year, tc.month as u32, tc.day as u32);
+    let (hh, mm, ss) = (tc.hour as u32, tc.minute as u32, tc.second as u32);
+
+    // Convert civil date to days since UNIX epoch using a simple algorithm.
+    let days_from_epoch = {
+        let y = if m <= 2 { y - 1 } else { y };
+        let m = if m <= 2 { m + 12 } else { m };
+        // Days in years before this year
+        let era = if y >= 0 { y as i64 } else { y as i64 - 399 } / 400;
+        let yoe = (y as i64) - era * 400;
+        let doy = (153 * (m as i64 - 3) + 2) / 5 + d as i64 - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let epoch_era: i64 = 1970;
+        let epoch_yoe = epoch_era - (epoch_era / 400) * 400;
+        let epoch_doe = epoch_yoe * 365 + epoch_yoe / 4 - epoch_yoe / 100;
+        doe - epoch_doe
+    };
+
+    let total_secs = days_from_epoch * 86400 + (hh * 3600 + mm * 60 + ss) as i64;
+    let subsec_ns = tc.subsecond_ns;
+
+    let ntp_era_offset = total_secs + crate::ntp_fp::NTP_TO_UNIX_OFFSET as i64;
+    if ntp_era_offset < 0 {
+        return None;
+    }
+    let fraction = if subsec_ns == 0 {
+        0
+    } else {
+        ((subsec_ns as u64) << 32) / 1_000_000_000
+    };
+
+    let time = crate::ntp_types::NtpTs64 {
+        seconds: ntp_era_offset,
+        fraction: fraction as u32,
+    };
+
+    let leap = if tc.leap_second {
+        crate::ntp_types::LeapIndicator::AddLeapSecond
+    } else {
+        crate::ntp_types::LeapIndicator::NoWarning
+    };
+
+    Some(crate::ntp_refclock::RefClockSample {
+        offset: 0.0,
+        delay: 0.0,
+        dispersion: 0.0,
+        time,
+        leap,
+    })
 }
 
 /// The deterministic daemon state machine.

@@ -48,6 +48,7 @@ enum TrueState {
 ///
 /// ## C-oracle struct
 ///   `struct true_unit` in ntpd/refclock_truetime.c
+#[derive(Debug)]
 pub struct TrueTimeRefclock {
     pub unit: u8,
     path: String,

@@ -26,6 +26,7 @@ use crate::ntp_types::LeapIndicator;
 ///
 /// ## C-oracle struct
 ///   `struct spectracomunit` in ntpd/refclock_spectracom.c
+#[derive(Debug)]
 pub struct SpectracomRefclock {
     pub unit: u8,
     path: String,
