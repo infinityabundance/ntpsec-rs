@@ -433,7 +433,11 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     let mut intersection_end = 0.0f64;
     let mut found = false;
 
-    for allow in 0..n {
+    // Strict majority: the falseticker allowance must be strictly less
+    // than half the candidates (ntpsec: while (allow < nlist / 2)).
+    // For odd n, majority = (n + 1) / 2.  For even n, majority = n / 2 + 1.
+    let max_allow = n.saturating_sub(1) / 2; // floor((n-1)/2)
+    for allow in 0..=max_allow {
         let m = n - allow; // majority threshold
         let mut count = 0usize;
         let mut in_interval = false;
@@ -656,7 +660,9 @@ pub fn clock_combine(peers: &[Peer], survivors: &[usize], now: NtpTs64) -> (f64,
     let phi = 15e-6; // 15 ppm clock skew
     let mut sum_weight = 0.0f64;
     let mut sum_offset = 0.0f64;
-    let mut sum_jitter_sq = 0.0f64;
+    // Precompute per-peer weights to avoid redundant root_sync_dist
+    // computation across two passes.
+    let mut survivor_weights: Vec<(usize, f64)> = Vec::with_capacity(survivors.len());
 
     for &idx in survivors {
         let p = &peers[idx];
@@ -678,11 +684,28 @@ pub fn clock_combine(peers: &[Peer], survivors: &[usize], now: NtpTs64) -> (f64,
         };
         sum_weight += w;
         sum_offset += w * p.offset;
-        sum_jitter_sq += w * p.jitter * p.jitter;
+        survivor_weights.push((idx, w));
     }
 
     let combined_offset = sum_offset / sum_weight;
-    let combined_jitter = (sum_jitter_sq / sum_weight).sqrt();
+
+    // Compute the weighted RMS of the offset residuals around the combined
+    // offset (ntpsec combined_jitter = standard deviation of the residuals):
+    //   residual_i = offset_i - combined_offset
+    //   residual_jitter = sqrt(sum(weight_i * residual_i²) / sum(weight_i))
+    let mut sum_residual_sq = 0.0f64;
+    for &(idx, w) in &survivor_weights {
+        let residual = peers[idx].offset - combined_offset;
+        sum_residual_sq += w * residual * residual;
+    }
+    let residual_jitter = (sum_residual_sq / sum_weight).sqrt();
+
+    // The combined jitter also incorporates the system peer's selection
+    // jitter in quadrature (matching ntpsec behavior):
+    //   jitter = sqrt(residual_jitter² + syspeer.selection_jitter²)
+    let selection_jitter = peers[survivors[0]].jitter;
+    let combined_jitter =
+        (residual_jitter * residual_jitter + selection_jitter * selection_jitter).sqrt();
 
     (combined_offset, combined_jitter)
 }
@@ -1258,11 +1281,8 @@ mod tests {
     #[test]
     fn test_build_kod_packet_rate() {
         let mut req = NtpPacket::zeroed();
-        req.li_vn_mode = NtpPacket::set_li_vn_mode(
-            LeapIndicator::NoWarning,
-            NtpVersion::V4,
-            NtpMode::Client,
-        );
+        req.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
         req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1000, 0));
 
         let kod = build_kod_packet(&req, KISS_RATE);
@@ -1292,11 +1312,8 @@ mod tests {
     #[test]
     fn test_build_kod_packet_deny() {
         let mut req = NtpPacket::zeroed();
-        req.li_vn_mode = NtpPacket::set_li_vn_mode(
-            LeapIndicator::NoWarning,
-            NtpVersion::V3,
-            NtpMode::Client,
-        );
+        req.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V3, NtpMode::Client);
         req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(2000, 500));
 
         let kod = build_kod_packet(&req, KISS_DENY);
@@ -1311,11 +1328,8 @@ mod tests {
     #[test]
     fn test_build_kod_packet_rstr() {
         let mut req = NtpPacket::zeroed();
-        req.li_vn_mode = NtpPacket::set_li_vn_mode(
-            LeapIndicator::NoWarning,
-            NtpVersion::V4,
-            NtpMode::Client,
-        );
+        req.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
         req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(3000, 0));
 
         let kod = build_kod_packet(&req, KISS_RSTR);
@@ -1328,20 +1342,14 @@ mod tests {
     fn test_build_kod_packet_version_preserved() {
         // KOD should use the same version as the request, not hardcoded V4.
         let mut req = NtpPacket::zeroed();
-        req.li_vn_mode = NtpPacket::set_li_vn_mode(
-            LeapIndicator::NoWarning,
-            NtpVersion::V3,
-            NtpMode::Client,
-        );
+        req.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V3, NtpMode::Client);
         let kod = build_kod_packet(&req, KISS_RATE);
         assert_eq!(kod.version(), NtpVersion::V3);
 
         let mut req4 = NtpPacket::zeroed();
-        req4.li_vn_mode = NtpPacket::set_li_vn_mode(
-            LeapIndicator::NoWarning,
-            NtpVersion::V4,
-            NtpMode::Client,
-        );
+        req4.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
         let kod4 = build_kod_packet(&req4, KISS_RATE);
         assert_eq!(kod4.version(), NtpVersion::V4);
     }
@@ -1867,6 +1875,201 @@ mod tests {
             survivors.contains(&4),
             "prefer peer (index 4) must survive by assoc ID, not vector position. survivors={:?}",
             survivors
+        );
+    }
+
+    // ── Strict-majority intersection tests ───────────────────────────────
+    //
+    // These tests verify that clock_intersection enforces a strict majority
+    // (at least ceil((n+1)/2) midpoints in the intersection interval),
+    // matching ntpsec's "while (allow < nlist / 2)" behavior.
+
+    /// Three completely disjoint confidence intervals: no intersection.
+    /// With n=3, max_allow = 1, m=2.  No interval contains ≥2 midpoints,
+    /// so all three are falsetickers.
+    #[test]
+    fn test_intersection_three_disjoint() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true),
+            make_peer(0.200, 0.005, 0.001, true),
+            make_peer(0.400, 0.005, 0.001, true),
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+        }
+
+        let n_survivors = clock_intersection(&mut peers, now);
+
+        assert_eq!(
+            n_survivors, 0,
+            "three disjoint intervals should yield 0 survivors, got {}",
+            n_survivors
+        );
+
+        // All three must be marked TEST5
+        for (i, p) in peers.iter().enumerate() {
+            let flash = FlashBits::from_bits_truncate(p.flash);
+            assert!(
+                flash.contains(FlashBits::TEST5),
+                "disjoint peer {} should be TEST5, flash={:?}",
+                i,
+                flash
+            );
+        }
+    }
+
+    /// Four peers: 2 agree (offsets near 0), 2 completely disjoint
+    /// (offsets at 1.0 and 1.1, intervals also non-overlapping).
+    /// With n=4, max_allow=1, m=3.  Only 2 midpoints in the agreement
+    /// interval → no intersection, all 4 are falsetickers.
+    #[test]
+    fn test_intersection_two_agree_two_disjoint() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true), // agrees with P1
+            make_peer(0.001, 0.005, 0.001, true), // agrees with P0
+            make_peer(1.000, 0.005, 0.001, true), // disjoint from P0/P1
+            make_peer(1.100, 0.005, 0.001, true), // disjoint from all
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+        }
+
+        let n_survivors = clock_intersection(&mut peers, now);
+
+        // Only 2 midpoints agree; need m=3 for n=4 → no majority
+        assert_eq!(
+            n_survivors, 0,
+            "2 of 4 agreeing is not a strict majority, expected 0 survivors, got {}",
+            n_survivors
+        );
+    }
+
+    /// Five peers: 2 agree, 3 disagree.  With n=5, max_allow=2, m=3.
+    /// Only 2 midpoints in the agreement → no majority → 0 survivors.
+    #[test]
+    fn test_intersection_two_agree_among_five() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true), // agrees with P1
+            make_peer(0.001, 0.005, 0.001, true), // agrees with P0
+            make_peer(1.000, 0.005, 0.001, true), // disjoint
+            make_peer(1.100, 0.005, 0.001, true), // disjoint
+            make_peer(1.200, 0.005, 0.001, true), // disjoint
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+        }
+
+        let n_survivors = clock_intersection(&mut peers, now);
+
+        assert_eq!(
+            n_survivors, 0,
+            "2 of 5 agreeing is not a strict majority, expected 0 survivors, got {}",
+            n_survivors
+        );
+    }
+
+    /// Five peers: 3 agree, 2 disagree.  With n=5, max_allow=2, m=3.
+    /// 3 midpoints in the consensus → majority → intersection found
+    /// → 3 survivors.
+    #[test]
+    fn test_intersection_three_agree_among_five() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true), // agrees with P1,P2
+            make_peer(0.001, 0.005, 0.001, true), // agrees with P0,P2
+            make_peer(0.002, 0.005, 0.001, true), // agrees with P0,P1
+            make_peer(1.000, 0.005, 0.001, true), // disjoint
+            make_peer(1.100, 0.005, 0.001, true), // disjoint
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+        }
+
+        let n_survivors = clock_intersection(&mut peers, now);
+
+        assert_eq!(
+            n_survivors, 3,
+            "3 of 5 is a strict majority, expected 3 survivors, got {}",
+            n_survivors
+        );
+
+        // The 3 agreeing peers must NOT be TEST5
+        for i in 0..3 {
+            let flash = FlashBits::from_bits_truncate(peers[i].flash);
+            assert!(
+                !flash.contains(FlashBits::TEST5),
+                "agreeing peer {} should not be TEST5, flash={:?}",
+                i,
+                flash
+            );
+        }
+
+        // The 2 disjoint peers must be TEST5
+        for i in 3..5 {
+            let flash = FlashBits::from_bits_truncate(peers[i].flash);
+            assert!(
+                flash.contains(FlashBits::TEST5),
+                "disjoint peer {} should be TEST5, flash={:?}",
+                i,
+                flash
+            );
+        }
+    }
+
+    // ── Combined jitter test ─────────────────────────────────────────────
+    //
+    // Combined jitter in clock_combine is the RMS of offset residuals
+    // around the combined offset, plus the syspeer selection jitter in
+    // quadrature.  If individual peer jitter values are tiny but the
+    // offsets disagree, the combined jitter should reflect the residual
+    // disagreement, not the tiny peer jitter values.
+
+    /// Two peers with jitter=0.001 (very small) but offsets differing
+    /// by 10 ms.  The old formula (weighted average of peer jitter²)
+    /// would produce combined_jitter ~0.001.  The correct formula
+    /// computes the residual RMS around the combined offset (~5 ms)
+    /// plus selection jitter in quadrature, yielding ~5 ms.
+    #[test]
+    fn test_combine_jitter_low_peer_jitter_disagreeing_offsets() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true),
+            make_peer(0.010, 0.005, 0.001, true),
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+            p.jitter = 0.001; // tiny per-peer jitter
+        }
+
+        let survivors: Vec<usize> = (0..peers.len()).collect();
+        let (_offset, combined_jitter) = clock_combine(&peers, &survivors, now);
+
+        // With offsets at 0.0 and 0.010, equal weight, the residual RMS
+        // around the combined offset (0.005) is 0.005.  Adding the syspeer
+        // selection jitter (0.001) in quadrature: sqrt(0.005² + 0.001²)
+        // ≈ 0.0051.
+        //
+        // The key check: combined_jitter must be dominated by the offset
+        // disagreement (several ms), NOT by the tiny per-peer jitter.
+        assert!(
+            combined_jitter > 0.003,
+            "combined jitter {} should be dominated by the 10 ms offset \
+             disagreement, not the 0.001 peer jitter",
+            combined_jitter
+        );
+        assert!(
+            combined_jitter < 0.010,
+            "combined jitter {} should be bounded by the offset spread \
+             of 0.010",
+            combined_jitter
         );
     }
 }

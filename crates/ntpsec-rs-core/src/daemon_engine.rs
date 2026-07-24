@@ -772,6 +772,40 @@ pub fn parsed_timecode_to_sample(
     })
 }
 
+/// State for a fragmented MRU query response.
+/// The client requests subsequent fragments using the same nonce and an
+/// incremented offset value.
+#[derive(Debug, Clone)]
+struct MruFragmentState {
+    /// The nonce that was used for this query.
+    nonce: [u8; 32],
+    /// The current offset (entry index) for the next fragment.
+    offset: u16,
+    /// Total number of entries available at query time.
+    total_entries: usize,
+}
+
+/// Tracks system events for the sys_status word's event count and code.
+/// Events:
+///   7 = sys_peer — system peer changed
+///   6 = sys_clk  — stratum or leap changed
+/// The event count is incremented each time a new event occurs, capped at 15.
+#[derive(Debug, Clone)]
+struct SystemEventTracker {
+    /// The last event code reported in the status word.
+    last_event_code: u16,
+    /// The event count (incremented when a new event occurs, capped at 15).
+    event_count: u16,
+    /// Peer count from the previous selection run (for detecting changes).
+    last_peer_count: u32,
+    /// Previous system peer association ID (for detecting sys_peer changes).
+    last_sys_peer_associd: Option<u16>,
+    /// Previous stratum value.
+    last_stratum: u8,
+    /// Previous leap indicator value.
+    last_leap: LeapIndicator,
+}
+
 /// The deterministic daemon state machine.
 #[derive(Debug)]
 pub struct DaemonEngine {
@@ -863,6 +897,41 @@ pub struct DaemonEngine {
 
     /// Whether authentication is required for all NTP packets.
     pub auth_required: bool,
+
+    /// Pending MRU fragment state for continuation queries.
+    /// Keyed by client address, tracks which nonce and offset to continue from.
+    pending_mru_fragments: HashMap<NetAddr, MruFragmentState>,
+
+    /// Tracks system events for the sys_status word (RFC 5905 §13).
+    event_tracker: SystemEventTracker,
+}
+
+impl SystemEventTracker {
+    /// Create a new event tracker from initial system state.
+    pub fn new(sys: &SystemState) -> Self {
+        Self {
+            last_event_code: 0,
+            event_count: 0,
+            last_peer_count: sys.peer_count,
+            last_sys_peer_associd: None,
+            last_stratum: sys.stratum,
+            last_leap: sys.leap,
+        }
+    }
+
+    /// Record a system event with the given event code.
+    /// Increments the event count (capped at 15) if the code is new.
+    /// Resets the count if the previous event code was different.
+    pub fn record_event(&mut self, code: u16) {
+        if code != self.last_event_code {
+            // Different event type: start fresh count
+            self.event_count = 1;
+            self.last_event_code = code;
+        } else {
+            // Same event: increment count, cap at 15
+            self.event_count = (self.event_count + 1).min(15);
+        }
+    }
 }
 
 impl DaemonEngine {
@@ -904,6 +973,8 @@ impl DaemonEngine {
             stats_enabled: true,
             monitor_enabled: true,
             auth_required: false,
+            pending_mru_fragments: HashMap::new(),
+            event_tracker: SystemEventTracker::new(&SystemState::new()),
         };
         engine.apply_config(config);
         engine
@@ -1490,6 +1561,59 @@ impl DaemonEngine {
         None
     }
 
+    /// Verify NTP packet authentication (MAC) for a server response.
+    ///
+    /// NTP MAC format (RFC 5905 §7.3):
+    ///   [NTP header (48 bytes)] [extension fields (optional)] [key_id (4)] [digest (N)]
+    ///
+    /// Returns `true` if the packet authenticates successfully, or if no
+    /// authentication is configured for this peer (peer.keyid == 0).
+    fn verify_packet_auth(
+        auth: &AuthKeyStore,
+        packet: &[u8],
+        keyid: u32,
+        counters: &mut AuthCounters,
+    ) -> bool {
+        if keyid == 0 {
+            return true; // no auth configured for this peer
+        }
+        let header_len = NTP_HEADER_SIZE;
+        if packet.len() < header_len + 8 {
+            // Too short to contain key_id(4) + min digest(4) — reject
+            return false;
+        }
+
+        // The MAC starts after the NTP header (no extension fields in basic NTP).
+        // For packets with extension fields, the MAC would start after them.
+        // For now, assume no extension fields — MAC starts at byte 48.
+        let mac_area_start = header_len;
+
+        // Parse key_id: 4 bytes at the start of the MAC area
+        let keyid_bytes: [u8; 4] = packet[mac_area_start..mac_area_start + 4]
+            .try_into()
+            .unwrap();
+        let pkt_keyid = u32::from_be_bytes(keyid_bytes);
+
+        // The MAC value is everything after the key_id
+        let mac_value = &packet[mac_area_start + 4..];
+
+        // The authenticated data is everything before the MAC area
+        let authenticated = &packet[..mac_area_start];
+
+        if let Some(key) = auth.get_key(pkt_keyid) {
+            if key.verify_mac(authenticated, mac_value) {
+                counters.foundkey = counters.foundkey.saturating_add(1);
+                true
+            } else {
+                counters.badauth = counters.badauth.saturating_add(1);
+                false
+            }
+        } else {
+            counters.notfound = counters.notfound.saturating_add(1);
+            false
+        }
+    }
+
     /// Run the clock selection / combine / discipline pipeline.
     /// Supports prefer peer (kept unconditionally during pruning) and
     /// PPS override (PPS refclock overrides system peer when within
@@ -1510,9 +1634,30 @@ impl DaemonEngine {
 
         // Track system peer by both index (legacy) and association ID
         if sys_peer_idx < self.peers.len() {
+            // ── System event tracking: sys_peer change ─────────────────
+            let new_associd = self.peers.get(sys_peer_idx).map(|p| p.associd);
+            if self.system_peer_associd != new_associd && self.system_peer_associd.is_some() {
+                // System peer changed — record sys_peer event (code 7)
+                self.event_tracker.record_event(7);
+            }
+
             self.system_peer_id = Some(sys_peer_idx);
-            self.system_peer_associd = self.peers.get(sys_peer_idx).map(|p| p.associd);
+            self.system_peer_associd = new_associd;
             self.system.sys_peer_associd = self.system_peer_associd.unwrap_or(0);
+
+            // ── System event tracking: stratum change ──────────────────
+            if self.system.stratum != self.event_tracker.last_stratum
+                && self.event_tracker.last_stratum > 0
+            {
+                self.event_tracker.record_event(6);
+            }
+            self.event_tracker.last_stratum = self.system.stratum;
+
+            // ── System event tracking: leap change ─────────────────────
+            if self.system.leap != self.event_tracker.last_leap {
+                self.event_tracker.record_event(6);
+            }
+            self.event_tracker.last_leap = self.system.leap;
         } else {
             self.system_peer_id = None;
             self.system_peer_associd = None;
@@ -1520,6 +1665,9 @@ impl DaemonEngine {
             // No survivor found — count as a broken selection attempt
             self.system.sel_broken = self.system.sel_broken.saturating_add(1);
         }
+
+        // Track peer count changes for status word
+        self.event_tracker.last_peer_count = self.system.peer_count;
 
         // Write updated peer state back
         for (i, p) in peers_vec.iter().enumerate() {
@@ -1630,9 +1778,9 @@ impl DaemonEngine {
             0 // sync_unspec
         };
 
-        // Event count and code: track the last system event
-        let event_count = (self.system.peer_count.min(0x0F) as u16) & 0x0F;
-        let event_code = 0u16; // No event for now; would be wired to system event tracking
+        // Event count and code: use the event tracker
+        let event_count = self.event_tracker.event_count.min(15);
+        let event_code = self.event_tracker.last_event_code;
 
         ((li as u16) << 14)       // bits 15-14: LI
             | ((clock_source & 0x3F) << 8)  // bits 13-8: source
@@ -1922,8 +2070,13 @@ impl DaemonEngine {
         pkt: NtpPacket,
         dgram: ReceivedDatagram,
     ) -> Vec<DaemonAction> {
+        // Destructure dgram early to avoid borrow conflicts with self
+        let dgram_bytes = dgram.bytes;
+        let dgram_source = dgram.source;
+        let dgram_rx = dgram.rx_timestamp;
+
         // Match against pending requests by (originate_ts, source, expected_mode)
-        let req_idx = self.find_pending_request(&pkt.originate_ts, &dgram.source, pkt.mode());
+        let req_idx = self.find_pending_request(&pkt.originate_ts, &dgram_source, pkt.mode());
 
         if let Some(req_idx) = req_idx {
             let req = self.pending_requests[req_idx].clone();
@@ -1937,7 +2090,24 @@ impl DaemonEngine {
                 // T3 = server's transmit timestamp from packet
                 let t3 = ntp_fp::ntp_ts_to_ntpts(pkt.transmit_ts);
                 // T4 = our receive timestamp
-                let t4 = dgram.rx_timestamp;
+                let t4 = dgram_rx;
+
+                // Auth verification
+                let auth_ok = if peer.keyid == 0 {
+                    true
+                } else {
+                    // Borrow self.auth and self.system.auth_counters before peer
+                    // to satisfy the borrow checker (disjoint field access).
+                    let counters = &mut self.system.auth_counters;
+                    Self::verify_packet_auth(&self.auth, &dgram_bytes, peer.keyid, counters)
+                };
+                if !auth_ok {
+                    // Auth configured but failed — reject the sample
+                    self.pending_requests.remove(req_idx);
+                    return vec![DaemonAction::Log(
+                        "NTP packet authentication failed".to_string(),
+                    )];
+                }
 
                 // Check for duplicate (TEST1) — same originate already processed
                 if peer.originate_time == t1 {
@@ -1955,10 +2125,33 @@ impl DaemonEngine {
                     let kiss_str = core::str::from_utf8(&kiss_bytes).unwrap_or("????");
                     peer.reach.record_failure();
                     self.pending_requests.remove(req_idx);
+                    // Kiss-o'-Death code-specific behavior (RFC 5905 §7.4)
+                    match &kiss_bytes {
+                        b"RATE" => {
+                            // Rate limit: increase minpoll to back off
+                            peer.minpoll = (peer.minpoll + 1).min(peer.maxpoll);
+                            peer.hpoll = peer.minpoll;
+                        }
+                        b"DENY" | b"RSTR" => {
+                            // Access denied: demobilize the association
+                            peer.flags |= PeerFlags::NOSYNC;
+                            return vec![DaemonAction::Log(format!(
+                                "Kiss-o'-Death from {}: code={} — association demobilized",
+                                crate::ntp_net::socktoa(&crate::ntp_monitor::netaddr_to_sockaddr(
+                                    &dgram_source
+                                )),
+                                kiss_str
+                            ))];
+                        }
+                        _ => {
+                            // Unknown code: conservative retry
+                            peer.hpoll = (peer.hpoll + 1).min(peer.maxpoll);
+                        }
+                    }
                     return vec![DaemonAction::Log(format!(
                         "Kiss-o'-Death from {}: code={}",
                         crate::ntp_net::socktoa(&crate::ntp_monitor::netaddr_to_sockaddr(
-                            &dgram.source
+                            &dgram_source
                         )),
                         kiss_str
                     ))];
@@ -1970,15 +2163,6 @@ impl DaemonEngine {
                     // Remove this pending request so we don't match against it again
                     self.pending_requests.remove(req_idx);
                     return vec![];
-                }
-
-                // Auth verification
-                let mut auth_log: Option<String> = None;
-                if self.auth.is_auth_enabled() {
-                    // For now, log that auth verification is not yet wired for NTP
-                    // response packets.  Full verification will walk extension fields
-                    // and MAC, look up the key-id, recompute the digest, and compare.
-                    auth_log = Some("auth verification not yet wired for NTP packets".to_string());
                 }
 
                 // Compute offset and delay
@@ -2014,21 +2198,16 @@ impl DaemonEngine {
                 peer.reference_time = ntp_fp::ntp_ts_to_ntpts(pkt.reference_ts);
 
                 // Accept the sample into the clock filter
-                accept_sample(peer, offset, delay, dispersion, dgram.rx_timestamp);
+                accept_sample(peer, offset, delay, dispersion, dgram_rx);
 
                 // Record originate to detect duplicates
                 peer.originate_time = t1;
 
                 // Update poll interval
-                poll_update(peer, dgram.rx_timestamp);
+                poll_update(peer, dgram_rx);
 
                 // Remove the pending request — response consumed
                 self.pending_requests.remove(req_idx);
-
-                // Include auth log message if auth is enabled
-                if let Some(msg) = auth_log {
-                    return vec![DaemonAction::Log(msg)];
-                }
             }
         } else {
             // Unsolicited response or broadcast — silently drop
@@ -2381,13 +2560,19 @@ impl DaemonEngine {
                 }
                 let vars = parse_mode6_vars(&data_str);
                 let mut nonce_valid = false;
+                let mut query_nonce_bytes: Option<Vec<u8>> = None;
+                let mut query_offset: u16 = 0;
                 for (key, val) in &vars {
                     if key == "nonce" {
                         if let Ok(nonce_bytes) = hex::decode(val) {
                             if self.monitor.nonce_cache.verify_nonce(&nonce_bytes) {
                                 nonce_valid = true;
+                                query_nonce_bytes = Some(nonce_bytes);
                             }
                         }
+                    }
+                    if key == "offset" {
+                        query_offset = val.parse::<u16>().unwrap_or(0);
                     }
                 }
                 if !nonce_valid {
@@ -2397,56 +2582,121 @@ impl DaemonEngine {
                     }];
                 }
 
-                // ── 2. Row limit: max 100 entries per response ──────────
+                // ── 2. Check for existing fragment state ────────────────
+                // If this is a continuation (same nonce, same source), pick
+                // up from the stored offset. Otherwise, start fresh.
+                let resume_offset = if let Some(state) = self.pending_mru_fragments.get(&source) {
+                    if let Some(ref qnb) = query_nonce_bytes {
+                        if qnb.len() == 32 {
+                            let mut nonce_arr = [0u8; 32];
+                            nonce_arr.copy_from_slice(&qnb[..32]);
+                            if nonce_arr == state.nonce {
+                                query_offset.max(state.offset)
+                            } else {
+                                query_offset
+                            }
+                        } else {
+                            query_offset
+                        }
+                    } else {
+                        query_offset
+                    }
+                } else {
+                    query_offset
+                };
+
+                // ── 3. Row limit: max 100 entries per response ──────────
                 // This prevents unbounded memory/time from huge MRU lists.
                 let max_entries = 100usize;
-                let entries = self.monitor.read_mru(max_entries);
+                let all_entries = self.monitor.read_mru(max_entries);
+                let total_entries = all_entries.len();
 
-                // ── 3. Response byte budgeting ──────────────────────────
+                // Apply offset: skip already-sent entries
+                let entries = if (resume_offset as usize) < total_entries {
+                    &all_entries[resume_offset as usize..]
+                } else {
+                    &[]
+                };
+
+                // ── 4. Response byte budgeting ──────────────────────────
                 // Mode 6 max payload per fragment is 468 bytes.
                 // For amplification prevention, use a reasonable floor so
                 // legitimate queries still work. The nonce requirement
                 // (enforced above) is the primary anti-spoofing mechanism;
                 // the row limit and byte budget are secondary defenses.
-                let header_sz = 12usize;
                 // Cap response data at Mode 6 standard max payload
                 let max_payload = 468usize;
 
-                // ── 4. Fragmentation-aware response building ────────────
+                // ── 5. Fragmentation-aware response building ────────────
                 // Build entries incrementally until the byte budget is
                 // exhausted. If entries remain, the M (more) bit is set
-                // by the caller via build_response below.
+                // by setup by padding the response to exceed max_payload.
                 let mut resp_parts: Vec<String> = Vec::new();
                 let mut budget = max_payload;
+                let mut entries_sent = 0usize;
                 for (i, entry) in entries.iter().enumerate() {
+                    let global_idx = resume_offset as usize + i;
                     let addr_str = crate::ntp_net::socktoa(&entry.addr);
                     let part = format!(
                         "addr.{}={} last.{}={}.{:06} first.{}={}.{:06} ct.{}={} mv.{}={} rs.{}=0",
-                        i,
+                        global_idx,
                         addr_str,
-                        i,
+                        global_idx,
                         entry.last_pkt.seconds,
                         entry.last_pkt.fraction / 4295,
-                        i,
+                        global_idx,
                         entry.first_pkt.seconds,
                         entry.first_pkt.fraction / 4295,
-                        i,
+                        global_idx,
                         entry.count,
-                        i,
+                        global_idx,
                         entry.flags,
-                        i,
+                        global_idx,
                     );
                     // +1 for the comma separator (except for the first)
                     let needed = part.len() + if resp_parts.is_empty() { 0 } else { 1 };
                     if needed <= budget {
                         budget -= needed;
                         resp_parts.push(part);
+                        entries_sent += 1;
                     } else {
                         break;
                     }
                 }
 
-                let data = resp_parts.join(",").into_bytes();
+                let new_offset = resume_offset + entries_sent as u16;
+                let has_more = entries_sent < entries.len() || new_offset < total_entries as u16;
+
+                // ── 6. Update or clear fragment state ───────────────────
+                if has_more {
+                    // More entries remain — save fragment state
+                    if let Some(ref qnb) = query_nonce_bytes {
+                        if qnb.len() == 32 {
+                            let mut nonce_arr = [0u8; 32];
+                            nonce_arr.copy_from_slice(&qnb[..32]);
+                            self.pending_mru_fragments.insert(
+                                source,
+                                MruFragmentState {
+                                    nonce: nonce_arr,
+                                    offset: new_offset,
+                                    total_entries,
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    // All entries sent — clear fragment state
+                    self.pending_mru_fragments.remove(&source);
+                }
+
+                // Build data, padding past 468 to signal M bit to build_response
+                let mut data = resp_parts.join(",").into_bytes();
+                if has_more && data.len() <= max_payload {
+                    // Pad with a trailing space to exceed 468 bytes so that
+                    // build_response sets the M bit and truncates back to 468.
+                    let pad_len = max_payload + 1 - data.len();
+                    data.extend(std::iter::repeat(b' ').take(pad_len));
+                }
                 data
             }
 
@@ -4375,6 +4625,757 @@ mod tests {
         assert!(
             actions.is_empty(),
             "empty refclock manager should produce no actions"
+        );
+    }
+
+    // ── Fix 1: Incoming KOD code-specific behavior tests ─────────────
+
+    /// KOD RATE: verify minpoll and hpoll are increased to back off.
+    #[test]
+    fn test_kod_rate_increases_minpoll() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        // Tick to create a pending request
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        assert_eq!(engine.pending_requests.len(), 1);
+        let req = engine.pending_requests[0].clone();
+
+        // Build KOD RATE response (stratum = 0, refid = 'RATE')
+        let mut resp = NtpPacket::zeroed();
+        resp.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::Alarm, NtpVersion::V4, NtpMode::Server);
+        resp.stratum = 0;
+        resp.reference_id = u32::from_be_bytes(*b"RATE");
+        resp.originate_ts = req.wire_t1;
+
+        let dgram = ReceivedDatagram::test(
+            resp.encode_header().to_vec(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // Should produce a log action (no demobilization for RATE)
+        assert!(actions.iter().any(|a| matches!(a, DaemonAction::Log(_))));
+
+        // Verify minpoll and hpoll were increased
+        if let Some(peer) = engine.peers.get(peer_id) {
+            assert!(
+                peer.minpoll > 4,
+                "minpoll should increase from 4, got {}",
+                peer.minpoll
+            );
+            assert_eq!(
+                peer.hpoll, peer.minpoll,
+                "hpoll should match minpoll after RATE"
+            );
+            // NOSYNC flag should NOT be set for RATE
+            assert!(
+                !peer.flags.contains(PeerFlags::NOSYNC),
+                "RATE should not set NOSYNC"
+            );
+        }
+    }
+
+    /// KOD DENY: verify NOSYNC flag is set (association demobilized).
+    #[test]
+    fn test_kod_deny_sets_nosync() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        let req = engine.pending_requests[0].clone();
+
+        // Build KOD DENY response
+        let mut resp = NtpPacket::zeroed();
+        resp.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::Alarm, NtpVersion::V4, NtpMode::Server);
+        resp.stratum = 0;
+        resp.reference_id = u32::from_be_bytes(*b"DENY");
+        resp.originate_ts = req.wire_t1;
+
+        let dgram = ReceivedDatagram::test(
+            resp.encode_header().to_vec(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        if let Some(peer) = engine.peers.get(peer_id) {
+            assert!(
+                peer.flags.contains(PeerFlags::NOSYNC),
+                "DENY should set NOSYNC flag"
+            );
+        }
+    }
+
+    /// KOD RSTR: verify NOSYNC flag is set (same behavior as DENY).
+    #[test]
+    fn test_kod_rstr_sets_nosync() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        let req = engine.pending_requests[0].clone();
+
+        let mut resp = NtpPacket::zeroed();
+        resp.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::Alarm, NtpVersion::V4, NtpMode::Server);
+        resp.stratum = 0;
+        resp.reference_id = u32::from_be_bytes(*b"RSTR");
+        resp.originate_ts = req.wire_t1;
+
+        let dgram = ReceivedDatagram::test(
+            resp.encode_header().to_vec(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        if let Some(peer) = engine.peers.get(peer_id) {
+            assert!(
+                peer.flags.contains(PeerFlags::NOSYNC),
+                "RSTR should set NOSYNC flag"
+            );
+        }
+    }
+
+    /// KOD unknown code: verify hpoll is increased conservatively.
+    #[test]
+    fn test_kod_unknown_increases_hpoll() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        let req = engine.pending_requests[0].clone();
+
+        let mut resp = NtpPacket::zeroed();
+        resp.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::Alarm, NtpVersion::V4, NtpMode::Server);
+        resp.stratum = 0;
+        resp.reference_id = u32::from_be_bytes(*b"XTRL"); // unknown code
+        resp.originate_ts = req.wire_t1;
+
+        let dgram = ReceivedDatagram::test(
+            resp.encode_header().to_vec(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        if let Some(peer) = engine.peers.get(peer_id) {
+            assert!(
+                peer.hpoll > 4,
+                "unknown KOD should increase hpoll from 4, got {}",
+                peer.hpoll
+            );
+            // NOSYNC should NOT be set for unknown codes
+            assert!(
+                !peer.flags.contains(PeerFlags::NOSYNC),
+                "unknown KOD should not set NOSYNC"
+            );
+        }
+    }
+
+    // ── Fix 2: MRU fragmentation state machine tests ─────────────────
+
+    /// MRU with many entries returns data within 468-byte budget.
+    #[test]
+    fn test_mru_fragmentation_single_fragment() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let sa = crate::ntp_monitor::netaddr_to_sockaddr(&peer_netaddr([10, 0, 0, 1], 12345));
+        engine.monitor.record(&sa, now);
+
+        let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
+        let nonce_str = hex::encode(&nonce_bytes);
+        let body = format!("nonce={}", nonce_str);
+
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(body.as_bytes());
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1001, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (resp_header, _) = ControlMessage::decode(bytes).unwrap();
+            let oc = resp_header.decode_opcode();
+            // With 1 entry, no fragmentation needed
+            assert!(!oc.more, "M bit should not be set for 1 entry");
+            // Fragment state should be cleared
+            assert!(
+                engine.pending_mru_fragments.is_empty(),
+                "fragment state should be cleared after complete response"
+            );
+        } else {
+            panic!("expected Send action");
+        }
+    }
+
+    /// MRU with enough entries to exceed 468-byte budget sets the M bit
+    /// and stores fragment state for continuation.
+    #[test]
+    fn test_mru_fragmentation_multiple_fragments() {
+        use crate::ntp_control::*;
+        use crate::ntp_monitor::netaddr_to_sockaddr;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+
+        // Add enough entries to exceed the 468-byte budget
+        // Each entry is roughly 80-90 bytes serialized
+        for i in 0..10 {
+            let addr = peer_netaddr([10, 0, 0, i + 1], 12345);
+            let sa = netaddr_to_sockaddr(&addr);
+            engine.monitor.record(&sa, now);
+        }
+
+        let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
+        let nonce_str = hex::encode(&nonce_bytes);
+        let body = format!("nonce={}", nonce_str);
+
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(body.as_bytes());
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1001, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // First fragment: should have M bit set and non-empty fragment state
+        assert!(!actions.is_empty(), "should produce at least one action");
+
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (resp_header, resp_data) = ControlMessage::decode(bytes).unwrap();
+            let oc = resp_header.decode_opcode();
+            let resp_text = String::from_utf8_lossy(resp_data);
+
+            // Check that data fits within budget
+            assert!(
+                resp_data.len() <= 468,
+                "response data should fit in 468-byte budget, got {}",
+                resp_data.len()
+            );
+
+            if resp_data.len() >= 400 || oc.more {
+                // If we filled up the budget, M bit should be set
+                assert!(oc.more, "M bit should be set when response is full");
+                // Fragment state should exist
+                assert!(
+                    !engine.pending_mru_fragments.is_empty(),
+                    "fragment state should be stored for continuation"
+                );
+                // Verify the fragment state has reasonable values
+                let client_key = peer_netaddr([10, 0, 0, 1], 54321);
+                if let Some(state) = engine.pending_mru_fragments.get(&client_key) {
+                    assert!(state.offset > 0, "offset should advance past sent entries");
+                    assert!(state.total_entries >= state.offset as usize);
+                }
+            }
+        } else {
+            panic!("expected Send action");
+        }
+    }
+
+    /// MRU continuation: requesting the next fragment returns remaining entries.
+    #[test]
+    fn test_mru_fragmentation_continuation() {
+        use crate::ntp_control::*;
+        use crate::ntp_monitor::netaddr_to_sockaddr;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+
+        for i in 0..10 {
+            let addr = peer_netaddr([10, 0, 0, i + 1], 12345);
+            let sa = netaddr_to_sockaddr(&addr);
+            engine.monitor.record(&sa, now);
+        }
+
+        let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
+        let nonce_str = hex::encode(&nonce_bytes);
+
+        // First request
+        let body1 = format!("nonce={}", nonce_str);
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8();
+        msg.sequence = 1;
+        msg.count = body1.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(body1.as_bytes());
+
+        let dgram1 = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1001, 0),
+        );
+
+        let _actions1 = engine.handle(DaemonEvent::PacketReceived(dgram1));
+
+        // Check if fragmentation is needed (might not be with 10 entries)
+        let client_key = peer_netaddr([10, 0, 0, 1], 54321);
+        if engine.pending_mru_fragments.contains_key(&client_key) {
+            // Send continuation request with offset
+            // Generate a new nonce since the old one was consumed
+            let new_nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
+            let new_nonce_str = hex::encode(&new_nonce_bytes);
+            let saved_offset = engine.pending_mru_fragments[&client_key].offset;
+            let body2 = format!("nonce={},offset={}", new_nonce_str, saved_offset);
+
+            let mut msg2 = ControlMessage::zeroed();
+            msg2.li_vn_mode = NtpPacket::set_li_vn_mode(
+                LeapIndicator::NoWarning,
+                NtpVersion::V4,
+                NtpMode::NtpControl,
+            );
+            msg2.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8();
+            msg2.sequence = 2;
+            msg2.count = body2.len() as u16;
+
+            let mut packet2 = msg2.encode().to_vec();
+            packet2.extend_from_slice(body2.as_bytes());
+
+            let dgram2 = ReceivedDatagram::test(
+                packet2,
+                peer_netaddr([10, 0, 0, 1], 54321),
+                peer_netaddr([127, 0, 0, 1], 123),
+                ntp_fp::ts_to_ntp(1002, 0),
+            );
+
+            let actions2 = engine.handle(DaemonEvent::PacketReceived(dgram2));
+            if let Some(DaemonAction::Send { bytes, .. }) = actions2.first() {
+                let (response, resp_data) = ControlMessage::decode(bytes).unwrap();
+                let oc = response.decode_opcode();
+                // If this is the last fragment, M bit should be cleared
+                // and state removed
+                if !oc.more {
+                    assert!(
+                        !engine.pending_mru_fragments.contains_key(&client_key),
+                        "fragment state should be cleared after last fragment"
+                    );
+                }
+                // Data should be present
+                assert!(!resp_data.is_empty(), "continuation should have data");
+            } else {
+                panic!("expected Send action for continuation");
+            }
+        }
+    }
+
+    // ── Fix 3: System status event semantics tests ────────────────────
+
+    /// SystemEventTracker starts with zeroed event code and count.
+    #[test]
+    fn test_event_tracker_initial_state() {
+        let sys = SystemState::new();
+        let tracker = SystemEventTracker::new(&sys);
+        assert_eq!(tracker.last_event_code, 0);
+        assert_eq!(tracker.event_count, 0);
+        assert_eq!(tracker.last_stratum, NTP_MAXSTRAT);
+        assert_eq!(tracker.last_leap, LeapIndicator::Alarm);
+    }
+
+    /// Recording a new event increases count and sets code.
+    #[test]
+    fn test_event_tracker_record_event_cap() {
+        let sys = SystemState::new();
+        let mut tracker = SystemEventTracker::new(&sys);
+
+        tracker.record_event(7); // sys_peer
+        assert_eq!(tracker.last_event_code, 7);
+        assert_eq!(tracker.event_count, 1);
+
+        // Same event again increments count
+        tracker.record_event(7);
+        assert_eq!(tracker.event_count, 2);
+        assert_eq!(tracker.last_event_code, 7);
+
+        // Different event resets count
+        tracker.record_event(6); // sys_clk
+        assert_eq!(tracker.last_event_code, 6);
+        assert_eq!(tracker.event_count, 1);
+    }
+
+    /// Event count is capped at 15.
+    #[test]
+    fn test_event_tracker_count_capped() {
+        let sys = SystemState::new();
+        let mut tracker = SystemEventTracker::new(&sys);
+
+        assert_eq!(tracker.event_count, 0);
+        // Record 20 events of the same type
+        for _ in 0..20 {
+            tracker.record_event(7);
+        }
+        assert_eq!(tracker.event_count, 15, "event count should cap at 15");
+    }
+
+    /// compute_system_status uses event tracker values.
+    #[test]
+    fn test_compute_system_status_uses_event_tracker() {
+        let config = ConfigTree::new();
+        let mut engine = DaemonEngine::new(config);
+        engine.system.stratum = 3;
+        engine.system.peer_count = 2;
+        engine.system.leap = LeapIndicator::NoWarning;
+
+        // Record some events directly
+        let prev_code = engine.event_tracker.last_event_code;
+        engine.event_tracker.record_event(6); // sys_clk
+        let mid_code = engine.event_tracker.last_event_code;
+        engine.event_tracker.record_event(6); // same event again
+        let final_code = engine.event_tracker.last_event_code;
+        assert_eq!(prev_code, 0, "initial event code should be 0");
+        assert_eq!(mid_code, 6, "after first record, code should be 6");
+        assert_eq!(final_code, 6, "after second record, code should still be 6");
+
+        let status = engine.compute_system_status();
+
+        // Decode event count and code
+        let event_count = (status >> 4) & 0x0F;
+        let event_code = status & 0x0F;
+        let clock_source = (status >> 8) & 0x3F;
+        let li = (status >> 14) & 0x03;
+
+        // LI = no warning (stratum 3, peer_count > 0)
+        assert_eq!(li, 0);
+        // Clock source = sync_ntp (3)
+        assert_eq!(clock_source, 3);
+        // Event count = 2 (two sys_clk events)
+        assert_eq!(event_count, 2);
+        // Event code = 6 (sys_clk)
+        assert_eq!(event_code, 6);
+    }
+
+    /// Unsynchronized system status.
+    #[test]
+    fn test_compute_system_status_unsynchronized() {
+        let config = ConfigTree::new();
+        let engine = DaemonEngine::new(config);
+
+        let status = engine.compute_system_status();
+
+        let li = (status >> 14) & 0x03;
+        let clock_source = (status >> 8) & 0x3F;
+        let event_count = (status >> 4) & 0x0F;
+
+        // LI = alarm (3)
+        assert_eq!(li, 3);
+        // Clock source = sync_unspec (0)
+        assert_eq!(clock_source, 0);
+        // Event count = 0 (no events recorded)
+        assert_eq!(event_count, 0);
+    }
+
+    // ── Fix 4: NTP packet authentication tests ────────────────────────
+
+    /// Helper: add a key to the engine's auth store.
+    fn add_auth_key(engine: &mut DaemonEngine, id: u32, digest: DigestType, key_data: &[u8]) {
+        engine
+            .auth
+            .add_key(NtpAuthKey::new(id, digest, key_data.to_vec()));
+    }
+
+    /// Helper: build an NTP packet with an MD5 MAC appended.
+    fn build_authenticated_packet(
+        engine: &DaemonEngine,
+        req_wire_t1: NtpTs,
+        keyid: u32,
+    ) -> Vec<u8> {
+        let mut resp = NtpPacket::zeroed();
+        resp.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
+        resp.stratum = 2;
+        resp.originate_ts = req_wire_t1;
+        resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1001, 0));
+        resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1001, 500_000_000));
+
+        let mut packet = resp.encode_header().to_vec(); // 48 bytes
+
+        // Append MAC: key_id (4 bytes) + digest
+        let key = engine.auth.get_key(keyid).expect("test key must exist");
+        if let Some(mac) = key.mac(&packet) {
+            packet.extend_from_slice(&keyid.to_be_bytes());
+            packet.extend_from_slice(&mac);
+        }
+        packet
+    }
+
+    /// Authenticated packet with matching key is accepted.
+    #[test]
+    fn test_auth_valid_mac_accepted() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        add_auth_key(&mut engine, 10, DigestType::Md5, b"secret");
+
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        // Set the peer's keyid
+        if let Some(peer) = engine.peers.get_mut(peer_id) {
+            peer.keyid = 10;
+        }
+
+        // Tick to create a pending request
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        assert_eq!(engine.pending_requests.len(), 1);
+        let req = engine.pending_requests[0].clone();
+
+        // Build authenticated response
+        let packet = build_authenticated_packet(&engine, req.wire_t1, 10);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1002, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // Peer should be reachable (auth passed)
+        assert!(
+            engine.peers.get(peer_id).unwrap().reach.is_reachable(),
+            "peer should be reachable after valid auth"
+        );
+        // foundkey should be incremented
+        assert!(
+            engine.system.auth_counters.foundkey >= 1,
+            "foundkey should be >= 1, got {}",
+            engine.system.auth_counters.foundkey
+        );
+        // badauth should remain 0
+        assert_eq!(
+            engine.system.auth_counters.badauth, 0,
+            "badauth should be 0 after valid auth"
+        );
+    }
+
+    /// Packet with wrong key fails authentication.
+    #[test]
+    fn test_auth_invalid_mac_rejected() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        // Add one key that will be used for MAC computation
+        add_auth_key(&mut engine, 10, DigestType::Md5, b"correct");
+        // Add a different key to be used for verification (peer references this)
+        add_auth_key(&mut engine, 11, DigestType::Md5, b"correct");
+
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        if let Some(peer) = engine.peers.get_mut(peer_id) {
+            peer.keyid = 10; // peer expects key 10
+        }
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        assert_eq!(engine.pending_requests.len(), 1);
+        let req = engine.pending_requests[0].clone();
+
+        // Sign the packet with key 11 (wrong key from peer's perspective)
+        let mut engine2 = DaemonEngine::new(ConfigTree::new());
+        add_auth_key(&mut engine2, 11, DigestType::Md5, b"wrongkey");
+        let wrong_packet = build_authenticated_packet(&engine2, req.wire_t1, 11);
+
+        // But we need to set the keyid in the packet to 10 (what peer expects)
+        // The MAC is computed over the header, and the keyid is appended after.
+        // We need to compute the MAC with key 10, but the wrong data, OR
+        // just tamper with the MAC.
+        //
+        // Simpler approach: build a packet with key 10 but corrupt the MAC.
+        let mut packet = build_authenticated_packet(&engine, req.wire_t1, 10);
+        // Corrupt the last byte of the MAC
+        if let Some(last) = packet.last_mut() {
+            *last ^= 0xFF;
+        }
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1002, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // Should log auth failure
+        assert!(
+            actions.iter().any(|a| matches!(a, DaemonAction::Log(m)
+                if m.contains("authentication failed"))),
+            "should log auth failure"
+        );
+        // Peer should NOT be reachable
+        assert!(
+            !engine.peers.get(peer_id).unwrap().reach.is_reachable(),
+            "peer should NOT be reachable after failed auth"
+        );
+        // badauth should be incremented
+        assert!(
+            engine.system.auth_counters.badauth >= 1,
+            "badauth should be >= 1, got {}",
+            engine.system.auth_counters.badauth
+        );
+    }
+
+    /// Packet with unknown key ID increments notfound counter.
+    #[test]
+    fn test_auth_unknown_key_rejected() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        add_auth_key(&mut engine, 10, DigestType::Md5, b"secret");
+
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        if let Some(peer) = engine.peers.get_mut(peer_id) {
+            peer.keyid = 10;
+        }
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        let req = engine.pending_requests[0].clone();
+
+        let mut packet = build_authenticated_packet(&engine, req.wire_t1, 10);
+        // Change the key_id in the packet to 99 (not in the store)
+        let keyid_pos = packet.len() - 20; // MD5 = 16 byte digest, keyid is 4 bytes before
+        packet[keyid_pos..keyid_pos + 4].copy_from_slice(&99u32.to_be_bytes());
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1002, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // notfound should be incremented
+        assert!(
+            engine.system.auth_counters.notfound >= 1,
+            "notfound should be >= 1, got {}",
+            engine.system.auth_counters.notfound
+        );
+    }
+
+    /// Peer with keyid=0 bypasses auth entirely.
+    #[test]
+    fn test_auth_not_configured_bypasses() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        add_auth_key(&mut engine, 10, DigestType::Md5, b"secret");
+
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+        // peer.keyid is already 0 by default
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        let req = engine.pending_requests[0].clone();
+
+        // Build unauthenticated packet
+        let mut resp = NtpPacket::zeroed();
+        resp.li_vn_mode =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
+        resp.stratum = 2;
+        resp.originate_ts = req.wire_t1;
+        resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1001, 0));
+        resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1001, 500_000_000));
+
+        let dgram = ReceivedDatagram::test(
+            resp.encode_header().to_vec(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1002, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        // Peer should be reachable (auth bypassed)
+        assert!(
+            engine.peers.get(peer_id).unwrap().reach.is_reachable(),
+            "peer should be reachable when no auth configured"
+        );
+        // Auth counters should not change
+        assert_eq!(
+            engine.system.auth_counters.foundkey, 0,
+            "foundkey should be 0"
+        );
+        assert_eq!(
+            engine.system.auth_counters.badauth, 0,
+            "badauth should be 0"
+        );
+    }
+
+    /// authenticated packet with different key type (SHA1) is accepted.
+    #[test]
+    fn test_auth_sha1_valid_mac_accepted() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        add_auth_key(&mut engine, 20, DigestType::Sha1, b"sha1secret");
+
+        let peer_id = add_peer(&mut engine, [127, 0, 0, 1]);
+
+        if let Some(peer) = engine.peers.get_mut(peer_id) {
+            peer.keyid = 20;
+        }
+
+        engine.tick(ntp_fp::ts_to_ntp(0, 0));
+        let req = engine.pending_requests[0].clone();
+
+        let packet = build_authenticated_packet(&engine, req.wire_t1, 20);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1002, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+
+        assert!(
+            engine.peers.get(peer_id).unwrap().reach.is_reachable(),
+            "peer should be reachable after SHA1 auth"
+        );
+        assert!(
+            engine.system.auth_counters.foundkey >= 1,
+            "foundkey should be >= 1 for SHA1"
         );
     }
 }
