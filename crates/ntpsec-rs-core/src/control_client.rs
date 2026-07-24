@@ -443,7 +443,7 @@ impl SystemVariables {
         let ev_name = system_event_name(ev_code);
         let freq_mode = if s & 0x0080 != 0 { ", freq_mode" } else { "" };
         format!(
-            "{}, {}, {} {}{}",
+            "{}, {}, {} event, {}{}",
             sys_status::li_name(li),
             sys_status::source_name(source),
             ev_cnt,
@@ -1328,14 +1328,22 @@ fn format_var_value(key: &str, val: &str) -> String {
         let idx = (leap_val.min(3)) as usize;
         return format!("{}={}", key, leap_patterns[idx]);
     }
-    // Real C ntpq outputs key=value without quoting
-    format!("{}={}", key, v)
+    // Real C ntpq output: string values containing alphabetic characters
+    // (or special characters like _, /, -) are quoted; purely numeric
+    // or dotted-decimal values are not quoted.
+    let needs_quoting = v.chars().any(|c| c.is_alphabetic() || c == '_' || c == '/');
+    if needs_quoting && !v.is_empty() {
+        format!("{}=\"{}\"", key, v)
+    } else {
+        format!("{}={}", key, v)
+    }
 }
 
 /// Render system variables in ntpq-compatible format (matching real C ntpq).
 ///
 /// Real C ntpq outputs variables in the order received from the daemon
-/// (no preferred ordering), one variable per line with trailing comma.
+/// (no preferred ordering), wrapped at ~60 chars per line, with trailing
+/// comma and newline after each line.
 pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -1345,10 +1353,24 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         sys.status_description(),
     ));
     // Real C ntpq outputs variables in daemon wire order — no preferred ordering.
+    // Wrapping at ~60 characters per line, matching real C ntpq behavior.
+    let mut line = String::new();
     for (key, val) in &sys.ordered_vars {
         let kv = format_var_value(key, val);
-        out.push_str(&kv);
-        out.push_str(",\n");
+        // +2 for comma and space
+        if line.len() + kv.len() + 2 > 60 && !line.is_empty() {
+            out.push_str(line.trim_end());
+            out.push_str(",\n");
+            line = String::new();
+        }
+        if !line.is_empty() {
+            line.push_str(", ");
+        }
+        line.push_str(&kv);
+    }
+    if !line.is_empty() {
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
     out
 }

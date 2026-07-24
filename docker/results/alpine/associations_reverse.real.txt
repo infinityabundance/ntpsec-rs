@@ -1,4 +1,4 @@
 
 ind assid status  conf reach auth condition  last_event cnt
 ===========================================================
-  1     1  8610   yes    no  none  sys.peer              1
+  1     1  8013   yes    no  none    reject unreachable  1

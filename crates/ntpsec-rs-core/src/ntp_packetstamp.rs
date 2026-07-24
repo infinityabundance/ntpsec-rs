@@ -252,14 +252,14 @@ pub fn recv_timestamp_from_cmsg(
         }
 
         // Ensure the reported length is within our buffer.
-        if cmsg_len < std::mem::size_of::<libc::cmsghdr>() as libc::size_t {
+        if (cmsg_len as usize) < std::mem::size_of::<libc::cmsghdr>() {
             break;
         }
 
         // Compute the offset of this cmsghdr from the start.
         let offset = (current as usize) - (cmsg_hdr_ptr as usize);
         let data_offset = offset + aligned_cmsg_data_offset();
-        let data_len = cmsg_len as usize - std::mem::size_of::<libc::cmsghdr>();
+        let data_len = (cmsg_len as usize).saturating_sub(std::mem::size_of::<libc::cmsghdr>());
 
         if cmsg_level == libc::SOL_SOCKET && cmsg_type == libc::SCM_TIMESTAMPNS as libc::c_int {
             // SCM_TIMESTAMPNS: data is a single struct timespec.

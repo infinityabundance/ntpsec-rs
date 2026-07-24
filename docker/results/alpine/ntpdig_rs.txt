@@ -1,8 +1,8 @@
-ntpdig-rs v0.3.7 — NTP query tool (Rust)
+ntpdig-rs v0.3.8 — NTP query tool (Rust)
 Querying 127.0.0.1:123
 
      remote           refid      st t when poll reach   delay   offset  jitter
 ==============================================================================
-*127.0.0.1        127.127.1.0  11 u    -   64    1    0.021   -0.005  7947.495
+*127.0.0.1        127.127.1.0  11 u    -   64    1    0.024   -0.004  7947.495
 
-time: 2026-07-24T02:55:50Z, clock offset: -0.000005s
+time: 2026-07-24T04:26:39Z, clock offset: -0.000004s
