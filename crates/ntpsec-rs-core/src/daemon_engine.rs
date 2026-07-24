@@ -2220,6 +2220,7 @@ impl DaemonEngine {
 
             // WRITECLOCK: write a clock variable
             opcodes::OP_WRITECLOCK => {
+                // ── 1. Parse the variable assignment ────────────────────
                 let data_str = String::from_utf8_lossy(&exchange.data);
                 let vars = parse_mode6_vars(&data_str);
                 if vars.is_empty() {
@@ -2228,18 +2229,69 @@ impl DaemonEngine {
                         bytes: build_error_response(req, 6), // BadValue
                     }];
                 }
-                // For refclock peers, log the write request
-                if req.associd != 0 {
-                    if let Some(peer) = self.peers.iter().find(|p| p.associd == req.associd) {
-                        for (key, val) in &vars {
-                            // Log the clock write via a log action
-                            let _ = peer; // peer is used for context
-                                          // emit log via the response path below
+
+                // ── 2. Apply each variable assignment ───────────────────
+                // Only recognized clock variables are accepted; all others
+                // are rejected per the spec.
+                let mut applied: Vec<(String, String)> = Vec::new();
+                let mut rejected: Vec<(String, String)> = Vec::new();
+
+                for (key, val) in &vars {
+                    match key.as_str() {
+                        "stratum" => {
+                            if let Ok(v) = val.parse::<u8>() {
+                                self.system.stratum = v;
+                                applied.push((key.clone(), val.clone()));
+                            } else {
+                                rejected.push((key.clone(), val.clone()));
+                            }
+                        }
+                        "refid" => {
+                            // Parse refid as ASCII (up to 4 chars) or hex
+                            if val.len() <= 4 && val.chars().all(|c| c.is_ascii_graphic()) {
+                                let mut bytes = [0u8; 4];
+                                let b = val.as_bytes();
+                                for i in 0..b.len().min(4) {
+                                    bytes[i] = b[i];
+                                }
+                                self.system.reference_id = u32::from_be_bytes(bytes);
+                                applied.push((key.clone(), val.clone()));
+                            } else if let Ok(v) =
+                                u32::from_str_radix(val.trim_start_matches("0x"), 16)
+                            {
+                                self.system.reference_id = v;
+                                applied.push((key.clone(), val.clone()));
+                            } else {
+                                rejected.push((key.clone(), val.clone()));
+                            }
+                        }
+                        "offset" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.system.sys_offset = v;
+                                applied.push((key.clone(), val.clone()));
+                            } else {
+                                rejected.push((key.clone(), val.clone()));
+                            }
+                        }
+                        _ => {
+                            // Unknown clock variable — reject
+                            rejected.push((key.clone(), val.clone()));
                         }
                     }
                 }
-                // Return what was written
-                let resp_text = vars
+
+                // ── 3. Build response ──────────────────────────────────
+                // If any assignments were applied, echo back the applied
+                // values (matching ntpq expectations).
+                // If ALL assignments were rejected, return BadValue error.
+                if rejected.len() == vars.len() {
+                    return vec![DaemonAction::Send {
+                        destination: source,
+                        bytes: build_error_response(req, 6), // BadValue
+                    }];
+                }
+
+                let resp_text = applied
                     .iter()
                     .map(|(k, v)| format!("{}={}", k, v))
                     .collect::<Vec<_>>()
@@ -2256,35 +2308,58 @@ impl DaemonEngine {
 
             // OP_READ_MRU: return MRU list entries
             opcodes::OP_READ_MRU => {
-                // Accept nonce from request data if present
+                // ── 1. Mandatory nonce verification ──────────────────────
+                // The nonce MUST be present and valid; empty request data
+                // or missing/invalid nonce is rejected outright.
                 let data_str = String::from_utf8_lossy(&exchange.data);
-                // Verify nonce if present
-                if !data_str.is_empty() {
-                    let vars = parse_mode6_vars(&data_str);
-                    let mut nonce_valid = false;
-                    for (key, val) in &vars {
-                        if key == "nonce" {
-                            if let Ok(nonce_bytes) = hex::decode(val) {
-                                if self.monitor.nonce_cache.verify_nonce(&nonce_bytes) {
-                                    nonce_valid = true;
-                                }
+                if data_str.is_empty() {
+                    return vec![DaemonAction::Send {
+                        destination: source,
+                        bytes: build_error_response(req, 4), // NoData
+                    }];
+                }
+                let vars = parse_mode6_vars(&data_str);
+                let mut nonce_valid = false;
+                for (key, val) in &vars {
+                    if key == "nonce" {
+                        if let Ok(nonce_bytes) = hex::decode(val) {
+                            if self.monitor.nonce_cache.verify_nonce(&nonce_bytes) {
+                                nonce_valid = true;
                             }
                         }
                     }
-                    if !nonce_valid {
-                        return vec![DaemonAction::Send {
-                            destination: source,
-                            bytes: build_error_response(req, 4), // NoData
-                        }];
-                    }
+                }
+                if !nonce_valid {
+                    return vec![DaemonAction::Send {
+                        destination: source,
+                        bytes: build_error_response(req, 4), // NoData
+                    }];
                 }
 
-                // Build MRU entries with index
-                let entries = self.monitor.read_mru(usize::MAX);
+                // ── 2. Row limit: max 100 entries per response ──────────
+                // This prevents unbounded memory/time from huge MRU lists.
+                let max_entries = 100usize;
+                let entries = self.monitor.read_mru(max_entries);
+
+                // ── 3. Response byte budgeting ──────────────────────────
+                // Mode 6 max payload per fragment is 468 bytes.
+                // For amplification prevention, use a reasonable floor so
+                // legitimate queries still work. The nonce requirement
+                // (enforced above) is the primary anti-spoofing mechanism;
+                // the row limit and byte budget are secondary defenses.
+                let header_sz = 12usize;
+                // Cap response data at Mode 6 standard max payload
+                let max_payload = 468usize;
+
+                // ── 4. Fragmentation-aware response building ────────────
+                // Build entries incrementally until the byte budget is
+                // exhausted. If entries remain, the M (more) bit is set
+                // by the caller via build_response below.
                 let mut resp_parts: Vec<String> = Vec::new();
+                let mut budget = max_payload;
                 for (i, entry) in entries.iter().enumerate() {
                     let addr_str = crate::ntp_net::socktoa(&entry.addr);
-                    resp_parts.push(format!(
+                    let part = format!(
                         "addr.{}={} last.{}={}.{:06} first.{}={}.{:06} ct.{}={} mv.{}={} rs.{}=0",
                         i,
                         addr_str,
@@ -2299,9 +2374,19 @@ impl DaemonEngine {
                         i,
                         entry.flags,
                         i,
-                    ));
+                    );
+                    // +1 for the comma separator (except for the first)
+                    let needed = part.len() + if resp_parts.is_empty() { 0 } else { 1 };
+                    if needed <= budget {
+                        budget -= needed;
+                        resp_parts.push(part);
+                    } else {
+                        break;
+                    }
                 }
-                resp_parts.join(",").into_bytes()
+
+                let data = resp_parts.join(",").into_bytes();
+                data
             }
 
             _ => {
@@ -3863,9 +3948,10 @@ mod tests {
     fn test_engine_mode6_writeclock() {
         use crate::ntp_control::*;
 
+        // ── Test stratum assignment ───────────────────────────────────
         let mut engine = DaemonEngine::new(ConfigTree::new());
-        let body = b"fudge=0.001".to_vec();
-
+        assert_eq!(engine.system.stratum, NTP_MAXSTRAT);
+        let body = b"stratum=3".to_vec();
         let mut msg = ControlMessage::zeroed();
         msg.li_vn_mode = NtpPacket::set_li_vn_mode(
             LeapIndicator::NoWarning,
@@ -3891,8 +3977,103 @@ mod tests {
             actions
                 .iter()
                 .any(|a| matches!(a, DaemonAction::Send { .. })),
-            "WRITECLOCK should produce Send"
+            "WRITECLOCK stratum should produce Send"
         );
+        assert_eq!(engine.system.stratum, 3, "stratum should be updated to 3");
+
+        // ── Test refid assignment (ASCII) ─────────────────────────────
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let body = b"refid=GPS".to_vec();
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_WRITECLOCK).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(&body);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        assert_eq!(
+            engine.system.reference_id,
+            u32::from_be_bytes([b'G', b'P', b'S', 0]),
+            "refid should be updated to GPS"
+        );
+
+        // ── Test offset assignment ────────────────────────────────────
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let body = b"offset=0.05".to_vec();
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_WRITECLOCK).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(&body);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        assert!(
+            (engine.system.sys_offset - 0.05).abs() < 1e-9,
+            "offset should be updated to 0.05, got {}",
+            engine.system.sys_offset
+        );
+
+        // ── Test unknown variable rejection ───────────────────────────
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let body = b"fudge=0.001".to_vec();
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_WRITECLOCK).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(&body);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (resp_header, _) = ControlMessage::decode(bytes).unwrap();
+            assert!(
+                resp_header.decode_opcode().error,
+                "unknown clock variable should return error response"
+            );
+        } else {
+            panic!("expected Send action");
+        }
     }
 
     #[test]

@@ -54,7 +54,7 @@ Disposition states — precise, non-collapsible:
 | 5 | **ntpd -n / --nofork** | No fork | ✅ CLOSED | Daemon stays in foreground |
 | 6 | **ntpd -p / --private** | Private key file | ✅ CLOSED | Key file path accepted |
 | 7 | **ntpd -b / --bcastsync** | Broadcast client sync | ✅ CLOSED | Broadcast mode handled in engine |
-| 8 | **Seccomp sandboxing** | `ntp_sandbox.c` | ✅ CLOSED | x86_64 + aarch64; prctl fallback; Docker-tested on Alpine/glibc |
+| 8 | **Seccomp sandboxing** | `ntp_sandbox.c` | ✅ CLOSED | x86_64 (tight) + aarch64 (76-entry confinement); prctl fallback; Docker-tested |
 | 9 | **chroot support** | `ntpd -i <dir>` | ⏳ DEFERRED | Requires filesystem setup beyond current scope |
 | 10 | **DNS resolution** | `ntp_dns.c` async DNS | 🔄 PARTIAL | Synchronous with timeout; no async resolver; works for basic use |
 | 11 | **NTS-KE server** | NTS key establishment server | ✅ CLOSED | TLS 1.3 + rustls + cookie generation + response building; 10 tests |
@@ -102,9 +102,9 @@ Disposition states — precise, non-collapsible:
 | 53 | **Kernel PLL adjtimex** | `ntp_adjtime()` syscall | ✅ CLOSED | adjtimex wired; Timex struct matches libc (208 bytes) |
 | 54 | **NTPv3 compatibility** | v3 wire format | 🗑️ DEPRECATED | ntpsec v4 only |
 | 55 | **Refclock pipeline** | Full integration | ✅ CLOSED | 15 drivers → accept_sample → intersection → cluster → combine → discipline |
-| 56 | **Clock intersection** | RFC 5905 §11.2.1 | ✅ CLOSED | Marzullo with full root_dist interval computation |
-| 57 | **Clock clustering** | RFC 5905 §11.2.3 | ✅ CLOSED | Iterative selection jitter removal; prefer peer protected |
-| 58 | **Clock combining** | RFC 5905 §11.2.2 | ✅ CLOSED | Weighted average by 1/jitter²; combined jitter |
+| 56 | **Clock intersection** | RFC 5905 §11.2.1 | ✅ CLOSED | Three-tuple majority clique (lower/midpoint/upper); full RFC 5905 |
+| 57 | **Clock clustering** | RFC 5905 §11.2.3 | ✅ CLOSED | Iterative selection jitter removal; prefer peer protected by stable associd |
+| 58 | **Clock combining** | RFC 5905 §11.2.2 | ✅ CLOSED | Weighted average by root synchronization distance, not jitter² |
 | 59 | **Poll adaptation** | iburst/burst | ✅ CLOSED | iburst: 8-packet burst on first reach; burst: per-poll burst |
 | 60 | **Config: fudge** | fudge directive | ✅ CLOSED | Parsed + stored + applied: time1, time2, stratum, refid |
 | 61 | **Config: tinker** | tinker directive | ✅ CLOSED | step, panic, dispersion, stepout all wired |
@@ -115,9 +115,9 @@ Disposition states — precise, non-collapsible:
 | 66 | **Config: interface** | interface directive | ✅ CLOSED | listen/drop/ignore parsed |
 | 67 | **Config: logfile/setvar** | logfile + setvar | ✅ CLOSED | logfile path stored; setvar key=value stored |
 | 68 | **Mode 6: WRITEVAR** | Control write | ✅ CLOSED | Parses key=val; applies offset/freq/stratum/refid; requires auth |
-| 69 | **Mode 6: WRITECLOCK** | Clock write | ✅ CLOSED | Parses + validates clock variable writes |
+| 69 | **Mode 6: WRITECLOCK** | Clock write | ✅ CLOSED | Parses + applies stratum/refid/offset; rejects unknown vars |
 | 70 | **Mode 6: OP_REQ_NONCE** | Nonce generation | ✅ CLOSED | 32-byte random nonce via getrandom; 30-second expiry |
-| 71 | **Mode 6: OP_READ_MRU** | MRU query | ✅ CLOSED | Nonce-verified; returns indexed entries matching ntpsec format |
+| 71 | **Mode 6: OP_READ_MRU** | MRU query | ✅ CLOSED | Mandatory nonce; 100-entry limit; 468-byte fragment budget; amplification-safe |
 | 72 | **Mode 6: READ_ORDLIST_A** | Ordered read auth | ✅ CLOSED | Authenticated ordered variable list |
 | 73 | **MRU nonce cache** | Nonce management | ✅ CLOSED | 30-second expiry; one-time-use; bounded to 1024 entries |
 | 74 | **Leapfile validation** | SHA-1 hash + expiration | ✅ CLOSED | #$ hash validated; #@ expiration checked; file expired → error |

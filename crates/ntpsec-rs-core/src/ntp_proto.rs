@@ -354,19 +354,24 @@ pub fn root_dispersion(peer: &Peer, now: NtpTs64) -> f64 {
 
 // ──── Clock Selection Algorithm ────────────────────────────────────────
 
-/// The intersection algorithm (RFC 5905 §10.2, full implementation).
-/// Finds the smallest intersection interval that contains at least one
-/// endpoint from each of a majority of peers.  Peers whose confidence
-/// interval does NOT overlap the intersection are falsetickers (marked TEST5).
+/// The intersection algorithm (RFC 5905 §11.2.1, three-tuple majority clique).
+/// Finds the smallest intersection interval that contains at least m = n - allow
+/// midpoints (peer offset values), not just overlapping confidence intervals.
+/// Peers whose confidence interval does NOT overlap the intersection are
+/// falsetickers (marked TEST5).
 ///
 /// This implementation follows RFC 5905 §11.2.1 exactly:
 /// 1. Compute the confidence interval for each peer:
 ///    [offset - synch, offset + synch]
 ///    where synch = max(MINDISTANCE, root_delay/2 + root_dispersion + phi)
-/// 2. Build a sorted list of endpoints
-/// 3. Find the intersection interval that contains at least m = n - allow
-///    endpoints, increasing allow until a valid interval is found
-/// 4. Mark out-of-intersection peers with TEST5
+/// 2. Build a sorted list of THREE tuples per candidate:
+///    a. lower bound  (offset - synch, +1, i) — enter interval
+///    b. midpoint     (offset,          0, i) — vote
+///    c. upper bound  (offset + synch, -1, i) — leave interval
+/// 3. Sort by value, then by type (+1 enters first, 0 votes, -1 leaves last).
+/// 4. Find the intersection interval that contains at least m = n - allow
+///    midpoints, increasing allow until a valid interval is found.
+/// 5. Mark out-of-intersection peers with TEST5.
 pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     let n = peers.len();
     if n == 0 {
@@ -387,59 +392,83 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
         })
         .collect();
 
-    // Build sorted endpoints: (value, type, peer_index)
-    //   type = -1 for lower bound, +1 for upper bound
-    let mut endpoints: Vec<(f64, i8, usize)> = Vec::with_capacity(2 * n);
+    // Build THREE endpoints per peer as required by RFC 5905 §11.2.1:
+    //   (offset - synch,  +1, peer_index)   // lower bound: enter
+    //   (offset,          0,  peer_index)   // midpoint: vote
+    //   (offset + synch,  -1, peer_index)   // upper bound: leave
+    let mut endpoints: Vec<(f64, i8, usize)> = Vec::with_capacity(3 * n);
     for (i, p) in peers.iter().enumerate() {
-        endpoints.push((p.offset - synch[i], -1, i));
-        endpoints.push((p.offset + synch[i], 1, i));
+        endpoints.push((p.offset - synch[i], 1, i));
+        endpoints.push((p.offset, 0, i));
+        endpoints.push((p.offset + synch[i], -1, i));
     }
-    // Sort by offset; when equal, lower bound (-1) comes first.
+    // Sort by offset; when equal, +1 (enter) < 0 (midpoint) < -1 (leave).
+    // This ordering ensures that at a given value, all enters are processed
+    // before counting midpoints and all leaves are processed afterward.
     endpoints.sort_by(|a, b| {
         a.0.partial_cmp(&b.0)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.cmp(&b.1))
+            .then(b.1.cmp(&a.1)) // reverse: +1 < 0 < -1
     });
 
-    // Marzullo's intersection algorithm (RFC 5905 §10.2).
-    // Scan endpoints with increasing allow count (falseticker tolerance).
-    // The first allow that yields a valid intersection is the minimum number
-    // of falseticker peers whose intervals must be excluded.
+    // Three-tuple majority clique scan (RFC 5905 §11.2.1).
+    // For each allow level, scan endpoints tracking `count` (number of
+    // confidence intervals covering the current point).  The intersection
+    // interval is valid only if it contains at least m = n - allow midpoints
+    // (peer offset values), not just overlapping confidence intervals.
     let mut intersection_start = 0.0f64;
     let mut intersection_end = 0.0f64;
     let mut found = false;
 
     for allow in 0..n {
+        let m = n - allow; // majority threshold
         let mut count = 0usize;
-        let mut start = f64::NAN;
-        let mut end = f64::NAN;
+        let mut in_interval = false;
+        let mut interval_start = f64::NAN;
+        let mut mid_count = 0usize;
 
         for (val, typ, _) in &endpoints {
-            // typ is -1 (lower) → count += 1; +1 (upper) → count -= 1
-            if *typ < 0 {
-                count = count.wrapping_add(1);
-            } else {
-                count = count.wrapping_sub(1);
+            match typ {
+                1 => count += 1,  // lower bound: enter interval
+                0 => (),          // midpoint: no change to count
+                -1 => count -= 1, // upper bound: leave interval
+                _ => unreachable!(),
             }
 
-            if count >= n - allow {
-                if start.is_nan() {
-                    start = *val;
+            if in_interval {
+                // Count midpoints within the active interval
+                if *typ == 0 {
+                    mid_count += 1;
                 }
-            } else if !start.is_nan() && end.is_nan() {
-                end = *val;
-                break;
+                // Check if we've left the intersection
+                if count < m {
+                    if mid_count >= m {
+                        // Found: interval contains enough midpoints
+                        intersection_start = interval_start;
+                        intersection_end = *val;
+                        found = true;
+                        break;
+                    }
+                    // Not enough midpoints — keep scanning for next interval
+                    in_interval = false;
+                    mid_count = 0;
+                }
+            } else if count >= m {
+                // Entering a candidate intersection interval
+                in_interval = true;
+                interval_start = *val;
+                mid_count = if *typ == 0 { 1 } else { 0 };
             }
         }
 
-        // If we scanned past the last endpoint while still inside the intersection
-        if !start.is_nan() && end.is_nan() {
-            end = endpoints.last().unwrap().0;
+        if found {
+            break;
         }
 
-        if !start.is_nan() && !end.is_nan() {
-            intersection_start = start;
-            intersection_end = end;
+        // Handle case where intersection extends past the last endpoint
+        if in_interval && mid_count >= m {
+            intersection_start = interval_start;
+            intersection_end = endpoints.last().unwrap().0;
             found = true;
             break;
         }
@@ -498,15 +527,13 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
         return indices;
     }
 
-    if indices.len() <= 1 {
-        return indices;
-    }
-
-    // Identify the prefer peer among the candidates (if any).
-    // The prefer peer is always kept during pruning.
-    let prefer_pos = indices
+    // Identify the prefer peer by its ORIGINAL peer array index, NOT its
+    // position in the survivors vector.  After removing entries from
+    // `indices`, a vector-position-based guard would protect the wrong
+    // peer or lose the prefer peer entirely.
+    let prefer_associd = peers
         .iter()
-        .position(|&i| peers[i].flags.contains(PeerFlags::PREFER));
+        .position(|p| p.flags.contains(PeerFlags::PREFER));
 
     // Compute peer jitter: RMS deviation from the survivor offset mean
     // (RFC 5905 §11 eq 6) — each peer's jitter relative to all others.
@@ -552,7 +579,7 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
         let mut to_remove: Vec<usize> = Vec::new();
         let mut kept_any = false;
         for j in 0..indices.len() {
-            let is_prefer = prefer_pos.map_or(false, |p| j == p);
+            let is_prefer = prefer_associd.map_or(false, |pa| indices[j] == pa);
             if !is_prefer && peer_jitter[j] > threshold {
                 to_remove.push(j);
             } else {
@@ -584,7 +611,7 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
         let worst = peer_jitter
             .iter()
             .enumerate()
-            .filter(|(idx, _)| prefer_pos.map_or(true, |p| *idx != p))
+            .filter(|(idx, _)| prefer_associd.map_or(true, |pa| indices[*idx] != pa))
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx);
 
@@ -601,9 +628,11 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
 }
 
 /// The combining algorithm (RFC 5905 §12).  Computes a weighted average
-/// of the survivor offsets.  The weight for each survivor is 1 / (peer_jitter²).
+/// of the survivor offsets.  The weight for each survivor is inversely
+/// proportional to its root synchronization distance (not peer jitter²).
+/// This gives more weight to peers with smaller total clock uncertainty.
 /// Returns (combined_offset, combined_jitter).
-pub fn clock_combine(peers: &[Peer], survivors: &[usize]) -> (f64, f64) {
+pub fn clock_combine(peers: &[Peer], survivors: &[usize], now: NtpTs64) -> (f64, f64) {
     if survivors.is_empty() {
         return (0.0, 0.0);
     }
@@ -611,14 +640,26 @@ pub fn clock_combine(peers: &[Peer], survivors: &[usize]) -> (f64, f64) {
         return (peers[survivors[0]].offset, peers[survivors[0]].jitter);
     }
 
+    let phi = 15e-6; // 15 ppm clock skew
     let mut sum_weight = 0.0f64;
     let mut sum_offset = 0.0f64;
     let mut sum_jitter_sq = 0.0f64;
 
     for &idx in survivors {
         let p = &peers[idx];
-        let w = if p.jitter > 0.0 {
-            1.0 / (p.jitter * p.jitter)
+
+        // RFC 5905 §12: root synchronization distance is the maximum of
+        // MINDIST and the root distance components:
+        //   root_sync_dist = max(MINDIST, root_delay/2 + root_dispersion
+        //                     + phi * elapsed + jitter)
+        // Weight is inversely proportional to this distance.
+        let elapsed =
+            ntp_fp::ntp_ts64_to_double(now) - ntp_fp::ntp_ts64_to_double(p.reference_time);
+        let root_sync_dist =
+            (p.root_delay / 2.0 + p.root_dispersion + phi * elapsed.max(0.0) + p.jitter)
+                .max(NTP_MINDIST);
+        let w = if root_sync_dist > 0.0 {
+            1.0 / root_sync_dist
         } else {
             1.0
         };
@@ -1023,7 +1064,7 @@ impl SystemState {
         }
 
         // 4. Run combining algorithm
-        let (combined_offset, combined_jitter) = clock_combine(peers, &survivors);
+        let (combined_offset, combined_jitter) = clock_combine(peers, &survivors, now);
 
         // 5. Pick the system peer — prefer the PREFER peer if any survivor has the flag,
         //    otherwise use the first survivor.
@@ -1271,18 +1312,21 @@ mod tests {
     }
     #[test]
     fn test_clock_combine() {
-        let _now = ntp_fp::ts_to_ntp(1000, 0);
+        let now = ntp_fp::ts_to_ntp(1000, 0);
         let mut peers = vec![
             make_peer(0.001, 0.005, 0.001, true),
             make_peer(0.003, 0.005, 0.001, true),
         ];
         for p in &mut peers {
             p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
         }
 
+        // Both peers have identical root_distance (same delay, dispersion,
+        // reference_time, jitter), so they get equal weight.
         let survivors: Vec<usize> = (0..peers.len()).collect();
-        let (offset, _jitter) = clock_combine(&peers, &survivors);
-        // Average of 0.001 and 0.003 = 0.002
+        let (offset, _jitter) = clock_combine(&peers, &survivors, now);
+        // Equal-weighted average of 0.001 and 0.003 = 0.002
         assert!((offset - 0.002).abs() < 0.001);
     }
 
@@ -1432,6 +1476,203 @@ mod tests {
         assert!(
             survivors.contains(&0),
             "prefer peer should remain despite high jitter"
+        );
+    }
+
+    // ── Three-tuple majority clique test ────────────────────────────────
+    //
+    // RFC 5905 §11.2.1 requires three tuples per candidate: lower bound,
+    // midpoint (the peer's offset), and upper bound.  The midpoint
+    // represents a "vote" that the peer is within the intersection.
+    // The majority clique requires at least m = n - allow midpoints
+    // within the intersection interval, not just overlapping confidence
+    // intervals.
+    //
+    // This test constructs 5 peers: 3 tightly clustered near offset 0,
+    // one wide-interval peer at +100 ms whose confidence interval overlaps
+    // the cluster but whose midpoint is far away, and one completely
+    // disjoint peer at +1.0 s.
+    //
+    // Under the old two-endpoint Marzullo scan (RFC 5905 §10.2), the
+    // wide-interval peer would contribute its overlap to count towards
+    // the intersection threshold even though its actual offset estimate
+    // is far from the true-time cluster.  The three-tuple midpoint check
+    // correctly requires that at least m = n - allow midpoints fall
+    // within the intersection interval before it is accepted.
+    #[test]
+    fn test_three_tuple_majority_clique() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+
+        // Three peers tightly clustered around the true time (offset ~0)
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true),
+            make_peer(0.001, 0.005, 0.001, true),
+            make_peer(0.002, 0.005, 0.001, true),
+            // Peer at +100 ms with very wide root delay so its interval
+            // overlaps the cluster, but its midpoint is far away.
+            make_peer(0.100, 0.800, 0.001, true),
+            // Peer completely disjoint: offset 1.0, narrow interval
+            make_peer(1.000, 0.010, 0.001, true),
+        ];
+        for (i, p) in peers.iter_mut().enumerate() {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+            p.jitter = 0.005;
+            let _ = i;
+        }
+
+        let n_survivors = clock_intersection(&mut peers, now);
+
+        // The three-tuple algorithm must find the true-time cluster at
+        // offset ~0 as the intersection.  The peer at 1.0 is completely
+        // disjoint → must be TEST5.
+        let disjoint_flash = FlashBits::from_bits_truncate(peers[4].flash);
+        assert!(
+            disjoint_flash.contains(FlashBits::TEST5),
+            "disjoint peer (index 4) must be marked TEST5, flash={:?}",
+            disjoint_flash
+        );
+
+        // The three clustered peers must NOT be TEST5
+        for i in 0..3 {
+            let f = FlashBits::from_bits_truncate(peers[i].flash);
+            assert!(
+                !f.contains(FlashBits::TEST5),
+                "good peer {} should not be TEST5, flash={:?}",
+                i,
+                f
+            );
+        }
+
+        // The wide-interval peer at 0.100 has a confidence interval that
+        // overlaps the cluster (due to large root_delay/2), so its
+        // interval overlaps the intersection.  It is NOT TEST5.
+        let wide_flash = FlashBits::from_bits_truncate(peers[3].flash);
+        assert!(
+            !wide_flash.contains(FlashBits::TEST5),
+            "wide-interval peer (index 3) is NOT a falseticker: its \
+             interval overlaps even though its midpoint is far away, \
+             flash={:?}",
+            wide_flash
+        );
+
+        // Survivors = 4 (3 clustered + 1 wide-interval, but NOT the
+        // disjoint peer at index 4).  If fewer than 4 survived, the
+        // midpoint condition is working correctly: the intersection
+        // requires at least m midpoints in the interval.
+        assert!(
+            n_survivors >= 3,
+            "expected at least 3 survivors, got {}",
+            n_survivors
+        );
+
+        // Verify the algorithm found an intersection (marking the
+        // disjoint peer as TEST5 is what matters for correctness).
+        assert_eq!(
+            n_survivors, 4,
+            "expected 4 survivors (3 clustered + 1 wide-interval), got {}",
+            n_survivors
+        );
+    }
+
+    // ── Root-distance combining test ────────────────────────────────────
+    //
+    // Verify that clock_combine uses root synchronization distance (not
+    // 1/jitter²) for weights.  Two peers with identical offsets but very
+    // different root distances should produce a combined offset that is
+    // weighted toward the peer with smaller root distance.
+    #[test]
+    fn test_clock_combine_uses_root_distance() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+
+        // Peer 0: short root distance (low delay/dispersion)
+        // Peer 1: large root distance (high delay/dispersion) → lower weight
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true),
+            make_peer(0.010, 0.500, 0.100, true), // worse clock
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+            p.jitter = 0.005;
+        }
+
+        let survivors: Vec<usize> = (0..peers.len()).collect();
+        let (offset, _jitter) = clock_combine(&peers, &survivors, now);
+
+        // Peer 0 (offset=0.0) has much lower root_distance than peer 1
+        // (offset=0.01), so the combined offset should be closer to 0.0
+        // than to 0.005 (which would be the equal-weighted average).
+        // With weight ~ 1/root_sync_dist:
+        //   peer 0: root_sync_dist ≈ 0.0025 + 0.001 + 0.005 = 0.0085
+        //   peer 1: root_sync_dist ≈ 0.25 + 0.1 + 0.005 = 0.355
+        //   weight ratio ≈ 0.355/0.0085 ≈ 41.8×
+        assert!(
+            offset.abs() < 0.002,
+            "combined offset {} should be much closer to 0.0 than to 0.005 (peer 1's low weight pulls it away from 0.01)",
+            offset
+        );
+
+        // Also verify the weight is NOT based on jitter²: both have
+        // identical jitter=0.005, so 1/jitter² would give equal weights
+        // and the average would be 0.005.  Our offset is much closer to
+        // 0.0, proving root distance is what governs.
+        assert!(
+            offset < 0.003,
+            "offset {} confirms root_distance weighting (not 1/jitter²)",
+            offset
+        );
+    }
+
+    // ── Prefer peer survival by stable assoc ID test ────────────────────
+    //
+    // Verify that the prefer peer is protected by its original peer array
+    // index, not by a position in the survivors vector that could become
+    // stale after removals.
+    //
+    // We create 6 peers where only indices 0-4 pass the flash filter.
+    // The prefer peer is at original index 4 (the highest jitter outlier).
+    // After pruning, the prefer peer must remain even though vector
+    // operations shift positions around.
+    #[test]
+    fn test_prefer_peer_survives_by_stable_associd() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.000, 0.005, 0.001, true),  // 0: good
+            make_peer(0.001, 0.005, 0.001, true),  // 1: good
+            make_peer(0.002, 0.005, 0.001, true),  // 2: good
+            make_peer(0.003, 0.005, 0.001, true),  // 3: good
+            make_peer(10.0, 0.005, 0.001, true),   // 4: PREFER (outlier!)
+            make_peer(0.004, 0.005, 0.001, false), // 5: unreachable (TEST9)
+        ];
+        for (i, p) in peers.iter_mut().enumerate() {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+            p.jitter = 0.01;
+            if i == 4 {
+                p.jitter = 50.0; // highest jitter — should be pruned
+                p.flags |= PeerFlags::PREFER;
+            }
+            if i == 5 {
+                // Force TEST9 — this peer will be filtered out by flash
+                p.flash |= FlashBits::TEST9.bits();
+            }
+        }
+
+        let survivors = clock_cluster(&mut peers, now);
+
+        // Peer 5 (unreachable) must have been filtered by flash
+        assert!(
+            !survivors.contains(&5),
+            "unreachable peer 5 should be filtered by flash"
+        );
+
+        // Prefer peer (index 4) MUST survive despite being the worst
+        // outlier with the highest jitter.
+        assert!(
+            survivors.contains(&4),
+            "prefer peer (index 4) must survive by assoc ID, not vector position. survivors={:?}",
+            survivors
         );
     }
 }
