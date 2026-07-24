@@ -744,6 +744,23 @@ pub fn parse_config(input: &str) -> ConfigTree {
                 let directive = kw.to_lowercase();
                 let args = read_args(&mut sc);
                 match build_option(&directive, &args) {
+                    Ok(ConfigOption::Include(path)) => {
+                        // Recursively parse the included file
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => {
+                                let included = parse_config(&content);
+                                tree.options.extend(included.options);
+                                tree.errors.extend(included.errors);
+                                tree.options.push(ConfigOption::Include(path));
+                            }
+                            Err(e) => {
+                                tree.errors.push(format!(
+                                    "line {}: includefile '{}': {}",
+                                    sc.line, path, e
+                                ));
+                            }
+                        }
+                    }
                     Ok(opt) => tree.add(opt),
                     Err(e) => tree.errors.push(format!("line {}: {}", sc.line, e)),
                 }
@@ -2145,5 +2162,26 @@ mod tests {
         let t = parse_config("mssntp true\n");
         assert!(t.errors.is_empty(), "{:?}", t.errors);
         assert_eq!(t.mssntp(), Some(true));
+    }
+
+    #[test]
+    fn test_parse_includefile() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("ntpconf_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let included_path = dir.join("included.conf");
+        let mut f = std::fs::File::create(&included_path).unwrap();
+        writeln!(f, "server pool.ntp.org iburst").unwrap();
+        writeln!(f, "driftfile /var/lib/ntp/drift").unwrap();
+        drop(f);
+
+        let main_config = format!("includefile {}\n", included_path.display());
+        let t = parse_config(&main_config);
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let servers = t.find_all("server");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(t.drift_file(), Some("/var/lib/ntp/drift"));
+
+        let _ = std::fs::remove_file(&included_path);
     }
 }

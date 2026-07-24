@@ -148,6 +148,12 @@ pub struct MonList {
     /// Matching ntpsec's default behavior where rate limiting applies after
     /// a configurable number of packets from the same source.
     pub rate_limit_count: u32,
+    /// Minimum average inter-packet interval in seconds (from `discard average`).
+    /// Default is 0.2 (200 ms, ~5 packets/sec). Set via the `discard average` directive.
+    pub min_avg_interval: f64,
+    /// Minimum inter-packet interval in seconds (from `discard minimum`).
+    /// Default is 0.0 (no minimum spacing). Set via the `discard minimum` directive.
+    pub min_interval: f64,
     /// Nonce cache for MRU query authentication.
     pub nonce_cache: NonceCache,
 }
@@ -156,10 +162,12 @@ impl MonList {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            max_entries: 600,     // ntpsec default
-            min_distance: 600,    // ntpsec default (seconds)
-            max_age: 3600,        // MRU_MAX_AGE = 3600 seconds (1 hour)
-            rate_limit_count: 10, // ntpsec default rate limit packet count
+            max_entries: 600,      // ntpsec default
+            min_distance: 600,     // ntpsec default (seconds)
+            max_age: 3600,         // MRU_MAX_AGE = 3600 seconds (1 hour)
+            rate_limit_count: 10,  // ntpsec default rate limit packet count
+            min_avg_interval: 0.2, // 200 ms (~5 packets/sec max)
+            min_interval: 0.0,
             nonce_cache: NonceCache::new(),
         }
     }
@@ -253,17 +261,16 @@ impl MonList {
         }) {
             // Rate-limiting algorithm from ntpsec:
             // Compute the average interval between successive packets.
-            // If it falls below MIN_INTERVAL, the source is rate-limited.
+            // If it falls below min_avg_interval, the source is rate-limited.
             // Also enforce that the source must exceed the configured
             // rate_limit_count before rate limiting applies (matching ntpsec
             // behavior which uses a configurable threshold, default 10).
-            const MIN_INTERVAL: f64 = 0.2; // 200 ms (~5 packets/sec max)
             if entry.count > self.rate_limit_count {
                 let dt = (entry.last_pkt.seconds - entry.first_pkt.seconds) as f64
                     + (entry.last_pkt.fraction as f64 - entry.first_pkt.fraction as f64)
                         / 4_294_967_296.0;
                 let avg_interval = dt / (entry.count as f64 - 1.0);
-                (avg_interval < MIN_INTERVAL, entry.count)
+                (avg_interval < self.min_avg_interval, entry.count)
             } else {
                 // Not enough packets yet for rate limiting
                 (false, entry.count)

@@ -898,6 +898,13 @@ pub struct DaemonEngine {
     /// Whether authentication is required for all NTP packets.
     pub auth_required: bool,
 
+    /// Leap smear interval in seconds (0 = disabled).
+    pub leap_smear_interval: u32,
+    /// Broadcast delay in microseconds.
+    pub broadcast_delay: u64,
+    /// Call delay for modem refclocks.
+    pub call_delay: u64,
+
     /// Pending MRU fragment state for continuation queries.
     /// Keyed by client address, tracks which nonce and offset to continue from.
     pending_mru_fragments: HashMap<NetAddr, MruFragmentState>,
@@ -973,6 +980,9 @@ impl DaemonEngine {
             stats_enabled: true,
             monitor_enabled: true,
             auth_required: false,
+            leap_smear_interval: 0,
+            broadcast_delay: 50000,
+            call_delay: 0,
             pending_mru_fragments: HashMap::new(),
             event_tracker: SystemEventTracker::new(&SystemState::new()),
         };
@@ -1101,6 +1111,8 @@ impl DaemonEngine {
 
                     let mut peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
                     peer.flags |= PeerFlags::CONFIGURED;
+                    // Apply any fudge values that modify the peer stratum/refid
+                    self.apply_fudge_to_peer(&mut peer, *refclock_type, *unit);
                     // Assign a unique association ID
                     if let Some(aid) = Self::allocate_associd(&mut self.next_associd, &self.peers) {
                         peer.associd = aid;
@@ -1378,6 +1390,40 @@ impl DaemonEngine {
                 ConfigOption::NtsServer { .. } => {
                     // Handled by parse_config() which also converts to nts_config
                 }
+                ConfigOption::Discard {
+                    average,
+                    minimum,
+                    monitor,
+                } => {
+                    // Wire discard values to the monitor's rate-limiting mechanism
+                    if let Some(avg) = average {
+                        // Convert from NTP's internal average spacing (seconds)
+                        // to the minimum average interval used by is_rate_limited().
+                        // discard average N: minimum average inter-packet gap in log2 seconds.
+                        // NTP default for discard average is 3 (log2 seconds) = 8 seconds average
+                        // spacing between client packets. We convert to seconds here.
+                        self.monitor.min_avg_interval = (*avg as f64).max(0.001);
+                    }
+                    if let Some(min) = minimum {
+                        // discard minimum N: minimum inter-packet gap in seconds.
+                        self.monitor.min_interval = (*min as f64).max(0.0);
+                    }
+                    if let Some(mon) = monitor {
+                        // discard monitor N: monitor threshold for MRU entries.
+                        // This affects how aggressively the monitor tracks clients.
+                        self.monitor.rate_limit_count = *mon;
+                    }
+                }
+                ConfigOption::LeapSmearInterval(val) => {
+                    self.leap_smear_interval = *val;
+                    self.system.leap_smear_interval = *val;
+                }
+                ConfigOption::BroadcastDelay(val) => {
+                    self.broadcast_delay = *val;
+                }
+                ConfigOption::CallDelay(val) => {
+                    self.call_delay = *val;
+                }
                 _ => {}
             }
         }
@@ -1559,6 +1605,50 @@ impl DaemonEngine {
             }
         }
         None
+    }
+
+    /// Apply fudge values (stratum, refid, time1, time2) to a refclock peer.
+    /// Called during configuration to set the peer's stratum and reference ID
+    /// from any matching fudge directive.
+    fn apply_fudge_to_peer(&self, peer: &mut Peer, refclock_type: u8, unit: u8) {
+        if let Some((_time1, _time2, stratum, refid)) =
+            self.fudge_values.get(&(refclock_type, unit))
+        {
+            if *stratum > 0 && *stratum < 16 {
+                peer.stratum = *stratum;
+            }
+            if !refid.is_empty() {
+                // Convert the refid string to a 4-byte reference ID.
+                // If it's exactly 4 ASCII chars, pack as a u32 (big-endian).
+                let refid_bytes = refid.as_bytes();
+                if refid_bytes.len() == 4 {
+                    peer.reference_id = u32::from_be_bytes([
+                        refid_bytes[0],
+                        refid_bytes[1],
+                        refid_bytes[2],
+                        refid_bytes[3],
+                    ]);
+                } else if refid_bytes.len() == 3 {
+                    // Pad with null byte on the right
+                    peer.reference_id =
+                        u32::from_be_bytes([refid_bytes[0], refid_bytes[1], refid_bytes[2], 0]);
+                }
+            }
+        }
+    }
+
+    /// Apply fudge time1/time2 offset corrections to a refclock sample offset.
+    /// Time1 is added to the offset (constant correction for the driver),
+    /// time2 is intended for variable correction (not yet applied here).
+    fn apply_fudge_offset(&self, refclock_type: u8, unit: u8, offset: f64) -> f64 {
+        if let Some((time1, _time2, _stratum, _refid)) =
+            self.fudge_values.get(&(refclock_type, unit))
+        {
+            if *time1 != 0.0 {
+                return offset + *time1;
+            }
+        }
+        offset
     }
 
     /// Verify NTP packet authentication (MAC) for a server response.
@@ -2841,6 +2931,19 @@ impl DaemonEngine {
             }
         };
 
+        // Determine refclock type and unit from the fudge_values map.
+        // We find the matching (refclock_type, unit) for this associd by
+        // looking at refclock instances.
+        let mut refclock_type: u8 = 0;
+        let mut refclock_unit: u8 = 0;
+        for inst in &self.refclocks.instances {
+            if inst.associd == associd {
+                refclock_type = inst.refclock_type;
+                refclock_unit = inst.unit;
+                break;
+            }
+        }
+
         // For refclocks, we compute the offset directly:
         //   offset = T3 - T4  (server transmit minus client receive)
         //   delay  = nominal small value for a local refclock
@@ -2852,8 +2955,11 @@ impl DaemonEngine {
         let t3_f = ntp_fp::ntp_ts64_to_double(t3);
         let t4_f = ntp_fp::ntp_ts64_to_double(rx_time);
 
-        let offset = t3_f - t4_f;
+        let mut offset = t3_f - t4_f;
         let delay = 0.001; // nominal 1 ms for a local refclock
+
+        // Apply fudge time1 correction (additive offset adjustment)
+        offset = self.apply_fudge_offset(refclock_type, refclock_unit, offset);
 
         // Validate
         if !offset.is_finite() || offset.abs() > 1_000_000.0 {
@@ -2865,13 +2971,34 @@ impl DaemonEngine {
 
         // Update peer state and clock filter
         if let Some(peer) = self.peers.get_mut(peer_idx) {
-            // Update peer fields from the synthetic server packet
-            peer.stratum = 0; // primary refclock
+            // Update peer fields from the synthetic server packet.
+            // Apply fudge stratum if configured, otherwise default to primary (0).
+            if let Some((_t1, _t2, fudge_stratum, _refid)) =
+                self.fudge_values.get(&(refclock_type, refclock_unit))
+            {
+                if *fudge_stratum > 0 && *fudge_stratum < 16 {
+                    peer.stratum = *fudge_stratum;
+                } else {
+                    peer.stratum = 0; // primary refclock default
+                }
+                // Apply fudge refid if set (already set at peer creation, but
+                // ensure it persists through sample processing)
+                if !_refid.is_empty() && _refid.len() <= 4 {
+                    let refid_bytes = _refid.as_bytes();
+                    let mut padded = [0u8; 4];
+                    padded[..refid_bytes.len()].copy_from_slice(refid_bytes);
+                    peer.reference_id = u32::from_be_bytes(padded);
+                } else {
+                    peer.reference_id = packet.reference_id;
+                }
+            } else {
+                peer.stratum = 0; // primary refclock default
+                peer.reference_id = packet.reference_id;
+            }
             peer.leap = packet.leap_indicator();
             peer.precision = packet.precision;
             peer.root_delay = 0.0;
             peer.root_dispersion = 0.0;
-            peer.reference_id = packet.reference_id;
             peer.reference_time = ntp_fp::ntp_ts_to_ntpts(packet.reference_ts);
             peer.receive_time = rx_time;
             peer.transmit_time = t3;
@@ -5377,5 +5504,170 @@ mod tests {
             engine.system.auth_counters.foundkey >= 1,
             "foundkey should be >= 1 for SHA1"
         );
+    }
+
+    // ── Fudge value application tests ────────────────────────────────
+
+    #[test]
+    fn test_apply_fudge_to_peer_stratum() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Fudge {
+            refclock_type: 28,
+            unit: 0,
+            time1: 0.0,
+            time2: 0.0,
+            stratum: 3,
+            refid: "GPS".to_string(),
+        });
+        let mut engine = DaemonEngine::new(config);
+
+        // Create a peer and apply fudge
+        let sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
+        engine.apply_fudge_to_peer(&mut peer, 28, 0);
+
+        assert_eq!(peer.stratum, 3, "fudge stratum should be applied");
+        // refid "GPS" (3 bytes) should be padded with null
+        assert_eq!(
+            peer.reference_id.to_be_bytes(),
+            [b'G', b'P', b'S', 0],
+            "fudge refid should be applied"
+        );
+    }
+
+    #[test]
+    fn test_apply_fudge_to_peer_refid_4byte() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Fudge {
+            refclock_type: 28,
+            unit: 1,
+            time1: 0.0,
+            time2: 0.0,
+            stratum: 5,
+            refid: "GPS.".to_string(),
+        });
+        let mut engine = DaemonEngine::new(config);
+
+        let sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
+        engine.apply_fudge_to_peer(&mut peer, 28, 1);
+
+        assert_eq!(
+            peer.reference_id.to_be_bytes(),
+            [b'G', b'P', b'S', b'.'],
+            "4-byte refid should be packed as-is"
+        );
+    }
+
+    #[test]
+    fn test_apply_fudge_offset_time1() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Fudge {
+            refclock_type: 28,
+            unit: 0,
+            time1: 0.01,
+            time2: 0.0,
+            stratum: 0,
+            refid: String::new(),
+        });
+        let engine = DaemonEngine::new(config);
+
+        let corrected = engine.apply_fudge_offset(28, 0, 1.0);
+        assert!(
+            (corrected - 1.01).abs() < 1e-9,
+            "time1 should be added to offset: got {}",
+            corrected
+        );
+    }
+
+    #[test]
+    fn test_apply_fudge_offset_no_match() {
+        let config = ConfigTree::new();
+        let engine = DaemonEngine::new(config);
+
+        let corrected = engine.apply_fudge_offset(28, 99, 1.0);
+        assert!(
+            (corrected - 1.0).abs() < 1e-9,
+            "no fudge match should return offset unchanged: got {}",
+            corrected
+        );
+    }
+
+    // ── Discard directive wiring tests ──────────────────────────────
+
+    #[test]
+    fn test_apply_config_discard_average() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Discard {
+            average: Some(8),
+            minimum: None,
+            monitor: None,
+        });
+        let engine = DaemonEngine::new(config);
+        assert!(
+            (engine.monitor.min_avg_interval - 8.0).abs() < 1e-9,
+            "min_avg_interval should be set from discard average"
+        );
+        assert!(
+            (engine.monitor.min_interval - 0.0).abs() < 1e-9,
+            "min_interval should remain default"
+        );
+    }
+
+    #[test]
+    fn test_apply_config_discard_minimum() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Discard {
+            average: None,
+            minimum: Some(1),
+            monitor: None,
+        });
+        let engine = DaemonEngine::new(config);
+        assert!(
+            (engine.monitor.min_interval - 1.0).abs() < 1e-9,
+            "min_interval should be set from discard minimum"
+        );
+    }
+
+    #[test]
+    fn test_apply_config_discard_monitor() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Discard {
+            average: None,
+            minimum: None,
+            monitor: Some(5),
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(
+            engine.monitor.rate_limit_count, 5,
+            "rate_limit_count should be set from discard monitor"
+        );
+    }
+
+    // ── LeapSmearInterval / BroadcastDelay / CallDelay tests ───────
+
+    #[test]
+    fn test_apply_config_leap_smear_interval() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::LeapSmearInterval(3600));
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.leap_smear_interval, 3600);
+        assert_eq!(engine.system.leap_smear_interval, 3600);
+    }
+
+    #[test]
+    fn test_apply_config_broadcast_delay() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::BroadcastDelay(50000));
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.broadcast_delay, 50000);
+    }
+
+    #[test]
+    fn test_apply_config_call_delay() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::CallDelay(2000));
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.call_delay, 2000);
     }
 }

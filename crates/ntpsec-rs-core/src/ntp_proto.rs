@@ -1030,6 +1030,10 @@ pub struct SystemState {
     pub sel_broken: u64,
     /// Association ID of the current system peer (0 if none).
     pub sys_peer_associd: u16,
+    /// Leap smear interval in seconds (0 = disabled).
+    pub leap_smear_interval: u32,
+    /// Total leap smear correction accumulated so far (nanoseconds).
+    pub leap_smear_total: i64,
 }
 
 impl Default for SystemState {
@@ -1074,6 +1078,8 @@ impl Default for SystemState {
             leap_after: 0,
             sel_broken: 0,
             sys_peer_associd: 0,
+            leap_smear_interval: 0,
+            leap_smear_total: 0,
         }
     }
 }

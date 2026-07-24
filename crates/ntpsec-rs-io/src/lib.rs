@@ -14,6 +14,7 @@
 
 use ntpsec_rs_core::ntp_fp;
 use ntpsec_rs_core::ntp_io::*;
+use ntpsec_rs_core::ntp_packetstamp;
 use ntpsec_rs_core::ntp_types::*;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -136,21 +137,14 @@ impl NetworkIo for RealNetworkIo {
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
             .map_err(|e| IoError::BindFailed(format!("socket: {e}")))?;
 
-        // Enable SO_TIMESTAMPNS for kernel receive timestamps.
+        // Enable software timestamps via SO_TIMESTAMPNS (widely supported).
         // Nonblocking polling — timeout is managed by the daemon event loop.
-        let tsns: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_TIMESTAMPNS,
-                &tsns as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            // Non-fatal on platforms without SO_TIMESTAMPNS (e.g., macOS, BSD)
-        }
+        let _ = ntp_packetstamp::enable_software_timestamps(socket.as_raw_fd());
+
+        // Enable hardware timestamps via SO_TIMESTAMPING (Linux NIC-dependent).
+        // This is best-effort; if the NIC or driver doesn't support it, the
+        // setsockopt succeeds but only software timestamps are returned.
+        let _ = ntp_packetstamp::enable_hardware_timestamps(socket.as_raw_fd());
 
         socket
             .bind(&sockaddr.into())
@@ -348,6 +342,44 @@ fn extract_scm_timestampns_with_source(msg: &libc::msghdr) -> Option<(NtpTs64, T
             };
             let ntp = ntp_fp::tv_to_ntp(tv.tv_sec as i64, tv.tv_usec as i64);
             return Some((ntp, TimestampSource::KernelMicroseconds));
+        }
+        // Handle SCM_TIMESTAMPING (SO_TIMESTAMPING ancillary data).
+        // The SCM_TIMESTAMPING cmsg_type on Linux is 0x2C.
+        const SCM_TIMESTAMPING_LINUX: libc::c_int = 0x2C;
+        #[cfg(target_os = "linux")]
+        {
+            if cmsg.cmsg_level == libc::SOL_SOCKET && cmsg.cmsg_type == SCM_TIMESTAMPING_LINUX {
+                // SCM_TIMESTAMPING carries three struct timespec values:
+                // [0] = hardware timestamp (preferred)
+                // [1] = software-converted timestamp
+                // [2] = software skb timestamp
+                let required = unsafe {
+                    libc::CMSG_LEN((3 * std::mem::size_of::<libc::timespec>()) as _) as usize
+                };
+                if (cmsg.cmsg_len as usize) < required {
+                    return None;
+                }
+                let ts_array: &[libc::timespec; 3] = unsafe {
+                    let data_ptr = libc::CMSG_DATA(cmsg_ptr);
+                    &*(data_ptr as *const [libc::timespec; 3])
+                };
+                // Prefer hardware timestamp (index 0), fall back to software (index 2).
+                let (ts, is_hardware) = if ts_array[0].tv_sec != 0 || ts_array[0].tv_nsec != 0 {
+                    (&ts_array[0], true)
+                } else if ts_array[2].tv_sec != 0 || ts_array[2].tv_nsec != 0 {
+                    (&ts_array[2], false)
+                } else if ts_array[1].tv_sec != 0 || ts_array[1].tv_nsec != 0 {
+                    (&ts_array[1], false)
+                } else {
+                    return None;
+                };
+                let source = if is_hardware {
+                    TimestampSource::KernelNanoseconds
+                } else {
+                    TimestampSource::KernelNanoseconds
+                };
+                return Some((ntp_fp::ts_to_ntp(ts.tv_sec, ts.tv_nsec), source));
+            }
         }
         cmsg_ptr =
             unsafe { libc::CMSG_NXTHDR(msg as *const libc::msghdr as *mut libc::msghdr, cmsg_ptr) };
