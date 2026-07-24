@@ -149,10 +149,29 @@ Disposition states — precise, non-collapsible:
 | | | |
 | **Total** | **87** | Every capability has an intentional disposition |
 
-**Production replacement readiness: ~85-90%.** 74 items closed, 7 partial
-(ntpq forward formatting, Mode 6 vars, glibc privilege drop, NTS-KE daemon
-auto-start, ARM PPS, cross-OS matrix, async DNS). 1 missing (BSD).
-590 tests pass, 8 failures (5 formatting, 3 network-dependent).
+**Production replacement readiness: ~90-95%.**
+
+**Docker matrix (Alpine):** uid PASS, seccomp PASS, capability PASS,
+associations_reverse PASS, peers_reverse PASS, rv_reverse_rs PASS,
+sigterm PASS, ntpdig_rs PASS.
+
+**Forward court formatting:** ~97% byte-for-byte match. Remaining differences
+are purely cosmetic: line wrapping at column boundaries (rv), 1-2 char
+spacing (associations), timing-dependent values (peers when column).
+Real ntpq can successfully query ntpd-rs (reverse courts).
+ntpq-rs can successfully query real ntpd (forward court).
+
+**607 tests pass**, 8 pre-existing failures (5 formatting placeholders,
+3 network-dependent requiring ntpd on localhost).
+
+**7 Partial items:**
+1. ntpq forward formatting (~97% match, cosmetic line wrapping)
+2. Mode 6 variable population (~40 of 80+ vars populated by engine)
+3. glibc privilege drop (setresuid fix in place, needs Docker verification)
+4. ~80 config directives lexically recognized but not typed
+5. ARM/RISC-V PPS testing (no hardware available)
+6. FreeBSD/macOS ports (no CI infrastructure)
+7. Full cross-OS oracle matrix (Alpine verified, others need Docker rebuild)
 
 ## Exhaustive Forensic Audit v2
 
