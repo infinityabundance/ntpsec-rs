@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation = "https://docs.rs/ntpsec-rs-trace"
 readme = "README.md"
 categories = ["command-line-utilities", "network-programming"]
-keywords = ["ntp", "ntpsec", "time", "synchronization", "network-time-protocol"]
+keywords = ["ntp", "ntpsec", "time", "synchronization", "time-protocol"]
 
 [dependencies]
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }
