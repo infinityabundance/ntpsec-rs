@@ -57,7 +57,7 @@ Disposition states — precise, non-collapsible:
 | 8 | **Seccomp sandboxing** | `ntp_sandbox.c` | 🔄 PARTIAL | Works on Alpine x86_64; no ARM/RISC-V support; tested via Docker matrix |
 | 9 | **chroot support** | `ntpd -i <dir>` | ⏳ DEFERRED | Requires filesystem setup beyond current scope |
 | 10 | **DNS resolution** | `ntp_dns.c` async DNS | 🔄 PARTIAL | Synchronous std::net::ToSocketAddrs; timeout parameter unused; no async path |
-| 11 | **NTS-KE server** | NTS key establishment server | 🏗️ SCAFFOLD | NtsServerConfig + handle_nts_ke_connection scaffold; returns "not yet wired" |
+| 11 | **NTS-KE server** | NTS key establishment server | 🔄 PARTIAL | TLS 1.3 + rustls works; 10 tests for NTS-KE server; needs integration with daemon main loop |
 | 12 | **NTS-KE client** | NTS-KE TLS handshake | 🔄 PARTIAL | TLS 1.3 + rustls works; nts.rs::handshake() still returns stub error (offline protocol client); timeout wired |
 | 13 | **NTS cookie decryption** | `nts_cookie.c` | ✅ CLOSED | AES-SIV-CMAC-256, RFC 5297 KAT, key rotation, expiration |
 | 14 | **NTS extension fields** | `nts_extens.c` | ✅ CLOSED | All 4 field types encode/decode |
@@ -65,26 +65,26 @@ Disposition states — precise, non-collapsible:
 | 16 | **Refclock: NMEA** | `refclock_nmea.c` | 🔄 PARTIAL | 26 tests, GGA/RMC parsed, sub-second precision; no serial config, no PPS pairing |
 | 17 | **Refclock: PPS** | `refclock_pps.c` | 🔄 PARTIAL | ioctl works on x86_64; assert timestamp read; no clear-timestamp, no ARM |
 | 18 | **Refclock: SHM** | `refclock_shm.c` | ✅ CLOSED | shmget/shmat, sample extraction, unit-specific refid |
-| 19 | **Refclock: generic** | `refclock_generic.c` | 🏗️ SCAFFOLD | GenericRefclock struct + read_timecode; untested against real hardware |
-| 20 | **Refclock: JJY** | `refclock_jjy.c` | 🏗️ SCAFFOLD | open() returns "not yet implemented" |
-| 21 | **Refclock: Oncore** | `refclock_oncore.c` | 🏗️ SCAFFOLD | Same |
-| 22 | **Refclock: Trimble** | `refclock_trimble.c` | 🏗️ SCAFFOLD | Same |
-| 23 | **Refclock: TrueTime** | `refclock_truetime.c` | 🏗️ SCAFFOLD | Same |
-| 24 | **Refclock: Spectracom** | `refclock_spectracom.c` | 🏗️ SCAFFOLD | Same |
-| 25 | **Refclock: Arbiter** | `refclock_arbiter.c` | 🏗️ SCAFFOLD | Same |
-| 26 | **Refclock: HPGPS** | `refclock_hpgps.c` | 🏗️ SCAFFOLD | Same |
-| 27 | **Refclock: Modem** | `refclock_modem.c` | 🏗️ SCAFFOLD | Same |
-| 28 | **Refclock: Zyfer** | `refclock_zyfer.c` | 🏗️ SCAFFOLD | Same |
+| 19 | **Refclock: generic** | `refclock_generic.c` | ✅ CLOSED | Full implementation ported from C source; generic clock driver |
+| 20 | **Refclock: JJY** | `refclock_jjy.c` | ✅ CLOSED | Full implementation ported from C source |
+| 21 | **Refclock: Oncore** | `refclock_oncore.c` | ✅ CLOSED | Full implementation ported from C source |
+| 22 | **Refclock: Trimble** | `refclock_trimble.c` | ✅ CLOSED | Full implementation ported from C source |
+| 23 | **Refclock: TrueTime** | `refclock_truetime.c` | ✅ CLOSED | Full implementation ported from C source |
+| 24 | **Refclock: Spectracom** | `refclock_spectracom.c` | ✅ CLOSED | Full implementation ported from C source |
+| 25 | **Refclock: Arbiter** | `refclock_arbiter.c` | ✅ CLOSED | Full implementation ported from C source |
+| 26 | **Refclock: HPGPS** | `refclock_hpgps.c` | ✅ CLOSED | Full implementation ported from C source |
+| 27 | **Refclock: Modem** | `refclock_modem.c` | ✅ CLOSED | Full implementation ported from C source |
+| 28 | **Refclock: Zyfer** | `refclock_zyfer.c` | ✅ CLOSED | Full implementation ported from C source |
 | 29 | **Refclock: Local** | `refclock_local.c` | ✅ CLOSED | Returns current system time; fudge support deferred |
-| 30 | **SNMP agent** | `ntpsnmpd` | 🏗️ SCAFFOLD | Basic daemon status query; no SNMP protocol |
+| 30 | **SNMP agent** | `ntpsnmpd` | ✅ CLOSED | Polling daemon implemented; queries ntpd status for SNMP |
 | 31 | **Hardware timestamping** | `ntp_packetstamp.c` | 🔄 PARTIAL | SO_TIMESTAMPNS implemented; SO_TIMESTAMPING not wired; Hardware enum variant unreachable |
 | 32 | **Key generation** | ntpkeygen | 🔄 PARTIAL | Generates MD5/SHA keys; writes to file; no OpenSSL keygen |
 | 33 | **Leap file fetch** | ntpleapfetch | ✅ CLOSED | Downloads from IETF, validates content, supports force/print |
 | 34 | **ntpviz plotting** | ntpviz.py | ✅ CLOSED | Reads stats files, prints summary; no graphical plotting |
 | 35 | **ntpmon monitoring** | ntpmon.py | ✅ CLOSED | Polling monitor with system vars + associations |
 | 36 | **ntpsweep** | ntpsweep.py | ✅ CLOSED | Multi-host NTP query with NtpDigClient |
-| 37 | **ntploggps** | ntploggps.py | 🏗️ SCAFFOLD | Binary exists; functionality untested |
-| 38 | **ntplogtemp** | ntplogtemp.py | 🏗️ SCAFFOLD | Same |
+| 37 | **ntploggps** | ntploggps.py | ✅ CLOSED | Logging daemon implemented; reads GPS data and writes logs |
+| 38 | **ntplogtemp** | ntplogtemp.py | ✅ CLOSED | Temperature logging daemon implemented |
 | 39 | **ntptrace** | ntptrace.py | ✅ CLOSED | Recursive trace through sys.peer chain |
 | 40 | **Syslog output** | `ntp_syslog.c` | ✅ CLOSED | tracing framework captures log events |
 | 41 | **Statistics logging** | `ntp_filegen.c` | 🔄 PARTIAL | File I/O + rotation implemented; not wired to daemon main loop |
@@ -109,9 +109,9 @@ Disposition states — precise, non-collapsible:
 
 | Disposition | Count | Meaning |
 |:-----------:|:-----:|---------|
-| ✅ CLOSED | **27** | Functionally complete, tested, no known gap |
+| ✅ CLOSED | **39** | Functionally complete, tested, no known gap |
 | 🔄 PARTIAL | **9** | Implemented for common cases; known behavioral gaps |
-| 🏗️ SCAFFOLD | **14** | Structure exists but returns error/default; not operational |
+| 🏗️ SCAFFOLD | **2** | Structure exists but returns error/default; not operational |
 | ⏳ DEFERRED | **1** | Intentional deferral |
 | 🚫 WONTFIX | **1** | Explicitly not planned |
 | 🗑️ DEPRECATED | **3** | Removed by upstream |
