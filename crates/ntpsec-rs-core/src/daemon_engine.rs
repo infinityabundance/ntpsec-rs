@@ -340,6 +340,36 @@ pub struct DaemonEngine {
 
     /// Refclock instances.
     pub refclocks: RefclockManager,
+
+    /// Path to the drift file.
+    pub drift_file: Option<String>,
+
+    /// Path to the statistics directory.
+    pub stats_dir: Option<String>,
+
+    /// Path to the log file.
+    pub log_file: Option<String>,
+
+    /// Path to the leap-seconds file.
+    pub leap_file: Option<String>,
+
+    /// DSCP value for QoS packet marking.
+    pub dscp: Option<u8>,
+
+    /// TOS orphan stratum (default 16 in classic NTP).
+    pub tos_orphan: Option<u8>,
+
+    /// Tinker minimum poll exponent.
+    pub tinker_minpoll: Option<i32>,
+
+    /// Tinker maximum poll exponent.
+    pub tinker_maxpoll: Option<i32>,
+
+    /// Tinker step threshold (default 128 ms).
+    pub tinker_step: Option<f64>,
+
+    /// Tinker panic threshold (default 1000 s).
+    pub tinker_panic: Option<f64>,
 }
 
 impl DaemonEngine {
@@ -361,6 +391,16 @@ impl DaemonEngine {
             next_associd: 1,
             pending_requests: Vec::new(),
             refclocks: RefclockManager::new(),
+            drift_file: None,
+            stats_dir: None,
+            log_file: None,
+            leap_file: None,
+            dscp: None,
+            tos_orphan: None,
+            tinker_minpoll: None,
+            tinker_maxpoll: None,
+            tinker_step: None,
+            tinker_panic: None,
         };
         engine.apply_config(config);
         engine
@@ -452,8 +492,15 @@ impl DaemonEngine {
                         self.timers.schedule_poll(peer_id, 0, 0);
                     }
                 }
-                ConfigOption::DriftFile(_) => {}
-                ConfigOption::LeapFile(_path) => {}
+                ConfigOption::DriftFile(path) => {
+                    self.drift_file = Some(path.clone());
+                }
+                ConfigOption::StatsDir(path) => {
+                    self.stats_dir = Some(path.clone());
+                }
+                ConfigOption::LeapFile(path) => {
+                    self.leap_file = Some(path.clone());
+                }
                 ConfigOption::TrustedKey(kid) => {
                     self.auth.add_trusted_key(*kid);
                 }
@@ -563,6 +610,55 @@ impl DaemonEngine {
                         }
                     }
                 }
+                ConfigOption::Other { directive, args } => match directive.as_str() {
+                    "logfile" => {
+                        if let Some(path) = args.first() {
+                            self.log_file = Some(path.clone());
+                        }
+                    }
+                    "dscp" => {
+                        if let Some(val) = args.first().and_then(|s| s.parse::<u8>().ok()) {
+                            self.dscp = Some(val);
+                        }
+                    }
+                    "tos" => {
+                        if let Some(val) = args.first().and_then(|s| s.parse::<u8>().ok()) {
+                            self.tos_orphan = Some(val);
+                        }
+                    }
+                    "tinker" => {
+                        let mut i = 0;
+                        while i + 1 < args.len() {
+                            let key = &args[i];
+                            let val = &args[i + 1];
+                            match key.as_str() {
+                                "minpoll" => {
+                                    if let Ok(v) = val.parse::<i32>() {
+                                        self.tinker_minpoll = Some(v);
+                                    }
+                                }
+                                "maxpoll" => {
+                                    if let Ok(v) = val.parse::<i32>() {
+                                        self.tinker_maxpoll = Some(v);
+                                    }
+                                }
+                                "step" => {
+                                    if let Ok(v) = val.parse::<f64>() {
+                                        self.tinker_step = Some(v);
+                                    }
+                                }
+                                "panic" => {
+                                    if let Ok(v) = val.parse::<f64>() {
+                                        self.tinker_panic = Some(v);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            i += 2;
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }

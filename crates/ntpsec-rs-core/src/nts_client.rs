@@ -13,6 +13,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::pki_types::ServerName;
 
@@ -63,6 +64,11 @@ impl NtsKeClient {
         let addr = format!("{}:{}", self.host, self.port);
         let mut tcp =
             TcpStream::connect(&addr).map_err(|e| format!("TCP connect to {addr} failed: {e}"))?;
+
+        tcp.set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| format!("set read timeout failed: {e}"))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(10)))
+            .map_err(|e| format!("set write timeout failed: {e}"))?;
 
         // ── 3. TLS handshake ──────────────────────────────────────────────
         let server_name = ServerName::try_from(self.host.clone())

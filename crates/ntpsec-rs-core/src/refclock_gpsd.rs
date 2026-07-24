@@ -9,6 +9,7 @@
 // =============================================================================
 
 use crate::ntp_types::*;
+use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -124,8 +125,7 @@ impl GpsdRefclock {
                 return Ok(None);
             }
 
-            // Parse JSON line for TIME objects.  We use manual string scanning
-            // to avoid a serde dependency.  The gpsd TIME object has the form:
+            // Parse JSON line using serde_json. The gpsd TIME object looks like:
             //
             //   {"class":"TIME","device":"...","time":1234567890.123456,
             //    "leap":0,"precision":-6,...}
@@ -194,31 +194,32 @@ impl GpsdRefclock {
 
 // ──── JSON parsing helpers ────────────────────────────────────────────
 
-/// Parse a gpsd TIME object from a JSON line.
+/// Parse a gpsd TIME object from a JSON line using serde_json.
 ///
-/// Scans for `"class":"TIME"` and then extracts `"time"`, `"precision"`,
-/// and optionally `"mode"`, `"lat"`, `"lon"`, `"alt"`.
+/// Expects a JSON object with `"class":"TIME"` and extracts `"time"`,
+/// `"precision"`, and optionally `"mode"`, `"lat"`, `"lon"`, `"alt"`.
 fn parse_time_object(line: &str) -> Option<GpsdFix> {
-    // Must contain "class":"TIME"
-    if !line.contains("\"class\":\"TIME\"") {
+    let v: Value = serde_json::from_str(line).ok()?;
+
+    // Must be a TIME object.
+    if v.get("class")?.as_str()? != "TIME" {
         return None;
     }
 
-    // Extract "time":<floating-point seconds since Unix epoch>
-    let unix_time = extract_number_after_key(line, "\"time\"")?;
+    // Parse the time field: Unix seconds as f64.
+    let unix_time = v.get("time")?.as_f64()?;
 
-    // Extract "precision":<integer log2 of precision in seconds>
-    // precision is a signed integer; negative means sub-second precision.
-    let precision = extract_int_after_key(line, "\"precision\"").unwrap_or(0);
+    // Parse precision (optional, defaults to 0).
+    let precision = v.get("precision").and_then(|x| x.as_i64()).unwrap_or(0) as i8;
 
     // Convert Unix time to NTP timestamp.
     let ntp_time = unix_to_ntp_ts64(unix_time);
 
     // Optional fields
-    let mode = extract_int_after_key(line, "\"mode\"").unwrap_or(0) as u8;
-    let latitude = extract_number_after_key(line, "\"lat\"").unwrap_or(0.0);
-    let longitude = extract_number_after_key(line, "\"lon\"").unwrap_or(0.0);
-    let altitude = extract_number_after_key(line, "\"alt\"");
+    let mode = v.get("mode").and_then(|x| x.as_i64()).unwrap_or(0) as u8;
+    let latitude = v.get("lat").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let longitude = v.get("lon").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let altitude = v.get("alt").and_then(|x| x.as_f64());
 
     Some(GpsdFix {
         time: ntp_time,
@@ -226,53 +227,8 @@ fn parse_time_object(line: &str) -> Option<GpsdFix> {
         latitude,
         longitude,
         altitude,
-        precision: precision as i8,
+        precision,
     })
-}
-
-/// Extract a floating-point number that follows the given JSON key.
-///
-/// Expects the form: `"key":<number>` — handles both integer and
-/// floating-point representations.
-fn extract_number_after_key(line: &str, key: &str) -> Option<f64> {
-    let key_idx = line.find(key)?;
-    let after_key = &line[key_idx + key.len()..];
-
-    // Skip whitespace and colon.
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let after_colon = after_colon.trim_start();
-
-    // Read until comma, closing brace, or whitespace.
-    let num_str: String = after_colon
-        .chars()
-        .take_while(|c| *c != ',' && *c != '}' && *c != ']' && !c.is_whitespace())
-        .collect();
-
-    if num_str.is_empty() {
-        return None;
-    }
-
-    num_str.parse::<f64>().ok()
-}
-
-/// Extract a signed integer that follows the given JSON key.
-fn extract_int_after_key(line: &str, key: &str) -> Option<i64> {
-    let key_idx = line.find(key)?;
-    let after_key = &line[key_idx + key.len()..];
-
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let after_colon = after_colon.trim_start();
-
-    let num_str: String = after_colon
-        .chars()
-        .take_while(|c| *c != ',' && *c != '}' && *c != ']' && !c.is_whitespace())
-        .collect();
-
-    if num_str.is_empty() {
-        return None;
-    }
-
-    num_str.parse::<i64>().ok()
 }
 
 /// Convert a Unix timestamp (seconds as f64, with fractional part) to NtpTs64.
@@ -482,24 +438,27 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_number_after_key() {
-        let json = r#"{"time":1234.567,"other":99}"#;
-        let val = extract_number_after_key(json, "\"time\"").unwrap();
-        assert!((val - 1234.567).abs() < 0.001);
+    fn test_parse_time_object_rejects_non_time_class() {
+        // A valid JSON object that is not a TIME class should be rejected.
+        let non_time = r#"{"class":"DEVICE","time":1234.5}"#;
+        assert!(parse_time_object(non_time).is_none());
 
-        let val = extract_number_after_key(json, "\"other\"").unwrap();
-        assert!((val - 99.0).abs() < 0.001);
-
-        // Key not found.
-        assert!(extract_number_after_key(json, "\"nonexistent\"").is_none());
+        // Garbage should be rejected.
+        assert!(parse_time_object("not json").is_none());
     }
 
     #[test]
-    fn test_extract_int_after_key() {
-        let json = r#"{"precision":-6,"mode":3}"#;
-        assert_eq!(extract_int_after_key(json, "\"precision\""), Some(-6));
-        assert_eq!(extract_int_after_key(json, "\"mode\""), Some(3));
-        assert!(extract_int_after_key(json, "\"nonexistent\"").is_none());
+    fn test_parse_time_object_partial_fields() {
+        // TIME object with only required fields should still parse.
+        let minimal = r#"{"class":"TIME","time":1000000.0}"#;
+        let fix = parse_time_object(minimal).expect("should parse minimal TIME");
+        let expected_secs = 1_000_000i64 + NTP_EPOCH_OFFSET as i64;
+        assert_eq!(fix.time.seconds, expected_secs);
+        assert_eq!(fix.precision, 0);
+        assert_eq!(fix.mode, 0);
+        assert!((fix.latitude - 0.0).abs() < 0.0001);
+        assert!((fix.longitude - 0.0).abs() < 0.0001);
+        assert!(fix.altitude.is_none());
     }
 
     #[test]

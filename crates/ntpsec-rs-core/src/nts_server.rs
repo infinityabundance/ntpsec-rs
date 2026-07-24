@@ -225,6 +225,35 @@ fn build_cookie_plaintext(aead_alg: u16, c2s_key: &[u8; 32], s2c_key: &[u8; 32])
     pt
 }
 
+// ──── Configuration ────────────────────────────────────────────────────────
+
+/// Configuration for the NTS-KE server.
+pub struct NtsServerConfig {
+    pub key_file: String,
+    pub cert_file: String,
+    pub aead_algorithms: Vec<u16>,
+    pub cookie_cipher: crate::nts_cookie::CookieCipher,
+}
+
+/// Handle an NTS-KE client connection.
+///
+/// This performs the server side of the NTS-KE handshake (RFC 8915 §4).
+pub fn handle_nts_ke_connection(
+    stream: std::net::TcpStream,
+    server_config: &NtsServerConfig,
+) -> Result<Vec<Vec<u8>>, String> {
+    // This is a scaffold — full implementation requires TLS termination.
+    // The server would:
+    // 1. Complete TLS 1.3 handshake with ALPN "ntske/1"
+    // 2. Read NTS-KE request
+    // 3. Verify Next Protocol = NTPv4
+    // 4. Select AEAD algorithm
+    // 5. Generate cookies
+    // 6. Build and send response
+    // 7. Close connection
+    Err("NTS-KE server requires TLS termination (not yet wired)".to_string())
+}
+
 // ──── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
