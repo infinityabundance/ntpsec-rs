@@ -441,6 +441,39 @@ pub enum ConfigOption {
         name: String,
         value: String,
     },
+    /// discard [average N] [minimum N] [monitor N]
+    Discard {
+        average: Option<u32>,
+        minimum: Option<u32>,
+        monitor: Option<u32>,
+    },
+    /// leapsmearinterval seconds
+    LeapSmearInterval(u32),
+    /// broadcastdelay microseconds
+    BroadcastDelay(u64),
+    /// calldelay delay_for_call_refclocks
+    CallDelay(u64),
+    /// mruterlist bool
+    Mruterlist(bool),
+    /// mssntp bool
+    Mssntp(bool),
+    /// ntpsigndsocket path
+    NtpSigndSocket(String),
+    /// pps [unit N] [assert] [clear] [prefer]
+    Pps {
+        unit: u8,
+        assert: bool,
+        clear: bool,
+        prefer: bool,
+    },
+    /// revoke seconds
+    Revoke(u32),
+    /// provider host [port N] [cert path]
+    Provider {
+        host: String,
+        port: Option<u16>,
+        cert: Option<String>,
+    },
     Other {
         directive: String,
         args: Vec<String>,
@@ -475,6 +508,16 @@ impl ConfigOption {
             Self::Filegen { .. } => "filegen",
             Self::Logfile { .. } => "logfile",
             Self::Setvar { .. } => "setvar",
+            Self::Discard { .. } => "discard",
+            Self::LeapSmearInterval(_) => "leapsmearinterval",
+            Self::BroadcastDelay(_) => "broadcastdelay",
+            Self::CallDelay(_) => "calldelay",
+            Self::Mruterlist(_) => "mruterlist",
+            Self::Mssntp(_) => "mssntp",
+            Self::NtpSigndSocket(_) => "ntpsigndsocket",
+            Self::Pps { .. } => "pps",
+            Self::Revoke(_) => "revoke",
+            Self::Provider { .. } => "provider",
             Self::Other { directive, .. } => directive,
         }
     }
@@ -596,6 +639,98 @@ impl ConfigTree {
     /// Find all setvar config entries.
     pub fn setvar_entries(&self) -> Vec<&ConfigOption> {
         self.find_all("setvar")
+    }
+
+    /// Find all discard config entries.
+    pub fn discard_entries(&self) -> Vec<&ConfigOption> {
+        self.find_all("discard")
+    }
+
+    /// Find all pps config entries.
+    pub fn pps_entries(&self) -> Vec<&ConfigOption> {
+        self.find_all("pps")
+    }
+
+    /// Find all provider config entries.
+    pub fn provider_entries(&self) -> Vec<&ConfigOption> {
+        self.find_all("provider")
+    }
+
+    /// Get leap smear interval, if set.
+    pub fn leap_smear_interval(&self) -> Option<u32> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::LeapSmearInterval(v) = o {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get broadcast delay, if set.
+    pub fn broadcast_delay(&self) -> Option<u64> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::BroadcastDelay(v) = o {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get call delay, if set.
+    pub fn call_delay(&self) -> Option<u64> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::CallDelay(v) = o {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get MRU ter list setting, if set.
+    pub fn mru_terlist(&self) -> Option<bool> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::Mruterlist(v) = o {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get MS-SNTP setting, if set.
+    pub fn mssntp(&self) -> Option<bool> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::Mssntp(v) = o {
+                Some(*v)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get NTP signd socket path, if set.
+    pub fn ntp_signd_socket(&self) -> Option<&str> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::NtpSigndSocket(p) = o {
+                Some(p.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get revoke interval, if set.
+    pub fn revoke_interval(&self) -> Option<u32> {
+        self.options.iter().find_map(|o| {
+            if let ConfigOption::Revoke(v) = o {
+                Some(*v)
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -1098,6 +1233,144 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
                 .ok_or_else(|| "logfile requires a path".to_string())?
                 .clone();
             Ok(ConfigOption::Logfile { path })
+        }
+        "discard" => {
+            // discard [average N] [minimum N] [monitor N]
+            let mut average: Option<u32> = None;
+            let mut minimum: Option<u32> = None;
+            let mut monitor: Option<u32> = None;
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "average" => {
+                        i += 1;
+                        if i < args.len() {
+                            average = args[i].parse::<u32>().ok();
+                        }
+                    }
+                    "minimum" => {
+                        i += 1;
+                        if i < args.len() {
+                            minimum = args[i].parse::<u32>().ok();
+                        }
+                    }
+                    "monitor" => {
+                        i += 1;
+                        if i < args.len() {
+                            monitor = args[i].parse::<u32>().ok();
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            Ok(ConfigOption::Discard {
+                average,
+                minimum,
+                monitor,
+            })
+        }
+        "leapsmearinterval" => args
+            .first()
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or("leapsmearinterval requires a value in seconds".to_string())
+            .map(ConfigOption::LeapSmearInterval),
+        "broadcastdelay" => args
+            .first()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or("broadcastdelay requires a value in microseconds".to_string())
+            .map(ConfigOption::BroadcastDelay),
+        "calldelay" => args
+            .first()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or("calldelay requires a value".to_string())
+            .map(ConfigOption::CallDelay),
+        "mruterlist" => args
+            .first()
+            .map(|s| {
+                let v = s == "yes" || s == "true" || s == "1";
+                ConfigOption::Mruterlist(v)
+            })
+            .ok_or("mruterlist requires a yes/no value".to_string()),
+        "mssntp" => args
+            .first()
+            .map(|s| {
+                let v = s == "yes" || s == "true" || s == "1";
+                ConfigOption::Mssntp(v)
+            })
+            .ok_or("mssntp requires a yes/no value".to_string()),
+        "ntpsigndsocket" => args
+            .first()
+            .ok_or("ntpsigndsocket requires a socket path".to_string())
+            .map(|p| ConfigOption::NtpSigndSocket(p.clone())),
+        "pps" => {
+            // pps [unit N] [assert] [clear] [prefer]
+            let mut unit: u8 = 0;
+            let mut assert = true;
+            let mut clear = false;
+            let mut prefer = false;
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "unit" => {
+                        i += 1;
+                        if i < args.len() {
+                            unit = args[i].parse::<u8>().unwrap_or(0);
+                        }
+                    }
+                    "assert" => {
+                        assert = true;
+                        clear = false;
+                    }
+                    "clear" => {
+                        clear = true;
+                        assert = false;
+                    }
+                    "prefer" => prefer = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+            Ok(ConfigOption::Pps {
+                unit,
+                assert,
+                clear,
+                prefer,
+            })
+        }
+        "revoke" => args
+            .first()
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or("revoke requires a value in seconds".to_string())
+            .map(ConfigOption::Revoke),
+        "provider" => {
+            // provider host [port N] [cert path]
+            if args.is_empty() {
+                return Err("provider requires a host".to_string());
+            }
+            let host = args[0].clone();
+            let mut port: Option<u16> = None;
+            let mut cert: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "port" => {
+                        i += 1;
+                        if i < args.len() {
+                            port = args[i].parse::<u16>().ok();
+                        }
+                    }
+                    "cert" => {
+                        i += 1;
+                        if i < args.len() {
+                            cert = Some(args[i].clone());
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            Ok(ConfigOption::Provider { host, port, cert })
         }
         "setvar" => {
             // setvar name [value] or setvar name=value
@@ -1616,5 +1889,261 @@ mod tests {
         assert_eq!(InterfaceAction::from_str("none"), InterfaceAction::None);
         assert_eq!(InterfaceAction::from_str("unknown"), InterfaceAction::None);
         assert_eq!(InterfaceAction::from_str("LISTEN"), InterfaceAction::Listen);
+    }
+
+    // ── New directive tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_discard_all_defaults() {
+        let t = parse_config("discard average 3 minimum 1 monitor 300\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let entries = t.discard_entries();
+        assert_eq!(entries.len(), 1);
+        if let ConfigOption::Discard {
+            average,
+            minimum,
+            monitor,
+        } = entries[0]
+        {
+            assert_eq!(*average, Some(3));
+            assert_eq!(*minimum, Some(1));
+            assert_eq!(*monitor, Some(300));
+        } else {
+            panic!("expected Discard");
+        }
+    }
+
+    #[test]
+    fn test_parse_discard_partial() {
+        let t = parse_config("discard minimum 2\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let entries = t.discard_entries();
+        if let ConfigOption::Discard {
+            average,
+            minimum,
+            monitor,
+        } = entries[0]
+        {
+            assert!(average.is_none());
+            assert_eq!(*minimum, Some(2));
+            assert!(monitor.is_none());
+        }
+    }
+
+    #[test]
+    fn test_parse_leapsmearinterval() {
+        let t = parse_config("leapsmearinterval 3600\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.leap_smear_interval(), Some(3600));
+    }
+
+    #[test]
+    fn test_parse_broadcastdelay() {
+        let t = parse_config("broadcastdelay 50000\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.broadcast_delay(), Some(50000));
+    }
+
+    #[test]
+    fn test_parse_calldelay() {
+        let t = parse_config("calldelay 1000\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.call_delay(), Some(1000));
+    }
+
+    #[test]
+    fn test_parse_mruterlist_true() {
+        let t = parse_config("mruterlist yes\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.mru_terlist(), Some(true));
+    }
+
+    #[test]
+    fn test_parse_mruterlist_false() {
+        let t = parse_config("mruterlist no\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.mru_terlist(), Some(false));
+    }
+
+    #[test]
+    fn test_parse_mssntp() {
+        let t = parse_config("mssntp yes\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.mssntp(), Some(true));
+    }
+
+    #[test]
+    fn test_parse_ntpsigndsocket() {
+        let t = parse_config("ntpsigndsocket /var/run/ntp/ntp_signd\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.ntp_signd_socket(), Some("/var/run/ntp/ntp_signd"));
+    }
+
+    #[test]
+    fn test_parse_pps_defaults() {
+        let t = parse_config("pps unit 1\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let entries = t.pps_entries();
+        assert_eq!(entries.len(), 1);
+        if let ConfigOption::Pps {
+            unit,
+            assert: a,
+            clear,
+            prefer,
+        } = entries[0]
+        {
+            assert_eq!(*unit, 1);
+            assert!(*a); // assert defaults to true
+            assert!(!*clear);
+            assert!(!*prefer);
+        } else {
+            panic!("expected Pps");
+        }
+    }
+
+    #[test]
+    fn test_parse_pps_clear_prefer() {
+        let t = parse_config("pps unit 0 clear prefer\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let entries = t.pps_entries();
+        if let ConfigOption::Pps {
+            unit,
+            assert,
+            clear,
+            prefer,
+        } = entries[0]
+        {
+            assert_eq!(*unit, 0);
+            assert!(!*assert);
+            assert!(*clear);
+            assert!(*prefer);
+        }
+    }
+
+    #[test]
+    fn test_parse_revoke() {
+        let t = parse_config("revoke 43200\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.revoke_interval(), Some(43200));
+    }
+
+    #[test]
+    fn test_parse_provider_host_only() {
+        let t = parse_config("provider nts.example.com\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let entries = t.provider_entries();
+        assert_eq!(entries.len(), 1);
+        if let ConfigOption::Provider { host, port, cert } = entries[0] {
+            assert_eq!(host, "nts.example.com");
+            assert!(port.is_none());
+            assert!(cert.is_none());
+        } else {
+            panic!("expected Provider");
+        }
+    }
+
+    #[test]
+    fn test_parse_provider_with_port_and_cert() {
+        let t = parse_config("provider nts.example.com port 4460 cert /etc/nts/trust.pem\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        let entries = t.provider_entries();
+        if let ConfigOption::Provider { host, port, cert } = entries[0] {
+            assert_eq!(host, "nts.example.com");
+            assert_eq!(*port, Some(4460));
+            assert_eq!(cert.as_deref(), Some("/etc/nts/trust.pem"));
+        }
+    }
+
+    #[test]
+    fn test_directive_name_new_directives() {
+        assert_eq!(
+            ConfigOption::Discard {
+                average: None,
+                minimum: None,
+                monitor: None,
+            }
+            .directive_name(),
+            "discard"
+        );
+        assert_eq!(
+            ConfigOption::LeapSmearInterval(3600).directive_name(),
+            "leapsmearinterval"
+        );
+        assert_eq!(
+            ConfigOption::BroadcastDelay(50000).directive_name(),
+            "broadcastdelay"
+        );
+        assert_eq!(ConfigOption::CallDelay(1000).directive_name(), "calldelay");
+        assert_eq!(
+            ConfigOption::Mruterlist(true).directive_name(),
+            "mruterlist"
+        );
+        assert_eq!(ConfigOption::Mssntp(true).directive_name(), "mssntp");
+        assert_eq!(
+            ConfigOption::NtpSigndSocket("/sock".to_string()).directive_name(),
+            "ntpsigndsocket"
+        );
+        assert_eq!(
+            ConfigOption::Pps {
+                unit: 0,
+                assert: true,
+                clear: false,
+                prefer: false,
+            }
+            .directive_name(),
+            "pps"
+        );
+        assert_eq!(ConfigOption::Revoke(86400).directive_name(), "revoke");
+        assert_eq!(
+            ConfigOption::Provider {
+                host: "h".to_string(),
+                port: None,
+                cert: None,
+            }
+            .directive_name(),
+            "provider"
+        );
+    }
+
+    #[test]
+    fn test_parse_new_directives_in_full_config() {
+        let config = concat!(
+            "discard average 5 minimum 2\n",
+            "leapsmearinterval 3600\n",
+            "broadcastdelay 50000\n",
+            "calldelay 2000\n",
+            "mruterlist yes\n",
+            "mssntp no\n",
+            "ntpsigndsocket /run/ntp/ntp_signd\n",
+            "pps unit 0 prefer\n",
+            "revoke 86400\n",
+            "provider nts.example.com port 4460\n",
+        );
+        let t = parse_config(config);
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.discard_entries().len(), 1);
+        assert_eq!(t.leap_smear_interval(), Some(3600));
+        assert_eq!(t.broadcast_delay(), Some(50000));
+        assert_eq!(t.call_delay(), Some(2000));
+        assert_eq!(t.mru_terlist(), Some(true));
+        assert_eq!(t.mssntp(), Some(false));
+        assert_eq!(t.ntp_signd_socket(), Some("/run/ntp/ntp_signd"));
+        assert_eq!(t.pps_entries().len(), 1);
+        assert_eq!(t.revoke_interval(), Some(86400));
+        assert_eq!(t.provider_entries().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_mruterlist_numeric() {
+        let t = parse_config("mruterlist 1\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.mru_terlist(), Some(true));
+    }
+
+    #[test]
+    fn test_parse_mssntp_true_string() {
+        let t = parse_config("mssntp true\n");
+        assert!(t.errors.is_empty(), "{:?}", t.errors);
+        assert_eq!(t.mssntp(), Some(true));
     }
 }

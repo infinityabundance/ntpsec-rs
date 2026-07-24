@@ -854,6 +854,15 @@ pub struct DaemonEngine {
 
     /// System variables map for setvar configuration.
     pub sysvars: HashMap<String, String>,
+
+    /// Whether statistics collection is enabled.
+    pub stats_enabled: bool,
+
+    /// Whether MRU monitoring is enabled.
+    pub monitor_enabled: bool,
+
+    /// Whether authentication is required for all NTP packets.
+    pub auth_required: bool,
 }
 
 impl DaemonEngine {
@@ -892,6 +901,9 @@ impl DaemonEngine {
             nts_config: None,
             stats_write_counter: 0,
             sysvars: HashMap::new(),
+            stats_enabled: true,
+            monitor_enabled: true,
+            auth_required: false,
         };
         engine.apply_config(config);
         engine
@@ -1272,6 +1284,26 @@ impl DaemonEngine {
                 ConfigOption::Setvar { name, value } => {
                     self.sysvars.insert(name.clone(), value.clone());
                 }
+                ConfigOption::Enable(flag) => match flag.as_str() {
+                    "stats" => self.stats_enabled = true,
+                    "monitor" => {
+                        self.monitor_enabled = true;
+                        if !self.monitor.is_enabled() {
+                            self.monitor.max_entries = 1024;
+                        }
+                    }
+                    "auth" => self.auth_required = true,
+                    _ => {}
+                },
+                ConfigOption::Disable(flag) => match flag.as_str() {
+                    "stats" => self.stats_enabled = false,
+                    "monitor" => {
+                        self.monitor_enabled = false;
+                        self.monitor.max_entries = 0;
+                    }
+                    "auth" => self.auth_required = false,
+                    _ => {}
+                },
                 ConfigOption::NtsServer { .. } => {
                     // Handled by parse_config() which also converts to nts_config
                 }
@@ -1673,7 +1705,7 @@ impl DaemonEngine {
 
         // 2. Check restrictions — exhaustively match all actions.
         // NOQUERY is handled contextually inside check() based on packet mode.
-        let (restrict_action, _restrict_flags) = self.restrictions.check(&dgram.source, mode);
+        let (restrict_action, restrict_flags) = self.restrictions.check(&dgram.source, mode);
 
         match restrict_action {
             RestrictAction::Accept => {} // Continue processing
@@ -1687,8 +1719,7 @@ impl DaemonEngine {
                     self.system.server_counters.restricted.saturating_add(1);
                 self.system.server_counters.kodsent =
                     self.system.server_counters.kodsent.saturating_add(1);
-                let kod_pkt =
-                    build_kod_packet(&pkt, &self.system, dgram.rx_timestamp, self.precision);
+                let kod_pkt = build_kod_packet(&pkt, KISS_DENY);
                 return vec![DaemonAction::Send {
                     destination: dgram.source,
                     bytes: kod_pkt.encode_header().to_vec(),
@@ -1702,6 +1733,18 @@ impl DaemonEngine {
             if rate_limited {
                 self.system.server_counters.limited =
                     self.system.server_counters.limited.saturating_add(1);
+                // Send KOD if the matching restrict entry includes the KOD flag.
+                // ntpsec sends RATE when rate-limiting, regardless of the
+                // configured kiss code on the restrict entry.
+                if restrict_flags.contains(RestrictFlags::KOD) {
+                    self.system.server_counters.kodsent =
+                        self.system.server_counters.kodsent.saturating_add(1);
+                    let kod_pkt = build_kod_packet(&pkt, KISS_RATE);
+                    return vec![DaemonAction::Send {
+                        destination: dgram.source,
+                        bytes: kod_pkt.encode_header().to_vec(),
+                    }];
+                }
                 return vec![];
             }
         }
@@ -1901,6 +1944,24 @@ impl DaemonEngine {
                     return vec![DaemonAction::Log(
                         "duplicate packet (same originate)".to_string(),
                     )];
+                }
+
+                // Check for Kiss-o'-Death (stratum 0 with a kiss code in reference_id).
+                // RFC 5905 §7.4: stratum 0 indicates a KOD packet.  ntpsec checks for
+                // stratum == 0 before the unsynchronized check so that KODs are handled
+                // separately from TEST3 failures.
+                if pkt.stratum == 0 {
+                    let kiss_bytes = u32::to_be_bytes(pkt.reference_id);
+                    let kiss_str = core::str::from_utf8(&kiss_bytes).unwrap_or("????");
+                    peer.reach.record_failure();
+                    self.pending_requests.remove(req_idx);
+                    return vec![DaemonAction::Log(format!(
+                        "Kiss-o'-Death from {}: code={}",
+                        crate::ntp_net::socktoa(&crate::ntp_monitor::netaddr_to_sockaddr(
+                            &dgram.source
+                        )),
+                        kiss_str
+                    ))];
                 }
 
                 // Check if server is unsynchronized (TEST3)
@@ -2615,25 +2676,9 @@ impl DaemonEngine {
 }
 
 /// Build a Kiss-o'-Death packet in response to a client request.
-pub fn build_kod_packet(
-    request: &NtpPacket,
-    _system: &SystemState,
-    now: NtpTs64,
-    precision: i8,
-) -> NtpPacket {
-    let mut resp = NtpPacket::zeroed();
-    resp.li_vn_mode =
-        NtpPacket::set_li_vn_mode(LeapIndicator::Alarm, NtpVersion::V4, NtpMode::Server);
-    resp.stratum = 0;
-    resp.poll = request.poll;
-    resp.precision = precision;
-    resp.root_delay = 0;
-    resp.root_dispersion = 0;
-    resp.reference_id = crate::ntp_types::kiss_codes::RATE;
-    resp.originate_ts = request.transmit_ts;
-    resp.receive_ts = ntp_fp::ntp_ts64_to_wire(now);
-    resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(now);
-    resp
+/// Delegates to `ntp_proto::build_kod_packet()` with the appropriate kiss code.
+pub fn build_kod_packet(request: &NtpPacket, kiss_code: &[u8; 4]) -> NtpPacket {
+    crate::ntp_proto::build_kod_packet(request, kiss_code)
 }
 
 /// Parse association options into structured form.
@@ -3110,13 +3155,22 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
         req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(500, 0));
 
-        let system = SystemState::new();
-        let now = ntp_fp::ts_to_ntp(501, 0);
-        let kod = build_kod_packet(&req, &system, now, -20);
+        let kod = build_kod_packet(&req, KISS_RATE);
 
         assert_eq!(kod.stratum, 0);
         assert_eq!(kod.mode(), NtpMode::Server);
         assert_eq!(kod.originate_ts, req.transmit_ts);
+        // Verify LI = Alarm (unsynchronized)
+        assert_eq!(kod.leap_indicator(), LeapIndicator::Alarm);
+        // Verify reference ID encodes the kiss code
+        assert_eq!(kod.reference_id, u32::from_be_bytes(*KISS_RATE));
+        // Verify all other timestamps are zero (KOD spec)
+        assert_eq!(kod.receive_ts.seconds, 0);
+        assert_eq!(kod.receive_ts.fraction, 0);
+        assert_eq!(kod.transmit_ts.seconds, 0);
+        assert_eq!(kod.transmit_ts.fraction, 0);
+        assert_eq!(kod.reference_ts.seconds, 0);
+        assert_eq!(kod.reference_ts.fraction, 0);
     }
 
     #[test]
@@ -4230,6 +4284,87 @@ mod tests {
         });
         let engine = DaemonEngine::new(config);
         assert!(engine.nts_config.is_some());
+    }
+
+    #[test]
+    fn test_apply_config_enable_stats() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Enable("stats".to_string()));
+        let engine = DaemonEngine::new(config);
+        assert!(engine.stats_enabled);
+    }
+
+    #[test]
+    fn test_apply_config_disable_stats() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Disable("stats".to_string()));
+        let engine = DaemonEngine::new(config);
+        assert!(!engine.stats_enabled);
+    }
+
+    #[test]
+    fn test_apply_config_enable_monitor() {
+        let mut config = ConfigTree::new();
+        // First disable monitor
+        config.add(ConfigOption::Disable("monitor".to_string()));
+        let mut engine = DaemonEngine::new(config);
+        assert!(!engine.monitor_enabled);
+        assert_eq!(engine.monitor.max_entries, 0);
+
+        // Then re-enable
+        let mut config2 = ConfigTree::new();
+        config2.add(ConfigOption::Enable("monitor".to_string()));
+        let engine2 = DaemonEngine::new(config2);
+        assert!(engine2.monitor_enabled);
+        assert!(engine2.monitor.max_entries > 0);
+    }
+
+    #[test]
+    fn test_apply_config_disable_monitor() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Disable("monitor".to_string()));
+        let engine = DaemonEngine::new(config);
+        assert!(!engine.monitor_enabled);
+        assert_eq!(engine.monitor.max_entries, 0);
+    }
+
+    #[test]
+    fn test_apply_config_enable_auth() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Enable("auth".to_string()));
+        let engine = DaemonEngine::new(config);
+        assert!(engine.auth_required);
+    }
+
+    #[test]
+    fn test_apply_config_disable_auth() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Disable("auth".to_string()));
+        let engine = DaemonEngine::new(config);
+        assert!(!engine.auth_required);
+    }
+
+    #[test]
+    fn test_apply_config_enable_disable_idempotent() {
+        // Enable twice, disable once — should end up disabled
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Enable("stats".to_string()));
+        config.add(ConfigOption::Enable("stats".to_string()));
+        config.add(ConfigOption::Disable("stats".to_string()));
+        let engine = DaemonEngine::new(config);
+        assert!(!engine.stats_enabled);
+    }
+
+    #[test]
+    fn test_apply_config_enable_unknown_flag() {
+        // Unknown enable/disable flags should be silently ignored
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Enable("nonexistent".to_string()));
+        // Should not panic, should keep defaults
+        let engine = DaemonEngine::new(config);
+        assert!(engine.stats_enabled);
+        assert!(engine.monitor_enabled);
+        assert!(!engine.auth_required);
     }
 
     #[test]

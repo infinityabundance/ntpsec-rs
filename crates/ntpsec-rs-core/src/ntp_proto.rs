@@ -70,6 +70,18 @@ pub const NTP_SHIFT: usize = 8;
 /// Weight factor for peer jitter in the combine algorithm (ntpsec default).
 pub const NTP_WEIGHT: f64 = 0.5;
 
+// ──── Kiss-o'-Death codes (RFC 5905 §7.4) ────────────────────────────────
+
+/// Standard Kiss-o'-Death codes as 4-byte ASCII arrays for use with
+/// `build_kod_packet()`.  Each code identifies the reason for the KOD response.
+
+/// Access denied by server.
+pub const KISS_DENY: &[u8; 4] = b"DENY";
+/// Rate limit exceeded — client should reduce polling rate.
+pub const KISS_RATE: &[u8; 4] = b"RATE";
+/// Server restart — client should discard state and re-sync.
+pub const KISS_RSTR: &[u8; 4] = b"RSTR";
+
 // ──── Auth statistics counters (matching ntpsec) ─────────────────────────
 
 /// Authentication statistics counters — tracks auth events across the daemon.
@@ -214,7 +226,8 @@ impl ClockFilter {
                 d * d
             })
             .sum();
-        (sum_sq / n as f64).sqrt()
+        let divisor = (n as f64) - 1.0;
+        (sum_sq / divisor).sqrt()
     }
 
     pub fn sample_count(&self) -> usize {
@@ -921,6 +934,29 @@ pub fn build_request(peer: &Peer, system: &SystemState, now: NtpTs64, precision:
     pkt
 }
 
+/// Build a Kiss-o'-Death packet (RFC 5905 §7.4, §13).
+///
+/// KOD packets are NTP mode 4 (Server) responses with:
+/// - LI = 3 (alarm — unsynchronized)
+/// - Stratum = 0 (special meaning: kiss code)
+/// - Reference ID = 4-char ASCII kiss code (e.g. "RATE", "DENY", "RSTR")
+/// - All timestamps zeroed except originate = request's transmit timestamp
+///   (matching ntpsec's `kod_proto()` which clears receive/transmit/reference).
+pub fn build_kod_packet(request: &NtpPacket, kiss_code: &[u8; 4]) -> NtpPacket {
+    let mut pkt = NtpPacket::zeroed();
+    pkt.li_vn_mode =
+        NtpPacket::set_li_vn_mode(LeapIndicator::Alarm, request.version(), NtpMode::Server);
+    pkt.stratum = 0; // kiss code indicator
+    pkt.poll = request.poll;
+    pkt.precision = 0;
+    pkt.root_delay = 0u32;
+    pkt.root_dispersion = 0u32;
+    pkt.reference_id = u32::from_be_bytes(*kiss_code);
+    pkt.originate_ts = request.transmit_ts;
+    // receive_ts, transmit_ts, reference_ts remain zero per spec
+    pkt
+}
+
 // ──── System State ─────────────────────────────────────────────────────
 
 /// Global NTP system state — matches ntpsec's `sys_*` globals.
@@ -1166,6 +1202,164 @@ mod tests {
         let jitter = cf.filter_jitter(0.0);
         assert!(jitter > 0.0);
         assert!(jitter < 0.01);
+    }
+
+    #[test]
+    fn test_filter_jitter_two_samples_uses_n_minus_1() {
+        // Verify that filter_jitter uses n-1 divisor (sample stddev, not population).
+        // With exactly 2 samples at offsets [−1, 1], peer_offset=0:
+        //   mean = 0, deviations = [−1, 1], sum_sq = 2
+        //   sample variance = 2 / (2-1) = 2
+        //   sample stddev = sqrt(2) ≈ 1.414
+        // Population stddev would be sqrt(2/2) = sqrt(1) = 1.0.
+        let mut cf = ClockFilter::new();
+        cf.add_sample(ClockFilterEntry {
+            offset: -1.0,
+            delay: 0.01,
+            dispersion: 0.001,
+            time: NtpTs64 {
+                seconds: 1,
+                fraction: 0,
+            },
+        });
+        cf.add_sample(ClockFilterEntry {
+            offset: 1.0,
+            delay: 0.01,
+            dispersion: 0.001,
+            time: NtpTs64 {
+                seconds: 2,
+                fraction: 0,
+            },
+        });
+        let jitter = cf.filter_jitter(0.0);
+        let expected = (2.0_f64 / 1.0_f64).sqrt(); // n-1 = 1
+        assert!(
+            (jitter - expected).abs() < 1e-10,
+            "expected {expected}, got {jitter}"
+        );
+    }
+
+    #[test]
+    fn test_filter_jitter_single_sample_returns_zero() {
+        // With 1 sample, filter_jitter should return 0.0 (n < 2 check).
+        let mut cf = ClockFilter::new();
+        cf.add_sample(ClockFilterEntry {
+            offset: 5.0,
+            delay: 0.01,
+            dispersion: 0.001,
+            time: NtpTs64 {
+                seconds: 1,
+                fraction: 0,
+            },
+        });
+        assert_eq!(cf.filter_jitter(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_build_kod_packet_rate() {
+        let mut req = NtpPacket::zeroed();
+        req.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::Client,
+        );
+        req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1000, 0));
+
+        let kod = build_kod_packet(&req, KISS_RATE);
+
+        // Stratum 0 = kiss code indicator
+        assert_eq!(kod.stratum, 0);
+        // Server mode
+        assert_eq!(kod.mode(), NtpMode::Server);
+        // LI = Alarm (unsynchronized)
+        assert_eq!(kod.leap_indicator(), LeapIndicator::Alarm);
+        // Reference ID encodes the kiss code
+        assert_eq!(kod.reference_id, u32::from_be_bytes(*KISS_RATE));
+        // Originate = request's transmit timestamp
+        assert_eq!(kod.originate_ts, req.transmit_ts);
+        // All other timestamps zeroed (KOD spec §7.4)
+        assert_eq!(kod.receive_ts.seconds, 0);
+        assert_eq!(kod.receive_ts.fraction, 0);
+        assert_eq!(kod.transmit_ts.seconds, 0);
+        assert_eq!(kod.transmit_ts.fraction, 0);
+        assert_eq!(kod.reference_ts.seconds, 0);
+        assert_eq!(kod.reference_ts.fraction, 0);
+        // Root delay and dispersion zero
+        assert_eq!(kod.root_delay, 0);
+        assert_eq!(kod.root_dispersion, 0);
+    }
+
+    #[test]
+    fn test_build_kod_packet_deny() {
+        let mut req = NtpPacket::zeroed();
+        req.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V3,
+            NtpMode::Client,
+        );
+        req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(2000, 500));
+
+        let kod = build_kod_packet(&req, KISS_DENY);
+
+        assert_eq!(kod.stratum, 0);
+        assert_eq!(kod.reference_id, u32::from_be_bytes(*KISS_DENY));
+        assert_eq!(kod.originate_ts, req.transmit_ts);
+        // Should preserve request's version (V3 in this case)
+        assert_eq!(kod.version(), NtpVersion::V3);
+    }
+
+    #[test]
+    fn test_build_kod_packet_rstr() {
+        let mut req = NtpPacket::zeroed();
+        req.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::Client,
+        );
+        req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(3000, 0));
+
+        let kod = build_kod_packet(&req, KISS_RSTR);
+
+        assert_eq!(kod.reference_id, u32::from_be_bytes(*KISS_RSTR));
+        assert_eq!(kod.originate_ts, req.transmit_ts);
+    }
+
+    #[test]
+    fn test_build_kod_packet_version_preserved() {
+        // KOD should use the same version as the request, not hardcoded V4.
+        let mut req = NtpPacket::zeroed();
+        req.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V3,
+            NtpMode::Client,
+        );
+        let kod = build_kod_packet(&req, KISS_RATE);
+        assert_eq!(kod.version(), NtpVersion::V3);
+
+        let mut req4 = NtpPacket::zeroed();
+        req4.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::Client,
+        );
+        let kod4 = build_kod_packet(&req4, KISS_RATE);
+        assert_eq!(kod4.version(), NtpVersion::V4);
+    }
+
+    #[test]
+    fn test_rate_limit_record_kod() {
+        let mut rl = RateLimit::new();
+        let t1 = ntp_fp::ts_to_ntp(100, 0);
+        let t2 = ntp_fp::ts_to_ntp(200, 0);
+
+        // Initially should send KOD
+        assert!(rl.should_send_kod(t1));
+        rl.record_kod(t1);
+        // Immediately after recording, should NOT send another
+        assert!(!rl.should_send_kod(t1));
+        // After enough time passes, should allow again
+        let later = ntp_fp::ts_to_ntp(400, 0);
+        assert!(rl.should_send_kod(later));
     }
 
     #[test]
