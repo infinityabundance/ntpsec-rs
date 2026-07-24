@@ -1278,7 +1278,8 @@ impl PeerRow {
         let peer_type = if assoc.broadcast {
             'b'
         } else if is_refclock {
-            'l'
+            // Real C ntpq uses 'u' (unicast) for refclock peers
+            'u'
         } else {
             match pv.get("hmode").and_then(|s| s.parse::<u8>().ok()) {
                 Some(0) => 'l',
@@ -1313,39 +1314,7 @@ fn strip_0x(val: &str) -> &str {
     val.strip_prefix("0x").unwrap_or(val)
 }
 
-/// Real C ntpq never quotes these fields (NTP timestamps, refid, etc.)
-const NEVER_QUOTE: &[&str] = &[
-    "refid", "reftime", "clock", "org", "rec", "xmt", "srcadr", "peeradr", "dstadr",
-];
-
-/// Quote a value matching real C ntpq conventions:
-/// - NTP timestamp/address fields are never quoted
-/// - Purely numeric values are never quoted
-/// - String values (containing alphabetic chars) are quoted
-fn maybe_quote(key: &str, val: &str) -> String {
-    if NEVER_QUOTE.contains(&key) {
-        return format!("{}={}, ", key, val);
-    }
-    // Check if the value is purely numeric (int, float, hex timestamp, dotted-ip)
-    let is_numeric = val.chars().all(|c| {
-        c.is_ascii_digit()
-            || c == '.'
-            || c == '-'
-            || c == '+'
-            || c == 'e'
-            || c == 'E'
-            || c == 'x'
-            || c == 'X'
-    }) && !val.is_empty()
-        && !val.contains("..");
-    if is_numeric || val.is_empty() {
-        format!("{}={}, ", key, val)
-    } else {
-        format!("{}=\"{}\", ", key, val)
-    }
-}
-
-/// Format a value for ntpq output, applying C ntpq's formatting conventions.
+/// Format a value for ntpq output, matching C ntpq conventions (no quoting).
 fn format_var_value(key: &str, val: &str) -> String {
     // Strip 0x prefix from hex timestamps
     let v = strip_0x(val);
@@ -1356,17 +1325,15 @@ fn format_var_value(key: &str, val: &str) -> String {
         let idx = (leap_val.min(3)) as usize;
         return format!("{}={}", key, leap_patterns[idx]);
     }
-    // Format using quoting conventions
-    let result = maybe_quote(key, v);
-    // Remove trailing ", " from maybe_quote since we'll add our own
-    result.trim_end_matches(", ").to_string()
+    // Real C ntpq outputs key=value without quoting
+    format!("{}={}", key, v)
 }
 
-/// Render system variables in ntpq-compatible format.
+/// Render system variables in ntpq-compatible format (multi-line, matching real C ntpq).
 pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "associd={} status={:04x} {}\n",
+        "associd={} status={:04x} {},\n",
         sys.associd,
         sys.status,
         sys.status_description(),
@@ -1391,26 +1358,25 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         "rootdist",
     ];
     let mut rendered = std::collections::HashSet::new();
-    let mut parts: Vec<String> = Vec::new();
     for key in &preferred_order {
         if let Some(val) = sys.get(key) {
-            parts.push(format_var_value(key, val));
+            out.push_str(&format_var_value(key, val));
+            out.push('\n');
             rendered.insert(key.to_string());
         }
     }
     // Emit remaining variables in order received
     for (key, val) in &sys.ordered_vars {
         if !rendered.contains(key) {
-            parts.push(format_var_value(key, val));
+            out.push_str(&format_var_value(key, val));
+            out.push('\n');
             rendered.insert(key.clone());
         }
     }
-    out.push_str(&parts.join(", "));
-    out.push_str(", \n");
     out
 }
 
-/// Render peer READVAR variables in ntpq-compatible format.
+/// Render peer READVAR variables in ntpq-compatible format (multi-line, matching real C ntpq).
 pub fn format_peer_readvar(peer: &PeerVariables) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -1438,21 +1404,20 @@ pub fn format_peer_readvar(peer: &PeerVariables) -> String {
         "precision",
     ];
     let mut rendered = std::collections::HashSet::new();
-    let mut parts: Vec<String> = Vec::new();
     for key in &preferred {
         if let Some(val) = peer.get(key) {
-            parts.push(format_var_value(key, val));
+            out.push_str(&format_var_value(key, val));
+            out.push('\n');
             rendered.insert(key.to_string());
         }
     }
     for (key, val) in &peer.ordered_vars {
         if !rendered.contains(key) {
-            parts.push(format_var_value(key, val));
+            out.push_str(&format_var_value(key, val));
+            out.push('\n');
             rendered.insert(key.clone());
         }
     }
-    out.push_str(&parts.join(", "));
-    out.push_str(", \n");
     out
 }
 
@@ -1486,10 +1451,10 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
         let event_count = sys_status::decode_event_count(assoc.status);
         let last_event = ntpq_event_name(event_code);
         out.push_str(&format!(
-            "  {} {:5} {:5}   {:4}  {:4}  {:4}  {:11} {:>10} {:>3}\n",
+            "  {} {:5}  {:04x}   {:4}  {:4}  {:4}  {:<10}  {:>8} {:>2}\n",
             i + 1,
             assoc.associd,
-            format!("{:04x}", assoc.status),
+            assoc.status,
             conf,
             reach,
             auth,
@@ -1541,7 +1506,7 @@ pub fn format_peers(rows: &[PeerRow]) -> String {
         };
         let reach_str = format!("{:o}", row.reach); // Octal display
         out.push_str(&format!(
-            " {}{:16} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.2} {:>8.2} {:>7.2}\n",
             row.tally,
             row.remote,
             row.refid,
@@ -2076,10 +2041,21 @@ mod tests {
         let out = format_readvar(&sv);
         let expected = concat!(
             "associd=0 status=0322 leap_none, sync_ntp, 2 event,\n",
-            "version=\"ntpd 4.2.8p3\", processor=\"x86_64\", system=\"Linux/4.19.0\", ",
-            "stratum=2, precision=-24, rootdelay=0.001, rootdisp=0.005, ",
-            "refid=.NTP., reftime=0, peer=0, tc=6, offset=0.002, ",
-            "frequency=0.123, sys_jitter=0.001, rootdist=0.006, \n",
+            "version=ntpd 4.2.8p3\n",
+            "processor=x86_64\n",
+            "system=Linux/4.19.0\n",
+            "stratum=2\n",
+            "precision=-24\n",
+            "rootdelay=0.001\n",
+            "rootdisp=0.005\n",
+            "refid=.NTP.\n",
+            "reftime=0\n",
+            "peer=0\n",
+            "tc=6\n",
+            "offset=0.002\n",
+            "frequency=0.123\n",
+            "sys_jitter=0.001\n",
+            "rootdist=0.006\n",
         );
         assert_eq!(out, expected, "frozen system readvar output mismatch");
     }
@@ -2100,26 +2076,29 @@ mod tests {
         );
         assert!(out.contains("z_var=99"), "z_var must appear in output");
         // Preferred vars (version, stratum, offset) should come before extra_var
-        let version_pos = out.find("version=").unwrap();
-        let stratum_pos = out.find("stratum=").unwrap();
-        let offset_pos = out.find("offset=").unwrap();
-        let extra_pos = out.find("extra_var=").unwrap();
-        let z_pos = out.find("z_var=").unwrap();
+        let version_line = out.lines().position(|l| l.starts_with("version=")).unwrap();
+        let stratum_line = out.lines().position(|l| l.starts_with("stratum=")).unwrap();
+        let offset_line = out.lines().position(|l| l.starts_with("offset=")).unwrap();
+        let extra_line = out
+            .lines()
+            .position(|l| l.starts_with("extra_var="))
+            .unwrap();
+        let z_line = out.lines().position(|l| l.starts_with("z_var=")).unwrap();
         assert!(
-            version_pos < extra_pos,
+            version_line < extra_line,
             "preferred var 'version' should appear before extra_var"
         );
         assert!(
-            stratum_pos < extra_pos,
+            stratum_line < extra_line,
             "preferred var 'stratum' should appear before extra_var"
         );
         assert!(
-            offset_pos < extra_pos,
+            offset_line < extra_line,
             "preferred var 'offset' should appear before extra_var"
         );
         // Both extra vars appear after preferred ones
         assert!(
-            extra_pos < z_pos,
+            extra_line < z_line,
             "extra_var should appear before z_var (input order preserved)"
         );
     }
@@ -2149,10 +2128,22 @@ mod tests {
         let out = format_peer_readvar(&pv);
         let expected = concat!(
             "associd=49723 status=9614 1 event, 192.168.1.1,\n",
-            "srcaddr=192.168.1.1, stratum=2, offset=0.002, delay=0.001, ",
-            "dispersion=0.000, jitter=0.001, hpoll=6, ppoll=6, reach=0xFF, ",
-            "flash=0x000, leap=00, refid=.NTP., reftime=0, hmode=3, pmode=4, ",
-            "precision=-24, \n",
+            "srcaddr=192.168.1.1\n",
+            "stratum=2\n",
+            "offset=0.002\n",
+            "delay=0.001\n",
+            "dispersion=0.000\n",
+            "jitter=0.001\n",
+            "hpoll=6\n",
+            "ppoll=6\n",
+            "reach=FF\n",
+            "flash=000\n",
+            "leap=00\n",
+            "refid=.NTP.\n",
+            "reftime=0\n",
+            "hmode=3\n",
+            "pmode=4\n",
+            "precision=-24\n",
         );
         assert_eq!(out, expected, "frozen peer readvar output mismatch");
     }
@@ -2208,16 +2199,8 @@ mod tests {
                    ev: &str,
                    cnt: u16| {
             format!(
-                "  {} {:5} {:5}   {:4}  {:4}  {:4}  {:11} {:>10} {:>3}\n",
-                i,
-                aid,
-                format!("{:04x}", st),
-                conf,
-                reach,
-                auth,
-                cond,
-                ev,
-                cnt
+                "  {} {:5}  {:04x}   {:4}  {:4}  {:4}  {:<10}  {:>8} {:>2}\n",
+                i, aid, st, conf, reach, auth, cond, ev, cnt
             )
         };
         expected.push_str(&fmt(
@@ -2290,14 +2273,14 @@ mod tests {
         expected.push_str(
             "==============================================================================\n",
         );
-        // Row 1 — use refid without wrapping (PeerRow stores raw refid; format_peers won't wrap it)
+        // Row 1
         expected.push_str(&format!(
-            " {}{:16} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.2} {:>8.2} {:>7.2}\n",
             '*', "time.example.com", ".NTP.", 2, 'u', "10", 64, "377", 0.001, 0.002, 0.001,
         ));
         // Row 2
         expected.push_str(&format!(
-            " {}{:16} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.2} {:>8.2} {:>7.2}\n",
             ' ', "192.168.1.100", ".GPS.", 1, 'u', "-", 64, "377", 0.003, -0.001, 0.002,
         ));
         assert_eq!(out, expected, "frozen peers output mismatch");

@@ -600,6 +600,7 @@ name = "ntpsec-rs-frob"
 version = "0.3.6"
 dependencies = [
  "clap",
+ "libc",
 ]
 
 [[package]]
@@ -616,6 +617,7 @@ name = "ntpsec-rs-keygen"
 version = "0.3.6"
 dependencies = [
  "clap",
+ "libc",
  "ntpsec-rs-core",
 ]
 
@@ -682,6 +684,7 @@ name = "ntpsec-rs-time"
 version = "0.3.6"
 dependencies = [
  "clap",
+ "libc",
 ]
 
 [[package]]
