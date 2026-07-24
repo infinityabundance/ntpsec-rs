@@ -118,9 +118,9 @@ Disposition states — precise, non-collapsible:
 | | | |
 | **Total** | **55** | Every capability has an intentional disposition |
 
-**The ledger is not a single green number.** 27 items are genuinely closed
-(operational, tested, no known gap). 14 are scaffolding (structural presence
-only). 9 are partial (work for most cases, gaps remain). The remaining items
+**The ledger is not a single green number.** 39 items are genuinely closed
+(operational, tested, no known gap). 9 are partial (work for most cases, known
+gaps remain). 2 are scaffolding (structural presence only). The remaining items
 are deferred, wontfix, or deprecated. This is the honest state.
 
 ## Exhaustive Forensic Audit v2
