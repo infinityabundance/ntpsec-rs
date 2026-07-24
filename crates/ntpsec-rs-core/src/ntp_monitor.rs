@@ -24,18 +24,28 @@ pub struct MonList {
     entries: Vec<MonEntry>,
     pub max_entries: u32,
     pub min_distance: u32,
+    /// Maximum age for MRU entries in seconds. Entries older than this
+    /// are pruned during periodic aging. Matching ntpsec's MRU_MAXAGE.
+    pub max_age: u32,
+    /// Rate limit threshold: number of packets before rate limiting kicks in.
+    /// Matching ntpsec's default behavior where rate limiting applies after
+    /// a configurable number of packets from the same source.
+    pub rate_limit_count: u32,
 }
 
 impl MonList {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            max_entries: 600,  // ntpsec default
-            min_distance: 600, // ntpsec default (seconds)
+            max_entries: 600,     // ntpsec default
+            min_distance: 600,    // ntpsec default (seconds)
+            max_age: 3600,        // MRU_MAX_AGE = 3600 seconds (1 hour)
+            rate_limit_count: 10, // ntpsec default rate limit packet count
         }
     }
 
     /// Record a packet from a source address.
+    /// Supports both AF_INET and AF_INET6 for duplicate detection.
     pub fn record(&mut self, addr: &SockAddr, now: NtpTs64) {
         // Find existing entry or create new one
         if let Some(entry) = self.entries.iter_mut().find(|e| unsafe {
@@ -70,6 +80,23 @@ impl MonList {
                     .sort_by(|a, b| a.last_pkt.seconds.cmp(&b.last_pkt.seconds));
                 self.entries.pop();
             }
+        }
+    }
+
+    /// Prune old entries: remove any entry whose last_pkt is older than
+    /// `max_age` seconds from `now`. This implements MRU entry aging,
+    /// matching ntpsec's periodic MRU cleanup.
+    pub fn prune_aged(&mut self, now: NtpTs64) {
+        let cutoff = now.seconds.saturating_sub(self.max_age as i64);
+        self.entries.retain(|e| e.last_pkt.seconds >= cutoff);
+    }
+
+    /// Prune entries over the max_entries limit by removing the oldest.
+    pub fn prune_over_limit(&mut self) {
+        if self.entries.len() > self.max_entries as usize {
+            self.entries
+                .sort_by(|a, b| b.last_pkt.seconds.cmp(&a.last_pkt.seconds));
+            self.entries.truncate(self.max_entries as usize);
         }
     }
 
@@ -109,15 +136,18 @@ impl MonList {
             // Rate-limiting algorithm from ntpsec:
             // Compute the average interval between successive packets.
             // If it falls below MIN_INTERVAL, the source is rate-limited.
+            // Also enforce that the source must exceed the configured
+            // rate_limit_count before rate limiting applies (matching ntpsec
+            // behavior which uses a configurable threshold, default 10).
             const MIN_INTERVAL: f64 = 0.2; // 200 ms (~5 packets/sec max)
-            if entry.count > 1 {
+            if entry.count > self.rate_limit_count {
                 let dt = (entry.last_pkt.seconds - entry.first_pkt.seconds) as f64
                     + (entry.last_pkt.fraction as f64 - entry.first_pkt.fraction as f64)
                         / 4_294_967_296.0;
                 let avg_interval = dt / (entry.count as f64 - 1.0);
                 (avg_interval < MIN_INTERVAL, entry.count)
             } else {
-                // With only 1 packet, we can't measure rate yet.
+                // Not enough packets yet for rate limiting
                 (false, entry.count)
             }
         } else {
@@ -127,7 +157,7 @@ impl MonList {
 }
 
 /// Convert a NetAddr to a libc sockaddr_storage for MRU matching.
-fn netaddr_to_sockaddr(addr: &NetAddr) -> SockAddr {
+pub fn netaddr_to_sockaddr(addr: &NetAddr) -> SockAddr {
     let mut ss: SockAddr = unsafe { std::mem::zeroed() };
     match addr.family {
         4 => {

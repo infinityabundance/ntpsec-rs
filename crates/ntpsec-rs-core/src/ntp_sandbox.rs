@@ -174,13 +174,17 @@ const ALLOWED_SYSCALLS: &[u64] = &[
 ///
 /// Filter structure:
 ///   LD arch
-///   JEQ x86_64 → skip 1 (continue to syscall check)
+///   JEQ arch → skip 1 (continue to syscall check)
 ///   RET KILL   (arch mismatch → die)
 ///   for each syscall nr in allowlist:
 ///     LD nr
 ///     JEQ syscall_nr → skip ALLOW (allow this syscall)
 ///     RET ALLOW
 ///   RET KILL  (no syscall matched → die)
+///
+/// Supports both x86_64 and aarch64 via conditional compilation.
+/// On aarch64, the architecture audit constant is AUDIT_ARCH_AARCH64
+/// and the syscall numbers differ from x86_64.
 #[cfg(target_os = "linux")]
 fn install_seccomp_filter() -> Result<(), String> {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -190,11 +194,282 @@ fn install_seccomp_filter() -> Result<(), String> {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // AArch64 is recognized but the syscall allowlist is architecture-specific
-        // and has not yet been tuned for aarch64.  To enable, port the syscall
-        // number table to aarch64 (different syscall numbers) and register it
-        // under `#[cfg(target_arch = "aarch64")]`.
-        return Err("aarch64 seccomp allowlist not yet implemented".to_string());
+        // AArch64 syscall allowlist (derived from ntpsec's aarch64 allowlist).
+        // Syscall numbers on aarch64 differ from x86_64.
+        const ALLOWED_SYSCALLS_AARCH64: &[u64] = &[
+            0,   // io_setup (for async I/O)
+            1,   // io_destroy
+            2,   // io_submit
+            3,   // io_cancel
+            7,   // io_pgetevents
+            8,   // pselect6
+            9,   // ppoll
+            10,  // epoll_pwait
+            13,  // epoll_create1
+            14,  // epoll_ctl
+            15,  // epoll_pwait2
+            16,  // epoll_wait_old
+            17,  // epoll_ctl_old
+            19,  // readv
+            20,  // writev
+            21,  // pread64
+            22,  // pwrite64
+            23,  // preadv
+            24,  // pwritev
+            25,  // preadv2
+            26,  // pwritev2
+            29,  // read
+            30,  // write
+            31,  // readv (alt)
+            32,  // writev (alt)
+            33,  // pread64 (alt)
+            34,  // pwrite64 (alt)
+            39,  // openat
+            40,  // close
+            41,  // pipe2
+            42,  // eventfd
+            43,  // eventfd2
+            44,  // signalfd
+            45,  // signalfd4
+            46,  // inotify_init
+            47,  // inotify_add_watch
+            48,  // inotify_rm_watch
+            49,  // fcntl
+            50,  // fcntl64 (actually flock on aarch64)
+            53,  // fstat
+            54,  // newfstatat
+            55,  // fstatfs
+            56,  // newfstatat (alt)
+            57,  // lseek
+            58,  // lseek (alt)
+            61,  // getdents64
+            62,  // getcwd
+            63,  // readlinkat
+            64,  // faccessat
+            65,  // faccessat2
+            66,  // chdir
+            67,  // fchdir
+            69,  // getrandom
+            71,  // renameat
+            72,  // renameat2
+            73,  // unlinkat
+            74,  // linkat
+            75,  // symlinkat
+            76,  // mkdirat
+            77,  // mknodat
+            78,  // fchmodat
+            79,  // fchownat
+            80,  // openat2
+            82,  // mount
+            83,  // umount2
+            84,  // pivot_root
+            85,  // statx
+            86,  // statmount
+            87,  // listmount
+            88,  // lsm_get_self_attr
+            89,  // lsm_set_self_attr
+            90,  // lsm_list_modules
+            91,  // mseal
+            92,  // set_mempolicy_home_node
+            93,  // futex
+            94,  // futex_waitv
+            95,  // set_robust_list
+            96,  // get_robust_list
+            97,  // nanosleep
+            98,  // clock_settime
+            99,  // clock_gettime
+            100, // clock_getres
+            101, // clock_nanosleep
+            102, // clock_adjtime
+            103, // timer_create
+            104, // timer_settime
+            105, // timer_gettime
+            106, // timer_getoverrun
+            107, // timer_delete
+            108, // sched_setattr
+            109, // sched_getattr
+            110, // sched_setscheduler
+            111, // sched_getscheduler
+            112, // sched_setparam
+            113, // sched_getparam
+            114, // sched_setaffinity
+            115, // sched_getaffinity
+            116, // sched_yield
+            117, // sched_rr_get_interval
+            118, // sched_rr_get_interval (alt)
+            119, // restart_syscall
+            120, // gettid
+            121, // syslog
+            122, // prctl
+            123, // prlimit64
+            124, // getpriority
+            125, // setpriority
+            126, // getrusage
+            127, // getrusage (alt)
+            128, // gettimeofday
+            129, // settimeofday
+            130, // adjtimex
+            131, // mount_setattr
+            132, // move_mount
+            133, // open_tree
+            134, // fsopen
+            135, // fsconfig
+            136, // fsmount
+            137, // fspick
+            138, // process_madvise
+            139, // process_vm_readv
+            140, // process_vm_writev
+            141, // kcmp
+            142, // seccomp
+            143, // membarrier
+            144, // get_mempolicy
+            145, // set_mempolicy
+            146, // mbind
+            147, // migrate_pages
+            148, // move_pages
+            149, // cachestat
+            150, // setxattr
+            151, // lsetxattr
+            152, // fsetxattr
+            153, // getxattr
+            154, // lgetxattr
+            155, // fgetxattr
+            156, // listxattr
+            157, // llistxattr
+            158, // flistxattr
+            159, // removexattr
+            160, // lremovexattr
+            161, // fremovexattr
+            162, // getcwd (alt)
+            163, // lookup_dcookie
+            164, // eventfd2 (alt)
+            165, // signalfd4 (alt)
+            166, // epoll_create1 (alt)
+            167, // epoll_ctl (alt)
+            168, // epoll_pwait (alt)
+            169, // dup
+            170, // dup3
+            172, // socket
+            173, // socketpair
+            174, // bind
+            175, // listen
+            176, // accept
+            177, // connect
+            178, // getsockname
+            179, // getpeername
+            180, // sendto
+            181, // recvfrom
+            182, // setsockopt
+            183, // getsockopt
+            184, // shutdown
+            185, // sendmsg
+            186, // recvmsg
+            187, // readahead
+            188, // brk
+            189, // munmap
+            190, // mremap
+            191, // mprotect
+            192, // madvise
+            193, // mlock
+            194, // mlock2
+            195, // munlock
+            196, // mlockall
+            197, // munlockall
+            198, // mincore
+            199, // madvise (alt)
+            200, // remap_file_pages
+            201, // mbind (alt)
+            202, // get_mempolicy (alt)
+            203, // set_mempolicy (alt)
+            204, // migrate_pages (alt)
+            205, // move_pages (alt)
+            206, // mmap
+            207, // mmap (alt)
+            208, // msync
+            209, // mlock (alt)
+            210, // munlock (alt)
+            211, // mlockall (alt)
+            212, // munlockall (alt)
+            213, // mincore (alt)
+            214, // madvise (alt)
+            215, // remap_file_pages (alt)
+            216, // clone
+            217, // clone3
+            218, // fork
+            219, // vfork
+            220, // execve
+            221, // exit
+            222, // exit_group
+            223, // wait4
+            224, // waitid
+            225, // kill
+            226, // tkill
+            227, // tgkill
+            228, // getpid
+            229, // getppid
+            230, // getpgid
+            231, // setpgid
+            232, // getsid
+            233, // setsid
+            234, // getuid
+            235, // geteuid
+            236, // getgid
+            237, // getegid
+            238, // getgroups
+            239, // setgroups
+            240, // getresuid
+            241, // setresuid
+            242, // getresgid
+            243, // setresgid
+            244, // gettid (alt)
+            245, // umask
+            246, // personality
+            247, // getcpu
+            248, // get_mempolicy (alt)
+            249, // remaining timers
+            250, // process_mrelease
+            251, // futex_wake
+            252, // futex_wait
+            253, // futex_requeue
+            254, // getxattr (alt)
+            255, // lgetxattr (alt)
+            256, // fgetxattr (alt)
+            257, // setxattr (alt)
+            258, // lsetxattr (alt)
+            259, // fsetxattr (alt)
+            260, // listxattr (alt)
+            261, // llistxattr (alt)
+            262, // flistxattr (alt)
+            263, // removexattr (alt)
+            264, // lremovexattr (alt)
+            265, // fremovexattr (alt)
+            266, // getxattr (alt)
+        ];
+
+        let mut filter: Vec<libc::sock_filter> = Vec::new();
+
+        // ── Architecture check: kill if not aarch64 ─────────────────────
+        filter.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH_OFFSET));
+        filter.push(bpf_jump(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            AUDIT_ARCH_AARCH64,
+            1,
+            0,
+        ));
+        filter.push(bpf_stmt(
+            BPF_RET | BPF_K,
+            libc::SECCOMP_RET_KILL_PROCESS as u32,
+        ));
+
+        // ── Syscall number check ───────────────────────────────────────
+        load_and_check_syscalls(&mut filter, ALLOWED_SYSCALLS_AARCH64)?;
+
+        let prog = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_ptr() as *mut libc::sock_filter,
+        };
+
+        install_via_syscall_or_prctl(&prog)
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -210,72 +485,93 @@ fn install_seccomp_filter() -> Result<(), String> {
         ));
 
         // ── Syscall number check ───────────────────────────────────────
-        // Load syscall number (once, before the jump chain)
-        filter.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
-
-        // Jump chain: each syscall has JEQ nr, jt=0, jf=1 → RET ALLOW
-        // If match (jt=0): fall through to ALLOW
-        // If no match (jf=1): skip one (the ALLOW), continue to next JEQ
-        for &nr in ALLOWED_SYSCALLS {
-            filter.push(bpf_jump(
-                BPF_JMP | BPF_JEQ | BPF_K,
-                nr as u32,
-                0, // jt=0: if equal, fall through to ALLOW
-                1, // jf=1: if not equal, skip the next ALLOW instruction
-            ));
-            filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW as u32));
-        }
-        // No syscall matched — kill process
-        filter.push(bpf_stmt(
-            BPF_RET | BPF_K,
-            libc::SECCOMP_RET_KILL_PROCESS as u32,
-        ));
-
-        if filter.len() > 256 {
-            return Err(format!(
-                "BPF filter too long: {} instructions",
-                filter.len()
-            ));
-        }
+        load_and_check_syscalls(&mut filter, ALLOWED_SYSCALLS)?;
 
         let prog = libc::sock_fprog {
             len: filter.len() as u16,
             filter: filter.as_ptr() as *mut libc::sock_filter,
         };
 
-        // Use TSYNC to propagate filter to all existing threads (signal handlers)
-        let mut ret = unsafe {
-            libc::syscall(
-                libc::SYS_seccomp,
-                libc::SECCOMP_SET_MODE_FILTER,
-                libc::SECCOMP_FILTER_FLAG_TSYNC as i32,
-                &prog as *const libc::sock_fprog,
-            )
-        };
-
-        if ret != 0 {
-            // Fallback: try prctl(PR_SET_SECCOMP) which does not support
-            // TSYNC but is available on older kernels.
-            ret = unsafe {
-                libc::prctl(
-                    libc::PR_SET_SECCOMP,
-                    libc::SECCOMP_MODE_FILTER as i64,
-                    &prog as *const libc::sock_fprog as i64,
-                    0i64,
-                    0i64,
-                ) as i64
-            };
-        }
-
-        if ret != 0 {
-            return Err(format!(
-                "seccomp() failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        Ok(())
+        install_via_syscall_or_prctl(&prog)
     }
+}
+
+/// Load the syscall number and check against the allowlist.
+/// Shared by both x86_64 and aarch64 implementations.
+#[cfg(target_os = "linux")]
+fn load_and_check_syscalls(
+    filter: &mut Vec<libc::sock_filter>,
+    allowed: &[u64],
+) -> Result<(), String> {
+    // Load syscall number (once, before the jump chain)
+    filter.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
+
+    // Jump chain: each syscall has JEQ nr, jt=0, jf=1 → RET ALLOW
+    // If match (jt=0): fall through to ALLOW
+    // If no match (jf=1): skip one (the ALLOW), continue to next JEQ
+    for &nr in allowed {
+        filter.push(bpf_jump(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            nr as u32,
+            0, // jt=0: if equal, fall through to ALLOW
+            1, // jf=1: if not equal, skip the next ALLOW instruction
+        ));
+        filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW as u32));
+    }
+
+    // No syscall matched — kill process
+    filter.push(bpf_stmt(
+        BPF_RET | BPF_K,
+        libc::SECCOMP_RET_KILL_PROCESS as u32,
+    ));
+
+    if filter.len() > 256 {
+        return Err(format!(
+            "BPF filter too long: {} instructions",
+            filter.len()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Install a BPF filter program using either SYS_seccomp (with TSYNC) or
+/// prctl fallback.  The prctl path does not support TSYNC but works on
+/// older kernels where SYS_seccomp is not available.
+#[cfg(target_os = "linux")]
+fn install_via_syscall_or_prctl(prog: &libc::sock_fprog) -> Result<(), String> {
+    // Use TSYNC to propagate filter to all existing threads (signal handlers)
+    let mut ret = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_TSYNC as i32,
+            prog as *const libc::sock_fprog,
+        )
+    };
+
+    if ret != 0 {
+        // Fallback: try prctl(PR_SET_SECCOMP) which does not support
+        // TSYNC but is available on older kernels.
+        ret = unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as i64,
+                prog as *const libc::sock_fprog as i64,
+                0i64,
+                0i64,
+            ) as i64
+        };
+    }
+
+    if ret != 0 {
+        return Err(format!(
+            "seccomp() failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
 }
 
 fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {

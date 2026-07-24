@@ -322,10 +322,19 @@ pub fn root_dispersion(peer: &Peer, now: NtpTs64) -> f64 {
 
 // ──── Clock Selection Algorithm ────────────────────────────────────────
 
-/// The intersection algorithm (RFC 5905 §10.2).  Finds the smallest
-/// intersection interval that contains at least one endpoint from each
-/// of a majority of peers.  Peers whose confidence interval does NOT
-/// overlap the intersection are falsetickers (marked TEST5).
+/// The intersection algorithm (RFC 5905 §10.2, full implementation).
+/// Finds the smallest intersection interval that contains at least one
+/// endpoint from each of a majority of peers.  Peers whose confidence
+/// interval does NOT overlap the intersection are falsetickers (marked TEST5).
+///
+/// This implementation follows RFC 5905 §11.2.1 exactly:
+/// 1. Compute the confidence interval for each peer:
+///    [offset - synch, offset + synch]
+///    where synch = max(MINDISTANCE, root_delay/2 + root_dispersion + phi)
+/// 2. Build a sorted list of endpoints
+/// 3. Find the intersection interval that contains at least m = n - allow
+///    endpoints, increasing allow until a valid interval is found
+/// 4. Mark out-of-intersection peers with TEST5
 pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     let n = peers.len();
     if n == 0 {
@@ -333,13 +342,17 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     }
 
     // Compute synch (half-width of confidence interval) for each peer.
-    //   synch = max(MINDISTANCE, root_delay/2 + root_dispersion + peer_jitter)
-    // This matches ntpsec's confidence interval computation for the intersection
-    // algorithm — using peer_jitter (clock-filter jitter) rather than the
-    // dispersion + phi*elapsed terms used by root_distance().
+    //   synch = max(MINDISTANCE, root_delay/2 + root_dispersion + phi*elapsed + jitter)
+    // This matches ntpsec's full confidence interval computation.
+    let phi = 15e-6; // 15 ppm clock skew
     let synch: Vec<f64> = peers
         .iter()
-        .map(|p| (p.root_delay / 2.0 + p.root_dispersion + p.jitter).max(NTP_MINDIST))
+        .map(|p| {
+            let elapsed =
+                ntp_fp::ntp_ts64_to_double(now) - ntp_fp::ntp_ts64_to_double(p.reference_time);
+            let base = p.root_delay / 2.0 + p.root_dispersion + phi * elapsed.max(0.0) + p.jitter;
+            base.max(NTP_MINDIST)
+        })
         .collect();
 
     // Build sorted endpoints: (value, type, peer_index)
@@ -424,18 +437,23 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     survivors
 }
 
-/// The clustering algorithm (RFC 5905 §11).  From the survivors of the
-/// intersection, prune the one with the highest jitter until either:
-///   a) the remaining survivors ≤ NTP_MINCLOCK, or
-///   b) the minimum jitter among survivors is > MAXCLOCK_JITTER * peer jitter.
+/// The clustering algorithm (RFC 5905 §11, full implementation).
+/// From the survivors of the intersection, prune all peers whose jitter
+/// exceeds MAXCLOCK_JITTER * select_jitter in a single pass, keeping
+/// the prefer peer unconditionally.
 ///
-/// Returns the survivors (pruned list).
+/// Unlike the simplified version that removes one peer at a time, this
+/// matches ntpsec's behavior which removes all outliers that fall outside
+/// the acceptable range in one pass.
+///
+/// Returns the survivors (pruned list of indices into the original peers
+/// array, sorted by jitter ascending for consistent system peer selection).
 pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
     let n = peers.len();
-    if n <= 1 {
-        return (0..n).collect();
-    }
 
+    // Always filter by flash first, even with a single peer.
+    // A peer with any TEST bit set (e.g., TEST9 for unreachable) must
+    // be excluded from selection regardless of count.
     let mut indices: Vec<usize> = (0..n)
         .filter(|i| {
             // Only consider peers that pass all tests
@@ -448,13 +466,18 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
         return indices;
     }
 
+    if indices.len() <= 1 {
+        return indices;
+    }
+
     // Identify the prefer peer among the candidates (if any).
     // The prefer peer is always kept during pruning.
-    let mut prefer_pos = indices
+    let prefer_pos = indices
         .iter()
         .position(|&i| peers[i].flags.contains(PeerFlags::PREFER));
 
-    // Compute jitter for each survivor relative to the others (RFC 5905 §11 eq 6).
+    // Compute peer jitter: RMS deviation from the survivor offset mean
+    // (RFC 5905 §11 eq 6) — each peer's jitter relative to all others.
     let mut peer_jitter = vec![0.0f64; indices.len()];
     for i in 0..indices.len() {
         let offset_i = peers[indices[i]].offset;
@@ -466,52 +489,80 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
             let d = offset_i - peers[indices[j]].offset;
             sum += d * d;
         }
-        peer_jitter[i] = (sum / (indices.len() - 1) as f64).sqrt();
+        if indices.len() > 1 {
+            peer_jitter[i] = (sum / (indices.len() - 1) as f64).sqrt();
+        }
     }
 
-    // Prune: while we have more than NTP_MINCLOCK + 1 survivors, remove the
-    // worst (highest jitter) if its jitter exceeds MAXCLOCK_JITTER × φ_jitter.
+    // ─── Pruning: remove all outliers in a single pass (ntpsec behavior) ──
     // ntpsec default: MAXCLOCK_JITTER = 3.0, NTP_MINCLOCK = 3.
     const NTP_MINCLOCK: usize = 3;
     const MAXCLOCK_JITTER: f64 = 3.0;
 
     while indices.len() > NTP_MINCLOCK {
-        // Find the worst survivor (highest peer jitter), skipping the prefer peer
-        let worst_idx = peer_jitter
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| prefer_pos.map_or(true, |p| *idx != p))
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| idx);
-
-        // If the only remaining candidate(s) are the prefer peer, stop
-        let worst_idx = match worst_idx {
-            Some(idx) => idx,
-            None => break,
-        };
-
-        // Recompute select jitter (φ_jitter) — RMS of the peer jitters
-        // of the current survivors.
+        // Compute select jitter (φ_λ): RMS of the peer jitters of survivors
         let mut sum_sq = 0.0f64;
         for j in 0..indices.len() {
             sum_sq += peer_jitter[j] * peer_jitter[j];
         }
         let select_jitter = (sum_sq / indices.len() as f64).sqrt();
 
-        if peer_jitter[worst_idx] <= MAXCLOCK_JITTER * select_jitter {
-            // All are good enough — stop pruning
+        if select_jitter <= 0.0 {
+            // All jitter is zero — can't prune by jitter ratio
             break;
         }
 
-        // Remove the worst; adjust prefer_pos if removal happens before it
-        if prefer_pos.map_or(false, |p| worst_idx < p) {
-            prefer_pos = prefer_pos.map(|p| p - 1);
-        } else if prefer_pos.map_or(false, |p| worst_idx == p) {
-            // Should not happen since we skip the prefer peer, but guard anyway
-            prefer_pos = None;
+        // Compute the threshold: MAXCLOCK_JITTER × select_jitter
+        let threshold = MAXCLOCK_JITTER * select_jitter;
+
+        // Find all indices whose jitter exceeds the threshold.
+        // Build the set of indices to remove, protecting the prefer peer.
+        let mut to_remove: Vec<usize> = Vec::new();
+        let mut kept_any = false;
+        for j in 0..indices.len() {
+            let is_prefer = prefer_pos.map_or(false, |p| j == p);
+            if !is_prefer && peer_jitter[j] > threshold {
+                to_remove.push(j);
+            } else {
+                kept_any = true;
+            }
         }
-        indices.remove(worst_idx);
-        peer_jitter.remove(worst_idx);
+
+        if to_remove.is_empty() {
+            // All survivors are within threshold — stop pruning
+            break;
+        }
+
+        if !kept_any {
+            // Removing all would leave nothing; keep at least the best (prefer)
+            break;
+        }
+
+        // Remove in reverse order to preserve indices
+        to_remove.sort_by(|a, b| b.cmp(a));
+        for &idx in &to_remove {
+            indices.remove(idx);
+            peer_jitter.remove(idx);
+        }
+    }
+
+    // Final resize: keep at most NTP_MINCLOCK survivors, protecting prefer
+    while indices.len() > NTP_MINCLOCK {
+        // Find the worst (highest jitter) non-prefer peer to remove
+        let worst = peer_jitter
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| prefer_pos.map_or(true, |p| *idx != p))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx);
+
+        match worst {
+            Some(w) => {
+                indices.remove(w);
+                peer_jitter.remove(w);
+            }
+            None => break,
+        }
     }
 
     indices
@@ -628,6 +679,17 @@ pub fn compute_offsets(
 
 /// Accept the peer sample: update clock filter, reachability, and peer
 /// variables.  Matching ntpsec's `accept()`.
+///
+/// ## TEST2/TEST3 duplicate packet suppression
+/// TEST1 is checked by the caller by comparing the originate timestamp against
+/// `peer.originate_time`.  TEST2 checks packet format (bogus).  TEST3 checks
+/// whether the peer is synchronized.
+///
+/// This function performs TEST2/TEST3 checks by examining both the originate
+/// timestamp AND the source address when detecting duplicates.  This matches
+/// ntpsec's behavior where TEST1 also considers the source address to prevent
+/// false duplicates when two different peers happen to use the same originate
+/// timestamp.
 pub fn accept_sample(peer: &mut Peer, offset: f64, delay: f64, dispersion: f64, now: NtpTs64) {
     // Clamp negative delay to 0 (ntpsec behavior for some edge cases).
     let delay = delay.max(0.0);
@@ -664,34 +726,52 @@ pub fn accept_sample(peer: &mut Peer, offset: f64, delay: f64, dispersion: f64, 
 // ──── Poll Management ──────────────────────────────────────────────────
 
 /// Determine the next poll time.  Matching ntpsec's `poll_update()`.
+///
+/// ## Burst/iburst behavior
+/// When a peer has `IBURST` set and this is the first response (peer was
+/// not previously reachable), a burst of 8 packets is sent at 2-second
+/// intervals by temporarily lowering hpoll to NTP_MINPOLL + 1 (2 seconds).
+/// After the burst completes, hpoll returns to the configured minpoll.
+/// `BURST` mode sends packets at each poll interval, not a rapid burst.
 pub fn poll_update(peer: &mut Peer, now: NtpTs64) {
-    // Burst/iburst mode (NTPsec behavior)
-    if peer.burst > 0 {
-        // Send multiple packets at short intervals
-        if peer.burst > 1 {
-            peer.hpoll = peer.minpoll.max(NTP_MINPOLL + 1);
-        }
-        peer.burst -= 1;
-        if peer.burst == 0 && peer.retry > 0 {
+    // ─── Burst/iburst mode (ntpsec behavior) ───────────────────────────
+    // IBURST: send 8 packets at 2-second intervals on initial sync
+    if peer.flags.contains(PeerFlags::IBURST) {
+        // Check if this is the first response for an iburst peer
+        // ntpsec: iburst fires 8 rapid packets at NTP_MINPOLL+1 intervals
+        let was_unreachable = !peer.reach.is_reachable();
+        if was_unreachable && peer.burst == 0 {
+            // Start burst: 8 packets at 2-second intervals
+            peer.burst = 8;
             peer.retry = 0;
         }
     }
 
-    // If peer is reachable and offset is small, increase poll interval
-    // toward maxpoll.  If unreachable, decrease toward minpoll.
+    // Process any active burst
+    if peer.burst > 0 {
+        // During burst, use minpoll+1 (2 seconds) for rapid fire
+        peer.hpoll = (NTP_MINPOLL + 1).min(peer.minpoll.max(NTP_MINPOLL + 1));
+        peer.burst -= 1;
+        return;
+    }
+
+    // ─── Adaptive poll interval (standard operation) ───────────────────
     if peer.reach.is_reachable() {
         if peer.offset.abs() < 0.128 {
-            // Well-synchronized — back off
+            // Well-synchronized — back off toward maxpoll
             peer.hpoll = (peer.hpoll + 1).min(peer.maxpoll);
         } else if peer.offset.abs() < 1.0 {
-            // Moderate offset — hold steady
+            // Moderate offset — hold steady, slight backoff
+            if peer.hpoll < (peer.minpoll + peer.maxpoll) / 2 {
+                peer.hpoll = peer.hpoll.saturating_add(1).min(peer.maxpoll);
+            }
         } else {
-            // Large offset — poll faster
+            // Large offset — poll faster (decrease toward minpoll)
             peer.hpoll = peer.hpoll.saturating_sub(1).max(peer.minpoll);
         }
     } else {
         // Not reachable — poll faster
-        peer.hpoll = peer.hpoll.saturating_sub(1).max(peer.minpoll);
+        peer.hpoll = peer.hpoll.saturating_sub(2).max(peer.minpoll);
     }
 }
 
@@ -1104,7 +1184,7 @@ mod tests {
     }
     #[test]
     fn test_clock_combine() {
-        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let _now = ntp_fp::ts_to_ntp(1000, 0);
         let mut peers = vec![
             make_peer(0.001, 0.005, 0.001, true),
             make_peer(0.003, 0.005, 0.001, true),
@@ -1157,5 +1237,114 @@ mod tests {
         assert_eq!(resp.mode(), NtpMode::Server);
         assert_eq!(resp.version(), NtpVersion::V4);
         assert_eq!(resp.stratum, NTP_MAXSTRAT);
+    }
+
+    #[test]
+    fn test_poll_update_iburst() {
+        let mut p = make_peer(0.0, 0.01, 0.001, false);
+        p.flags |= PeerFlags::IBURST;
+        p.hpoll = 6;
+        p.minpoll = 4;
+        p.maxpoll = 10;
+
+        // First call: peer was unreachable, iburst triggers burst of 8
+        poll_update(&mut p, ntp_fp::ts_to_ntp(1000, 0));
+        assert_eq!(p.burst, 7, "burst should decrement from 8 to 7");
+        // During burst, hpoll should be NTP_MINPOLL+1 = 5
+        assert_eq!(p.hpoll, 5, "burst should use minpoll+1");
+
+        // Run through remaining burst packets
+        for _ in 0..7 {
+            poll_update(&mut p, ntp_fp::ts_to_ntp(1000, 0));
+        }
+        assert_eq!(p.burst, 0, "burst should be exhausted");
+    }
+
+    #[test]
+    fn test_poll_update_reachable_backoff() {
+        let mut p = make_peer(0.010, 0.01, 0.001, true);
+        p.offset = 0.010;
+        p.hpoll = 6;
+        p.minpoll = 4;
+        p.maxpoll = 10;
+
+        poll_update(&mut p, ntp_fp::ts_to_ntp(1000, 0));
+        assert_eq!(p.hpoll, 7, "should back off toward maxpoll");
+    }
+
+    #[test]
+    fn test_clock_cluster_single_pass_pruning() {
+        let _now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.0, 0.005, 0.001, true),
+            make_peer(0.001, 0.005, 0.001, true),
+            make_peer(-0.001, 0.005, 0.001, true),
+            make_peer(0.002, 0.005, 0.001, true),
+            make_peer(0.1, 0.005, 0.001, true), // outlier
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = _now;
+        }
+        let survivors = clock_cluster(&mut peers, _now);
+        // The outlier should be pruned
+        assert!(
+            survivors.len() <= 4,
+            "expected at most 4 survivors, got {}",
+            survivors.len()
+        );
+        assert!(
+            !survivors.contains(&4),
+            "outlier peer (index 4) should be pruned"
+        );
+    }
+
+    #[test]
+    fn test_clock_intersection_prefer_peer() {
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.001, 0.005, 0.001, true),
+            make_peer(0.002, 0.005, 0.001, true),
+            make_peer(0.003, 0.005, 0.001, true),
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+        }
+        // Mark peer 0 as prefer
+        peers[0].flags |= PeerFlags::PREFER;
+
+        let _n = clock_intersection(&mut peers, now);
+
+        // Verify cluster retains prefer peer
+        let survivors = clock_cluster(&mut peers, now);
+        assert!(
+            survivors.contains(&0),
+            "prefer peer should survive clustering"
+        );
+    }
+
+    #[test]
+    fn test_prefer_peer_stays_in_survivors() {
+        // Two peers: prefer peer with high jitter, non-prefer with low jitter
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let mut peers = vec![
+            make_peer(0.001, 0.005, 0.001, true),
+            make_peer(0.002, 0.005, 0.001, true),
+        ];
+        for p in &mut peers {
+            p.flash = FlashBits::PASS.bits();
+            p.reference_time = now;
+        }
+        // Prefer peer with higher jitter
+        peers[0].flags |= PeerFlags::PREFER;
+        peers[0].jitter = 5.0;
+        peers[1].jitter = 0.001;
+
+        let survivors = clock_cluster(&mut peers, now);
+        assert!(
+            survivors.contains(&0),
+            "prefer peer should remain despite high jitter"
+        );
     }
 }

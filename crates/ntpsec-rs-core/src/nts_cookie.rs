@@ -55,20 +55,28 @@ pub const NTS_COOKIE_MAX_AGE: u64 = 86400;
 pub struct CookieKeyIndex(pub u32);
 
 /// AES-SIV-CMAC-256 cookie encryption/decryption with key rotation
-/// support and a random-nonce envelope format.
+/// support, a random-nonce envelope format, and bounded key storage.
 ///
 /// Each key is identified by a [`CookieKeyIndex`] (a 32-bit integer).
 /// Encryption always picks the most recently added key; decryption
 /// looks up the key by its index from the envelope.
+///
+/// Key storage is bounded to [`MAX_KEYS`] entries. When a new key is
+/// added beyond this limit, the oldest key is evicted.
+pub const MAX_KEYS: usize = 16;
+
 #[derive(Debug)]
 pub struct CookieCipher {
     keys: Vec<(CookieKeyIndex, [u8; 32])>,
+    /// Optional server identity to bind into AAD (e.g., SHA-256 of hostname).
+    server_identity: Option<[u8; 32]>,
 }
 
 impl Clone for CookieCipher {
     fn clone(&self) -> Self {
         Self {
             keys: self.keys.clone(),
+            server_identity: self.server_identity,
         }
     }
 }
@@ -76,14 +84,54 @@ impl Clone for CookieCipher {
 impl CookieCipher {
     /// Create an empty cipher with no keys configured.
     pub fn new() -> Self {
-        Self { keys: Vec::new() }
+        Self {
+            keys: Vec::new(),
+            server_identity: None,
+        }
+    }
+
+    /// Create an empty cipher with a server identity binding.
+    pub fn with_server_identity(identity: [u8; 32]) -> Self {
+        Self {
+            keys: Vec::new(),
+            server_identity: Some(identity),
+        }
     }
 
     /// Add a cookie encryption key.
     ///
     /// The most recently added key is used for encryption.
+    /// If the number of stored keys exceeds [`MAX_KEYS`], the oldest
+    /// key is evicted to bound memory usage.
     pub fn add_key(&mut self, key_id: CookieKeyIndex, key: [u8; 32]) {
         self.keys.push((key_id, key));
+        if self.keys.len() > MAX_KEYS {
+            self.keys.remove(0);
+        }
+    }
+
+    /// Set the server identity to bind into AAD.
+    /// This should be a 32-byte value (e.g., SHA-256 of the server hostname).
+    pub fn set_server_identity(&mut self, identity: [u8; 32]) {
+        self.server_identity = Some(identity);
+    }
+
+    /// Clear the server identity binding from AAD.
+    pub fn clear_server_identity(&mut self) {
+        self.server_identity = None;
+    }
+
+    /// Get the number of keys currently stored.
+    pub fn key_count(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Prune old keys, keeping only the most recent `n`.
+    pub fn prune_keys(&mut self, keep: usize) {
+        let keep = keep.min(MAX_KEYS);
+        while self.keys.len() > keep {
+            self.keys.remove(0);
+        }
     }
 
     /// Get a key by its index, if present.
@@ -105,8 +153,11 @@ impl CookieCipher {
     ///   ciphertext: remainder (SIV-tagged output)
     /// ```
     ///
-    /// The associated data (AAD) fed to AES-SIV is `key_id || nonce`,
-    /// binding the envelope to this specific encryption context.
+    /// The associated data (AAD) fed to AES-SIV includes:
+    ///   - key_id (4 bytes big-endian) — binds the envelope to a specific key
+    ///   - nonce (16 bytes) — provides uniqueness
+    ///   - server_identity (32 bytes, if set) — binds to the server identity
+    /// This prevents cross-server replay of cookie envelopes.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         let (key_id, key_bytes) = self
             .keys
@@ -114,15 +165,18 @@ impl CookieCipher {
             .ok_or_else(|| "no cookie keys configured".to_string())?;
 
         let key = Key::<Aes128Siv>::from_slice(key_bytes);
-        // AAD: key_id (4 bytes big-endian) + random nonce (16 bytes)
         let key_id_bytes = key_id.0.to_be_bytes();
         let mut nonce = [0u8; 16];
         getrandom(&mut nonce).map_err(|e| format!("failed to generate nonce: {e}"))?;
 
-        let headers: [&[u8]; 2] = [&key_id_bytes, &nonce];
+        // Build AAD with server identity binding if configured.
+        let headers: Vec<&[u8]> = match &self.server_identity {
+            Some(id) => vec![&key_id_bytes, &nonce, id],
+            None => vec![&key_id_bytes, &nonce],
+        };
         let mut siv = Aes128Siv::new(key);
         let ciphertext = siv
-            .encrypt(headers, plaintext)
+            .encrypt(&headers, plaintext)
             .map_err(|e| format!("AES-SIV encrypt failed: {e}"))?;
 
         // Build envelope: key_id(4) || nonce(16) || ciphertext
@@ -156,10 +210,14 @@ impl CookieCipher {
             .get_key(key_id)
             .ok_or_else(|| format!("unknown cookie key index {}", key_id.0))?;
 
-        let headers: [&[u8]; 2] = [key_id_bytes, nonce_bytes];
+        // Build AAD matching encrypt: must include server identity if configured.
+        let headers: Vec<&[u8]> = match &self.server_identity {
+            Some(id) => vec![key_id_bytes, nonce_bytes, id],
+            None => vec![key_id_bytes, nonce_bytes],
+        };
         let key = Key::<Aes128Siv>::from_slice(key_bytes);
         let mut siv = Aes128Siv::new(key);
-        siv.decrypt(headers, ciphertext)
+        siv.decrypt(&headers, ciphertext)
             .map_err(|e| format!("AES-SIV decrypt failed: {e}"))
     }
 }

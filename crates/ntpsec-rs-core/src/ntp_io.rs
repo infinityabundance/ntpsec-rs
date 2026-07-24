@@ -129,6 +129,15 @@ impl NetAddr {
         self.family == 6
     }
 
+    /// Check if this is an IPv4 loopback address (127.0.0.0/8).
+    /// Used by loopcast detection to avoid flagging legitimate test traffic.
+    pub fn is_ipv4_loopback(&self) -> bool {
+        if self.family != 4 {
+            return false;
+        }
+        self.addr[0] == 127
+    }
+
     /// Convert to a std::net::SocketAddr for use with std::net sockets.
     pub fn to_std_socketaddr(&self) -> std::net::SocketAddr {
         match self.family {

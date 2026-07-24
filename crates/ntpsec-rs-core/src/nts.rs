@@ -356,12 +356,20 @@ impl NtsKeProtocolClient {
     }
 
     /// Start a handshake with pre-built wire-format request data.
+    ///
     /// Used for testing / offline development paths where the caller
     /// supplies both request and response bytes directly.
+    ///
+    /// When `cookie_cipher` is provided, the cookies in the server response
+    /// are decrypted to extract the real C2S and S2C keys (matching what
+    /// the full TLS path would derive via exporter). Without a cookie cipher,
+    /// the offline path returns zeroed keys — these MUST NOT be used for
+    /// actual encryption; the offline path is record-validation-only.
     pub fn handshake_with_data(
         &mut self,
         request: &[u8],
         response: &[u8],
+        cookie_cipher: Option<&crate::nts_cookie::CookieCipher>,
     ) -> Result<NtsKeNegotiation, String> {
         self.state = NtsKeState::Connecting;
 
@@ -433,7 +441,6 @@ impl NtsKeProtocolClient {
             let raw_type = rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT;
             match raw_type {
                 t if t == NTS_KE_RECORD_NEXT_PROTOCOL => {
-                    // RFC 8915 §4.1.1: exactly one Next Protocol record, critical bit set.
                     next_proto_count += 1;
                     if rec.record_type & NTS_KE_RECORD_CRITICAL_BIT == 0 {
                         self.state =
@@ -444,7 +451,6 @@ impl NtsKeProtocolClient {
                         self.state = NtsKeState::Error("duplicate Next Protocol".to_string());
                         return Err("duplicate Next Protocol record".to_string());
                     }
-                    // Body is a sequence of u16 protocol IDs in network byte order.
                     if rec.body.len() < 2 || rec.body.len() % 2 != 0 {
                         self.state = NtsKeState::Error(format!(
                             "Next Protocol invalid body length: {}",
@@ -455,7 +461,6 @@ impl NtsKeProtocolClient {
                             rec.body.len()
                         ));
                     }
-                    // Must select NTPv4 (Protocol ID 0) to proceed.
                     for chunk in rec.body.chunks_exact(2) {
                         let protocol = u16::from_be_bytes([chunk[0], chunk[1]]);
                         if protocol == 0 {
@@ -464,7 +469,6 @@ impl NtsKeProtocolClient {
                     }
                 }
                 t if t == NTS_KE_RECORD_AEAD_ALGORITHM => {
-                    // RFC 8915 §4.1.3: exactly one AEAD record, exactly 2-byte body, must match client offer.
                     aead_count += 1;
                     if aead_count > 1 {
                         self.state = NtsKeState::Error("duplicate AEAD".to_string());
@@ -497,7 +501,6 @@ impl NtsKeProtocolClient {
                         self.state = NtsKeState::Error("duplicate EOM".to_string());
                         return Err("duplicate End of Message record".to_string());
                     }
-                    // EOM MUST have critical bit set and empty body (RFC 8915 §4.1.8).
                     if rec.record_type & NTS_KE_RECORD_CRITICAL_BIT == 0 {
                         self.state = NtsKeState::Error("EOM missing critical bit".to_string());
                         return Err("End of Message record missing critical bit".to_string());
@@ -521,7 +524,6 @@ impl NtsKeProtocolClient {
             }
         }
 
-        // EOM must be the final record (RFC 8915 §4.1.8).
         if has_eom && eom_position != resp_records.len() - 1 {
             self.state = NtsKeState::Error("EOM not final record".to_string());
             return Err("EOM record is not the final record".to_string());
@@ -550,6 +552,39 @@ impl NtsKeProtocolClient {
             return Err("no cookies received from NTS-KE server".to_string());
         }
 
+        // ── Derive C2S and S2C keys from cookies ──────────────────
+        // In the offline path there is no TLS session, so we cannot
+        // use the TLS exporter. Instead, decrypt the first cookie using
+        // the provided CookieCipher to extract the embedded keys.
+        let (c2s_key, s2c_key) = match cookie_cipher {
+            Some(cipher) => {
+                // Decrypt the first cookie to get the embedded keys
+                let plaintext = cipher.decrypt(&cookies[0]).map_err(|e| {
+                    format!("failed to decrypt cookie during handshake_with_data: {e}")
+                })?;
+                // Cookie plaintext format: aead_alg(2) || c2s_key(32) || s2c_key(32)
+                if plaintext.len() < 66 {
+                    self.state = NtsKeState::Error("decrypted cookie too short".to_string());
+                    return Err(format!(
+                        "decrypted cookie plaintext too short: {} bytes",
+                        plaintext.len()
+                    ));
+                }
+                let mut c2s = [0u8; 32];
+                let mut s2c = [0u8; 32];
+                c2s.copy_from_slice(&plaintext[2..34]);
+                s2c.copy_from_slice(&plaintext[34..66]);
+                (c2s, s2c)
+            }
+            None => {
+                // OFFLINE/TEST-ONLY PATH: Without a CookieCipher we return
+                // zeroed keys. These MUST NOT be used for actual encryption —
+                // this path is record-validation-only. The real TLS path in
+                // NtsKeClient::handshake() derives keys from the TLS exporter.
+                ([0u8; 32], [0u8; 32])
+            }
+        };
+
         self.aead = Some(aead);
         self.cookies = cookies.clone();
         self.state = NtsKeState::Established;
@@ -557,8 +592,8 @@ impl NtsKeProtocolClient {
         Ok(NtsKeNegotiation {
             aead_algorithm: aead,
             cookies,
-            c2s_key: [0u8; 32],
-            s2c_key: [0u8; 32],
+            c2s_key,
+            s2c_key,
             server_offer,
         })
     }
@@ -987,7 +1022,9 @@ mod tests {
         request.extend_from_slice(&req_aead.encode());
         request.extend_from_slice(&req_eom.encode());
 
-        let negotiation = client.handshake_with_data(&request, &response).unwrap();
+        let negotiation = client
+            .handshake_with_data(&request, &response, None)
+            .unwrap();
         assert_eq!(negotiation.aead_algorithm, AeadAlgorithm::AeadAesSivCmac256);
         assert_eq!(negotiation.cookie_count(), 2);
         assert_eq!(negotiation.cookies[0], vec![0xAA; 32]);
@@ -1000,7 +1037,7 @@ mod tests {
     fn test_nts_ke_client_handshake_with_data_empty_response() {
         let mut client = NtsKeProtocolClient::new("ntp.example.com", NTS_KE_PORT);
         let request = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = client.handshake_with_data(&request, &[]);
+        let result = client.handshake_with_data(&request, &[], None);
         assert!(result.is_err());
         assert!(client.state().error_message().is_some());
     }

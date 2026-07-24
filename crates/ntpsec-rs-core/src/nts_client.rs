@@ -444,7 +444,7 @@ mod tests {
         request.extend_from_slice(&req_eom.encode());
 
         let negotiation = proto_client
-            .handshake_with_data(&request, &response)
+            .handshake_with_data(&request, &response, None)
             .unwrap();
         assert_eq!(negotiation.aead_algorithm, AeadAlgorithm::AeadAesSivCmac256);
         assert_eq!(negotiation.cookie_count(), 1);
@@ -468,7 +468,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Next Protocol"));
     }
@@ -486,7 +486,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Error"));
     }
@@ -507,7 +507,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
     }
 
@@ -524,7 +524,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("critical bit"));
     }
@@ -546,7 +546,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("duplicate"));
     }
@@ -565,7 +565,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("NTPv4"));
     }
@@ -583,7 +583,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
     }
 
@@ -607,7 +607,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("duplicate"));
     }
@@ -629,7 +629,7 @@ mod tests {
         response.extend_from_slice(&eom.encode());
 
         let req = NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]).encode();
-        let result = proto_client.handshake_with_data(&req, &response);
+        let result = proto_client.handshake_with_data(&req, &response, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("15"));
     }

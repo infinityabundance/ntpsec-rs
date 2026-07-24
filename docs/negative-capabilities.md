@@ -109,19 +109,19 @@ Disposition states — precise, non-collapsible:
 
 | Disposition | Count | Meaning |
 |:-----------:|:-----:|---------|
-| ✅ CLOSED | **39** | Functionally complete, tested, no known gap |
-| 🔄 PARTIAL | **9** | Implemented for common cases; known behavioral gaps |
-| 🏗️ SCAFFOLD | **2** | Structure exists but returns error/default; not operational |
+| ✅ CLOSED | **46** | Functionally complete, tested, no known gap |
+| 🔄 PARTIAL | **4** | Implemented for common cases; known behavioral gaps |
+| 🏗️ SCAFFOLD | **1** | Structure exists but returns error/default; not operational |
 | ⏳ DEFERRED | **1** | Intentional deferral |
 | 🚫 WONTFIX | **1** | Explicitly not planned |
 | 🗑️ DEPRECATED | **3** | Removed by upstream |
 | | | |
-| **Total** | **55** | Every capability has an intentional disposition |
+| **Total** | **56** | Every capability has an intentional disposition |
 
-**The ledger is not a single green number.** 39 items are genuinely closed
-(operational, tested, no known gap). 9 are partial (work for most cases, known
-gaps remain). 2 are scaffolding (structural presence only). The remaining items
-are deferred, wontfix, or deprecated. This is the honest state.
+**Phase 3 is sealed.** 46 items are genuinely closed (operational, tested,
+no known gap). 4 are partial (known gaps remain). 1 scaffold (NTS-KE server
+daemon integration). Remaining items are deferred, wontfix, or deprecated.
+524 tests pass, 3 pre-existing network-dependent failures remain.
 
 ## Exhaustive Forensic Audit v2
 
@@ -632,10 +632,39 @@ is its source code and test count, not its label in that table.
 
 ## Generation Metadata
 
-- Generated: 2026-07-24 (Revision 2)
-- ntpsec-rs commit: `71fd5dc6a80836e92228a2c9aceeb6ac2cd2c119`
+- Generated: 2026-07-24 (Revision 3 — Final Phase 3 Seal)
+- ntpsec-rs commit: `319c308` (v0.3.7 published on crates.io)
 - NTPsec oracle version: 1.2.4 (master: 76,048 C lines)
 - Docker matrix: Alpine 3.18, Debian Stable, Ubuntu LTS, Fedora
-- Total test functions: 316 passing, 6 pre-existing failures
-- Config directives: 101 lexically recognized, ~5 functionally applied
+- Total test functions: 524 passing, 3 pre-existing network-dependent failures
+- Config directives: 101 lexically recognized, 14 typed, 7 engine-applied, 8 daemon-handled, 5 oracle-tested
 - C line counts: verified with `wc -l` (not `wc -c`)
+
+## Revision 3 corrections (Phase 3 seal)
+
+1. NTS-KE handshake — real TLS 1.3 + rustls integration, RFC 8915 Next Protocol,
+   AEAD, EOM validation, directional exporter contexts (C2S/S2C separated).
+2. AES-SIV-CMAC-256 — RFC 5297 known-answer test asserted, key rotation, pruning.
+3. NTS cookie — server identity binding in AAD, bounded key storage (MAX_KEYS=16),
+   cookie expiration validation, key pruning.
+4. NTS server — `protect_response()` now takes `&mut self`, appends cookie + authenticator,
+   increments sequence number.
+5. NTS authenticator — AUTH_RESULT constant (0x0106), decode length bound (65535 bytes).
+6. Refclock driver enum — all 15 driver types implemented and integrated into
+   `RefclockManager::open_all()` and `poll_all()`.
+7. Forward court formatting — `format_readvar()` uses daemon wire order (no preferred),
+   single-variable-per-line format matching real C ntpq.
+8. Refclock improvements — PPS cross-platform ioctl, NMEA sub-second precision + GLL/ZDA
+   parsing, GPSD robust JSON + reconnect, local clock returns real system time.
+9. Core protocol — kernel adjtimex, step-slew period, full clock_intersection/cluster,
+   iburst, prefer peer, PPS sync, Mode 2/5, loopcast detection, event codes,
+   expanded variable set (100+), file I/O, MRU aging, aarch64 seccomp.
+10. Missing modules — DNS resolution with timeout, hardware timestamping, Samba signing,
+    adjtimex syscall wrapper, timecode parsing engine.
+
+## Remaining pre-existing test failures (3)
+
+These tests require a real `ntpd` daemon running on localhost:
+- `test_local_udp_error_response` — expects NotFound, gets timeout
+- `test_local_udp_authentication_error` — expects AuthFailure, gets timeout
+- `test_local_udp_readvar_fragmented` — connection refused

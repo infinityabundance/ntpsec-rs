@@ -671,25 +671,27 @@ impl NtsServerSession {
     /// Add NTS authenticator and cookie to an outgoing response.
     ///
     /// Builds and appends:
-    ///   1. An NTS Cookie extension field with a fresh cookie.
+    ///   1. An NTS Cookie extension field with a fresh cookie (encrypted
+    ///      using the provided `CookieCipher`).
     ///   2. An NTS Authenticator extension field using the S2C key.
     ///
     /// The AEAD covers the NTP header + preceding extension fields as AAD,
     /// using the sequence number (encoded as 8 bytes big-endian) as the nonce.
-    pub fn protect_response(&self, packet: &mut Vec<u8>, aead_alg: u16) -> Result<(), String> {
-        // ── 1. Generate a cookie to include in the response ────────────
-        // Use the internal keys to build a cookie.
-        let _cookie_plaintext = build_cookie_plaintext(aead_alg, &self.c2s_key, &self.s2c_key);
-        // The cookie will need to be encrypted by the caller (or we use a
-        // stored cookie). For now we use the raw cookie plaintext; in
-        // production the CookieCipher would encrypt it with the server's
-        // long-term key. We store the raw plaintext as a placeholder;
-        // the caller must call generate_cookie and append it first.
-        //
-        // Skip actual cookie insertion here — the caller should call
-        // generate_cookie and manually add the ExtensionField to `packet`
-        // before calling protect_response.  This function adds only the
-        // NTS Authenticator.
+    ///
+    /// The sequence number is incremented after each call.
+    pub fn protect_response(
+        &mut self,
+        packet: &mut Vec<u8>,
+        aead_alg: u16,
+        cipher: &CookieCipher,
+    ) -> Result<(), String> {
+        // ── 1. Generate and append a fresh encrypted cookie ───────────
+        let cookie_plaintext = build_cookie_plaintext(aead_alg, &self.c2s_key, &self.s2c_key);
+        let cookie_blob = cipher
+            .encrypt(&cookie_plaintext)
+            .map_err(|e| format!("failed to encrypt cookie in protect_response: {e}"))?;
+        let cookie_ext = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE, cookie_blob);
+        packet.extend_from_slice(&cookie_ext.encode());
 
         // ── 2. Build associated data for the authenticator ─────────────
         // AAD = NTP header + all extension fields already in the packet.
@@ -721,6 +723,9 @@ impl NtsServerSession {
         let auth_ext =
             ExtensionField::new(EXTENSION_FIELD_NTS_AUTHENTICATOR, authenticator.encode());
         packet.extend_from_slice(&auth_ext.encode());
+
+        // ── 5. Increment sequence number ──────────────────────────────
+        self.sequence = self.sequence.wrapping_add(1);
 
         Ok(())
     }
@@ -902,18 +907,21 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Test protect_response appends an authenticator extension.
+    /// Test protect_response appends an authenticator and cookie extension.
     #[test]
     fn test_protect_response_appends_authenticator() {
         let c2s = [0x11u8; 32];
         let s2c = [0x22u8; 32];
-        let session = NtsServerSession::new(c2s, s2c);
+        let mut session = NtsServerSession::new(c2s, s2c);
+
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(CookieKeyIndex(1), [0x33u8; 32]);
 
         let mut packet: Vec<u8> = NtpPacket::zeroed().encode_header().to_vec();
         let initial_len = packet.len();
         let aead_alg: u16 = 15;
 
-        let result = session.protect_response(&mut packet, aead_alg);
+        let result = session.protect_response(&mut packet, aead_alg, &cipher);
         assert!(result.is_ok(), "protect_response failed: {:?}", result);
 
         // Packet should have grown
@@ -924,11 +932,21 @@ mod tests {
         let fields = ExtensionField::decode_all(ext_data);
         assert!(!fields.is_empty(), "should have extension fields");
 
-        // At least one field should be an NTS Authenticator
+        // Should contain both a Cookie and an Authenticator extension
+        let has_cookie = fields
+            .iter()
+            .any(|ef| ef.field_type == EXTENSION_FIELD_NTS_COOKIE);
         let has_auth = fields
             .iter()
             .any(|ef| ef.field_type == EXTENSION_FIELD_NTS_AUTHENTICATOR);
+        assert!(has_cookie, "response should contain NTS Cookie");
         assert!(has_auth, "response should contain NTS Authenticator");
+
+        // Sequence should have incremented
+        assert_eq!(
+            session.sequence, 1,
+            "sequence should increment after protect_response"
+        );
     }
 
     /// Test that protect_response increments the sequence number.
@@ -938,20 +956,20 @@ mod tests {
         let s2c = [0x22u8; 32];
         let mut session = NtsServerSession::new(c2s, s2c);
 
-        let packet: Vec<u8> = NtpPacket::zeroed().encode_header().to_vec();
+        let mut cipher = CookieCipher::new();
+        cipher.add_key(CookieKeyIndex(1), [0x33u8; 32]);
 
-        // Call protect_response with a mutable clone (session is not &mut self,
-        // but sequence is not mutated by protect_response since it uses &self).
-        // The sequence is read, not written by the current implementation.
-        let seq_before = session.sequence;
+        let mut pkt: Vec<u8> = NtpPacket::zeroed().encode_header().to_vec();
 
-        // Actually protect_response doesn't mutate sequence since it takes &self.
-        // We verify the current behavior.
-        let mut pkt = packet.clone();
-        let _ = session.protect_response(&mut pkt, 15);
+        assert_eq!(session.sequence, 0, "sequence starts at 0");
+
+        let _ = session.protect_response(&mut pkt, 15, &cipher);
+        assert_eq!(session.sequence, 1, "sequence incremented after first call");
+
+        let _ = session.protect_response(&mut pkt, 15, &cipher);
         assert_eq!(
-            session.sequence, seq_before,
-            "sequence is not auto-incremented by protect_response (caller manages it)"
+            session.sequence, 2,
+            "sequence incremented after second call"
         );
     }
 

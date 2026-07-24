@@ -1332,7 +1332,10 @@ fn format_var_value(key: &str, val: &str) -> String {
     format!("{}={}", key, v)
 }
 
-/// Render system variables in ntpq-compatible format (wrapped, comma-separated, matching real C ntpq).
+/// Render system variables in ntpq-compatible format (matching real C ntpq).
+///
+/// Real C ntpq outputs variables in the order received from the daemon
+/// (no preferred ordering), one variable per line with trailing comma.
 pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -1341,56 +1344,10 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         sys.status,
         sys.status_description(),
     ));
-    let preferred_order = [
-        "version",
-        "processor",
-        "system",
-        "leap",
-        "stratum",
-        "precision",
-        "rootdelay",
-        "rootdisp",
-        "refid",
-        "reftime",
-        "peer",
-        "tc",
-        "offset",
-        "frequency",
-        "sys_jitter",
-        "rootdist",
-    ];
-    let mut rendered = std::collections::HashSet::new();
-    // Collect all key=val pairs in preferred order, then remaining
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for key in &preferred_order {
-        if let Some(val) = sys.get(key) {
-            pairs.push((key.to_string(), val.to_string()));
-            rendered.insert(key.to_string());
-        }
-    }
+    // Real C ntpq outputs variables in daemon wire order — no preferred ordering.
     for (key, val) in &sys.ordered_vars {
-        if !rendered.contains(key) {
-            pairs.push((key.clone(), val.clone()));
-            rendered.insert(key.clone());
-        }
-    }
-    // Output wrapped at ~60 chars per line, comma-separated, trailing comma
-    let mut line = String::new();
-    for (key, val) in &pairs {
         let kv = format_var_value(key, val);
-        // +1 for comma, +1 for space = +2
-        if line.len() + kv.len() + 2 > 60 && !line.is_empty() {
-            out.push_str(line.trim_end());
-            out.push_str(",\n");
-            line = String::new();
-        }
-        if !line.is_empty() {
-            line.push_str(", ");
-        }
-        line.push_str(&kv);
-    }
-    if !line.is_empty() {
-        out.push_str(line.trim_end());
+        out.push_str(&kv);
         out.push_str(",\n");
     }
     out

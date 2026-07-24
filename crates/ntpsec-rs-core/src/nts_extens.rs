@@ -54,6 +54,9 @@ pub const EXTENSION_FIELD_NTS_AUTHENTICATOR: u16 = 0x0404;
 /// NTS Authentication Result extension field (RFC 8915 §5.4).
 pub const EXTENSION_FIELD_NTS_AUTH_RESULT: u16 = 0x0106;
 
+/// Maximum total size of extension fields (65535 bytes as per NTP packet format).
+pub const MAX_TOTAL_SIZE: usize = 65535;
+
 // ──── NTP Extension Field Header ──────────────────────────────────────
 
 /// NTP extension field header (4 bytes).
@@ -177,12 +180,20 @@ impl ExtensionField {
     /// Parses as many complete extension fields as possible.  Returns
     /// all successfully decoded fields; stops when remaining data is
     /// too short for a valid header.
+    ///
+    /// Total decoded payload is bounded at [`MAX_TOTAL_SIZE`] to
+    /// prevent OOM from crafted packets (RFC 8915 §5).
     pub fn decode_all(data: &[u8]) -> Vec<Self> {
         let mut fields = Vec::new();
         let mut remain = data;
+        let mut total_payload: usize = 0;
         while !remain.is_empty() {
             match Self::decode(remain) {
                 Some((field, rest)) => {
+                    total_payload += field.payload.len();
+                    if total_payload > MAX_TOTAL_SIZE {
+                        break;
+                    }
                     fields.push(field);
                     remain = rest;
                 }
@@ -206,16 +217,15 @@ impl ExtensionField {
 
 // ──── NTS Authentication Result ───────────────────────────────────────
 
-/// NTS authentication result, written by the server into the NTP response
-/// after verifying the NTS cookie (RFC 8915 §5.3).
+/// NTS authentication result (RFC 8915 §5.4, extension type 0x0106).
 ///
-/// The authentication result extension field (type 0x0106, NTS Authenticator)
-/// carries the AEAD output (encrypted S2C keys and a MAC) that proves the
-/// server successfully decrypted and verified the client's cookie.
+/// The NTS Authentication Result extension field carries opaque data
+/// that proves the server successfully decrypted and verified the
+/// client's cookie. In NTPsec, this is typically the server's identity
+/// fingerprint.
 #[derive(Debug, Clone)]
 pub struct NtsAuthResult {
-    /// Server identity bytes — used by the client to verify it's talking
-    /// to the correct NTS-KE server (RFC 8915 §5.3).
+    /// Server identity bytes — cryptographic binding to the NTS-KE server.
     pub server_id: Vec<u8>,
 }
 
@@ -313,7 +323,6 @@ impl NtsAuthenticator {
 /// NTP packet, which has a maximum payload size of 65535 bytes (including
 /// the NTP header).
 pub fn validate_extension_fields_total_size(fields: &[ExtensionField]) -> Result<(), String> {
-    const MAX_TOTAL_SIZE: usize = 65535;
     let mut total: usize = 0;
     for field in fields {
         total += field.wire_size();

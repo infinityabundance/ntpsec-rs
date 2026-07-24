@@ -32,16 +32,19 @@ pub struct FileGenEntry {
     pub enabled: bool,
 }
 
-/// Statistics file generator registry.
+/// Open file handles for active file generation entries.
 #[derive(Debug, Default)]
 pub struct FileGenRegistry {
     entries: Vec<FileGenEntry>,
+    /// Open file handles for active statistics writers.
+    files: Vec<(String, Option<std::fs::File>)>,
 }
 
 impl FileGenRegistry {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -57,9 +60,33 @@ impl FileGenRegistry {
         self.entries.iter_mut().find(|e| e.name == name)
     }
 
+    /// Open a file for a specific entry by name.
+    /// Creates the parent directory if it doesn't exist.
+    pub fn open(&mut self, name: &str, stat_dir: &Path) -> Result<(), String> {
+        if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
+            if entry.enabled {
+                let path = stat_dir.join(&entry.file_name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("cannot create stats dir '{}': {}", parent.display(), e)
+                    })?;
+                }
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| format!("cannot open stats file '{}': {}", path.display(), e))?;
+                // Remove any existing handle for this name
+                self.files.retain(|(n, _)| n != name);
+                self.files.push((name.to_string(), Some(file)));
+            }
+        }
+        Ok(())
+    }
+
     /// Write a loopstats entry: MJD secs offset freq_ppm jitter
     pub fn write_loopstats(
-        &self,
+        &mut self,
         path: &Path,
         sys: &SystemState,
         freq_ppm: f64,
@@ -70,21 +97,25 @@ impl FileGenRegistry {
         let mjd = now.as_secs() / 86400 + 40587; // Modified Julian Date approx
         let secs = now.as_secs() % 86400;
         let content = format!(
-            "{} {} {} {:.6} {:.3} {:.6}",
+            "{} {} {} {:.6} {:.3} {:.6}\n",
             mjd, secs, 0i64, sys.sys_offset, freq_ppm, sys.sys_jitter
         );
-        write_stat_file(path, &content)
+        write_stat_file_ex(
+            path,
+            &content,
+            self.files.iter_mut().find(|(n, _)| n == "loopstats"),
+        )
     }
 
     /// Write a peerstats entry: MJD secs associd offset delay dispersion reach
-    pub fn write_peerstats(&self, path: &Path, peer: &Peer) -> Result<(), String> {
+    pub fn write_peerstats(&mut self, path: &Path, peer: &Peer) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         let mjd = now.as_secs() / 86400 + 40587;
         let secs = now.as_secs() % 86400;
         let content = format!(
-            "{} {} {} {:.6} {:.6} {:.6} {}",
+            "{} {} {} {:.6} {:.6} {:.6} {}\n",
             mjd,
             secs,
             peer.associd,
@@ -93,7 +124,51 @@ impl FileGenRegistry {
             peer.dispersion,
             peer.reach.register()
         );
-        write_stat_file(path, &content)
+        write_stat_file_ex(
+            path,
+            &content,
+            self.files.iter_mut().find(|(n, _)| n == "peerstats"),
+        )
+    }
+
+    /// Write a clockstats entry: MJD secs associd log message
+    pub fn write_clockstats(
+        &mut self,
+        path: &Path,
+        associd: u16,
+        message: &str,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mjd = now.as_secs() / 86400 + 40587;
+        let secs = now.as_secs() % 86400;
+        let content = format!("{} {} {} {}\n", mjd, secs, associd, message);
+        write_stat_file_ex(
+            path,
+            &content,
+            self.files.iter_mut().find(|(n, _)| n == "clockstats"),
+        )
+    }
+
+    /// Flush all open file handles by calling `sync_all()` on each.
+    pub fn flush_all(&mut self) -> Result<(), String> {
+        for (_, file_opt) in self.files.iter_mut() {
+            if let Some(file) = file_opt {
+                file.sync_all()
+                    .map_err(|e| format!("flush_all failed: {}", e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Close all open file handles by taking them (dropping replaces with None)
+    /// and then clearing the list. Each file's Drop impl will flush and close.
+    pub fn close_all(&mut self) {
+        for (_, file_opt) in self.files.iter_mut() {
+            let _ = file_opt.take();
+        }
+        self.files.clear();
     }
 }
 
@@ -133,4 +208,24 @@ pub fn write_stat_file(path: &Path, content: &str) -> Result<(), String> {
     // Rotate if needed
     let _ = rotate_file(path);
     Ok(())
+}
+
+/// Write to a statistics file, using an open file handle if available.
+/// If a file handle is provided, writes to it and checks rotation;
+/// otherwise falls back to the standard open-write-rotate path.
+fn write_stat_file_ex(
+    path: &Path,
+    content: &str,
+    handle: Option<&mut (String, Option<std::fs::File>)>,
+) -> Result<(), String> {
+    if let Some((_, Some(ref mut file))) = handle {
+        use std::io::Write;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("cannot write to stats file '{}': {}", path.display(), e))?;
+        // Check rotation after write
+        let _ = rotate_file(path);
+        Ok(())
+    } else {
+        write_stat_file(path, content)
+    }
 }

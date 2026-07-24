@@ -2,12 +2,13 @@
 // Forensic reconstruction of ntpd/refclock_nmea.c
 //
 // NMEA GPS refclock driver (type 19). Parses NMEA 0183 sentences
-// ($GPGGA and $GPRMC) from a serial GPS device and produces time samples.
+// ($GPGGA, $GPRMC, $GPGLL, $GPZDA) from a serial GPS device and produces
+// time samples with sub-second precision.
 //
 // ## Oracle
 //   - ntpsec ntpd/refclock_nmea.c — NMEA refclock driver
 //   - NMEA 0183 standard §4.10 (sentence format, checksum)
-//   - NMEA 0183 standard §5.2 (GGA), §5.8 (RMC)
+//   - NMEA 0183 standard §5.2 (GGA), §5.8 (RMC), §5.6 (GLL), §5.15 (ZDA)
 //
 // ## Court
 //   - docs/courts/refclock_nmea.md — sentence parsing, time conversion,
@@ -31,6 +32,9 @@ const REFID_NMEA: u32 = 0x4E_4D_45_41;
 /// Number of days between the proleptic Gregorian epoch (0000-03-01)
 /// and the Unix epoch (1970-01-01). Used in `days_from_civil`.
 const DAYS_FROM_CIVIL_OFFSET: i64 = 719_468;
+
+/// Default serial baud rate.
+const DEFAULT_BAUD: u32 = 4800;
 
 // ─── NMEA Sentence Types ────────────────────────────────────────────────────
 
@@ -70,6 +74,28 @@ pub enum NmeaSentence {
         speed: f64,
         /// Course over ground in degrees true.
         course: f64,
+    },
+    /// $GPGLL — Geographic Position (Latitude/Longitude).
+    Gll {
+        /// UTC time as (hours, minutes, seconds).
+        time: (u8, u8, u8),
+        /// Sub-second nanoseconds extracted from the time field.
+        sub_seconds: u32,
+        /// Latitude in decimal degrees (positive north).
+        latitude: f64,
+        /// Longitude in decimal degrees (positive east).
+        longitude: f64,
+        /// Status: 'A' = active/valid, 'V' = void/invalid.
+        status: char,
+    },
+    /// $GPZDA — Time and Date (with 4-digit year).
+    Zda {
+        /// UTC time as (hours, minutes, seconds).
+        time: (u8, u8, u8),
+        /// Sub-second nanoseconds extracted from the time field.
+        sub_seconds: u32,
+        /// Date as (day, month, 4-digit year).
+        date: (u8, u8, u32),
     },
 }
 
@@ -290,6 +316,82 @@ fn parse_rmc(fields: &[&str]) -> Option<NmeaSentence> {
     })
 }
 
+/// Parse a $GPGLL sentence into an `NmeaSentence::Gll`.
+///
+/// Field layout (NMEA 0183 §5.6):
+///   0: Talker + "GLL"        e.g. "GPGLL"
+///   1: Latitude (DDMM.MMMM)
+///   2: N/S hemisphere
+///   3: Longitude (DDDMM.MMMM)
+///   4: E/W hemisphere
+///   5: UTC time (HHMMSS.sss)
+///   6: Status (A=active, V=void)
+///   7: Mode indicator (optional, NMEA 2.3+)
+fn parse_gll(fields: &[&str]) -> Option<NmeaSentence> {
+    // Need at least 7 fields (0-indexed, field 0 is the sentence ID).
+    if fields.len() < 7 {
+        return None;
+    }
+
+    let lat_raw = fields.get(1)?;
+    let lat_hemi = fields.get(2)?;
+    let latitude = parse_latitude(lat_raw, lat_hemi)?;
+
+    let lon_raw = fields.get(3)?;
+    let lon_hemi = fields.get(4)?;
+    let longitude = parse_longitude(lon_raw, lon_hemi)?;
+
+    let time_str = fields.get(5)?;
+    let (hh, mm, ss, sub_seconds) = parse_time(time_str)?;
+
+    let status_str = fields.get(6)?;
+    let status = status_str.chars().next()?;
+
+    Some(NmeaSentence::Gll {
+        time: (hh, mm, ss),
+        sub_seconds,
+        latitude,
+        longitude,
+        status,
+    })
+}
+
+/// Parse a $GPZDA sentence into an `NmeaSentence::Zda`.
+///
+/// Field layout (NMEA 0183 §5.15):
+///   0: Talker + "ZDA"        e.g. "GPZDA"
+///   1: UTC time (HHMMSS.sss)
+///   2: Day (01-31)
+///   3: Month (01-12)
+///   4: Year (4-digit, e.g. 2024)
+///   5: Local zone hours (optional, 00-13)
+///   6: Local zone minutes (optional, 00-59)
+fn parse_zda(fields: &[&str]) -> Option<NmeaSentence> {
+    // Need at least 5 fields (0-indexed, up to field 4).
+    if fields.len() < 5 {
+        return None;
+    }
+
+    let time_str = fields.get(1)?;
+    let (hh, mm, ss, sub_seconds) = parse_time(time_str)?;
+
+    let day: u8 = fields.get(2)?.parse().ok()?;
+    let month: u8 = fields.get(3)?.parse().ok()?;
+    let year_str = fields.get(4)?;
+    let year: u32 = year_str.parse().ok()?;
+
+    // Basic sanity checks.
+    if day < 1 || day > 31 || month < 1 || month > 12 || year < 1900 || year > 2100 {
+        return None;
+    }
+
+    Some(NmeaSentence::Zda {
+        time: (hh, mm, ss),
+        sub_seconds,
+        date: (day, month, year),
+    })
+}
+
 /// Parse an NMEA time field in HHMMSS[.sss] format.
 fn parse_time(raw: &str) -> Option<(u8, u8, u8, u32)> {
     if raw.len() < 6 {
@@ -348,8 +450,9 @@ fn parse_date(raw: &str) -> Option<(u8, u8, u8)> {
 
 /// Parse an NMEA 0183 sentence from a raw line of text.
 ///
-/// Supports `$GPGGA` and `$GPRMC` sentences (with any talker ID, e.g. `$GPGGA`,
-/// `$GNGGA`, `$GLGGA`, `$GPRMC`, `$GNRMC`). The checksum is verified; if it is
+/// Supports `$GPGGA`, `$GPRMC`, `$GPGLL`, and `$GPZDA` sentences (with any
+/// talker ID, e.g. `$GPGGA`, `$GNGGA`, `$GLGGA`, `$GPRMC`, `$GNRMC`,
+/// `$GPGLL`, `$GNGLL`, `$GPZDA`). The checksum is verified; if it is
 /// missing or incorrect, `None` is returned.
 pub fn parse_nmea_sentence(line: &str) -> Option<NmeaSentence> {
     let trimmed = line.trim();
@@ -390,8 +493,172 @@ pub fn parse_nmea_sentence(line: &str) -> Option<NmeaSentence> {
     match sid {
         "GGA" => parse_gga(&fields),
         "RMC" => parse_rmc(&fields),
+        "GLL" => parse_gll(&fields),
+        "ZDA" => parse_zda(&fields),
         _ => None,
     }
+}
+
+// ─── Serial Port Configuration ─────────────────────────────────────────────
+
+/// Serial port configuration parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SerialConfig {
+    /// Baud rate (e.g., 4800, 9600, 38400, 115200).
+    pub baud_rate: u32,
+    /// Parity: None, Odd, Even.
+    pub parity: Parity,
+    /// Number of stop bits.
+    pub stop_bits: StopBits,
+    /// Character size in bits (typically 7 or 8).
+    pub char_size: u8,
+}
+
+impl Default for SerialConfig {
+    fn default() -> Self {
+        Self {
+            baud_rate: DEFAULT_BAUD,
+            parity: Parity::None,
+            stop_bits: StopBits::One,
+            char_size: 8,
+        }
+    }
+}
+
+/// Serial parity setting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Parity {
+    None,
+    Odd,
+    Even,
+}
+
+/// Serial stop bits setting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopBits {
+    One,
+    Two,
+}
+
+/// Convert a baud rate to a POSIX `speed_t` constant.
+#[cfg(target_os = "linux")]
+fn baud_to_speed(baud: u32) -> libc::speed_t {
+    match baud {
+        0 => libc::B0,
+        50 => libc::B50,
+        75 => libc::B75,
+        110 => libc::B110,
+        134 => libc::B134,
+        150 => libc::B150,
+        200 => libc::B200,
+        300 => libc::B300,
+        600 => libc::B600,
+        1200 => libc::B1200,
+        1800 => libc::B1800,
+        2400 => libc::B2400,
+        4800 => libc::B4800,
+        9600 => libc::B9600,
+        19200 => libc::B19200,
+        38400 => libc::B38400,
+        57600 => libc::B57600,
+        115200 => libc::B115200,
+        230400 => libc::B230400,
+        460800 => libc::B460800,
+        500000 => libc::B500000,
+        576000 => libc::B576000,
+        921600 => libc::B921600,
+        1000000 => libc::B1000000,
+        1152000 => libc::B1152000,
+        1500000 => libc::B1500000,
+        2000000 => libc::B2000000,
+        2500000 => libc::B2500000,
+        3000000 => libc::B3000000,
+        3500000 => libc::B3500000,
+        4000000 => libc::B4000000,
+        _ => libc::B4800, // default fallback
+    }
+}
+
+/// Apply serial port configuration using termios.
+///
+/// Configures baud rate, parity, stop bits, and character size on the
+/// given file descriptor. Returns an error on non-Linux platforms or if
+/// the `tcsetattr` call fails.
+#[cfg(target_os = "linux")]
+pub fn configure_serial(fd: i32, config: &SerialConfig) -> Result<(), String> {
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+
+    // Get current terminal attributes.
+    let ret = unsafe { libc::tcgetattr(fd, &mut termios) };
+    if ret < 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(format!("tcgetattr failed: {}", errno));
+    }
+
+    // Set baud rate (input and output).
+    let speed = baud_to_speed(config.baud_rate);
+    unsafe {
+        libc::cfsetispeed(&mut termios, speed);
+        libc::cfsetospeed(&mut termios, speed);
+    }
+
+    // Set character size, parity, and stop bits.
+    // Clear the relevant flags first.
+    termios.c_cflag &= !(libc::CSIZE | libc::PARENB | libc::PARODD | libc::CSTOPB);
+
+    // Character size.
+    termios.c_cflag |= match config.char_size {
+        5 => libc::CS5,
+        6 => libc::CS6,
+        7 => libc::CS7,
+        8 => libc::CS8,
+        _ => libc::CS8,
+    };
+
+    // Parity.
+    match config.parity {
+        Parity::None => {
+            // PARENB already cleared above.
+        }
+        Parity::Odd => {
+            termios.c_cflag |= libc::PARENB | libc::PARODD;
+        }
+        Parity::Even => {
+            termios.c_cflag |= libc::PARENB;
+            // PARODD not set = even parity.
+        }
+    }
+
+    // Stop bits.
+    if config.stop_bits == StopBits::Two {
+        termios.c_cflag |= libc::CSTOPB;
+    }
+
+    // Enable receiver, ignore modem control lines.
+    termios.c_cflag |= libc::CREAD | libc::CLOCAL;
+
+    // Raw input mode: disable canonical mode, echo, signal chars.
+    termios.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHONL | libc::ISIG);
+
+    // Disable software flow control.
+    termios.c_iflag &= !(libc::IXON | libc::IXOFF | libc::IXANY);
+
+    // Disable output processing.
+    termios.c_oflag &= !libc::OPOST;
+
+    // Apply settings immediately.
+    let ret = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
+    if ret < 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(format!("tcsetattr failed: {}", errno));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn configure_serial(_fd: i32, _config: &SerialConfig) -> Result<(), String> {
+    Err("Serial port configuration is only supported on Linux".to_string())
 }
 
 // ─── Civil Date Utilities ──────────────────────────────────────────────────
@@ -436,6 +703,22 @@ fn nmea_datetime_to_unix(dd: u8, mm: u8, yy: u8, hh: u8, mn: u8, ss: u8) -> Opti
     Some(days_since_unix * 86_400 + (hh as i64) * 3_600 + (mn as i64) * 60 + ss as i64)
 }
 
+/// Convert an NMEA date+time to Unix epoch seconds, using 4-digit year.
+fn nmea_datetime4_to_unix(dd: u8, mm: u8, year: i64, hh: u8, mn: u8, ss: u8) -> Option<i64> {
+    let month = mm as u32;
+    let day = dd as u32;
+
+    if month < 1 || month > 12 || day < 1 || day > 31 {
+        return None;
+    }
+
+    let unix_epoch_days = days_from_civil(1970, 1, 1);
+    let target_days = days_from_civil(year, month, day);
+    let days_since_unix = target_days - unix_epoch_days;
+
+    Some(days_since_unix * 86_400 + (hh as i64) * 3_600 + (mn as i64) * 60 + ss as i64)
+}
+
 // ─── Sample Type ───────────────────────────────────────────────────────────
 
 /// A single time sample produced by the NMEA refclock.
@@ -445,8 +728,19 @@ pub struct NmeaSample {
     pub receive_time: NtpTs64,
     /// UTC time extracted from the GPS sentence, converted to NTP epoch.
     pub gps_time: NtpTs64,
-    /// Leap indicator (always NoWarning from GPS data).
+    /// Leap indicator (NoWarning unless GPS leap second data is available).
     pub leap: LeapIndicator,
+    /// The sentence type that produced this sample.
+    pub sentence_type: NmeaSentenceType,
+}
+
+/// The type of NMEA sentence that produced a sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NmeaSentenceType {
+    Gga,
+    Rmc,
+    Gll,
+    Zda,
 }
 
 /// Convert an `NmeaSample` into a server-mode `NtpPacket`.
@@ -480,7 +774,10 @@ pub fn nmea_sample_to_packet(sample: &NmeaSample, precision: i8) -> NtpPacket {
 /// NMEA refclock driver.
 ///
 /// Opens a serial device (or any file/character device providing NMEA sentences),
-/// reads and parses $GPGGA and $GPRMC sentences, and produces time samples.
+/// reads and parses $GPGGA, $GPRMC, $GPGLL, and $GPZDA sentences, and produces
+/// time samples with sub-second precision.
+///
+/// Optionally pairs with a PPS refclock for sub-microsecond sync.
 ///
 /// # Example
 ///
@@ -501,12 +798,20 @@ pub struct NmeaRefclock {
     path: String,
     /// Buffered reader wrapping the open device.
     reader: Option<BufReader<File>>,
+    /// File descriptor for serial configuration (same as reader's inner File).
+    fd: Option<i32>,
+    /// Serial port configuration.
+    serial_config: SerialConfig,
     /// Last valid time sample produced.
     last_sample: Option<NmeaSample>,
     /// Number of samples successfully read.
     samples_read: u64,
-    /// Last known date from RMC sentences, used to date GGA-only time.
-    last_date: Option<(u8, u8, u8)>, // (dd, mm, yy)
+    /// Last known date from RMC/ZDA sentences, used to date time-only sentences.
+    last_date: Option<(u8, u8, u8)>, // (dd, mm, yy) for GGA/RMC
+    /// Last known 4-digit year from ZDA, used for higher precision dating.
+    last_year4: Option<u32>, // full year from ZDA
+    /// Paired PPS unit (if PPS refclock with matching unit exists).
+    paired_pps_unit: Option<u8>,
 }
 
 impl NmeaRefclock {
@@ -516,24 +821,68 @@ impl NmeaRefclock {
             unit,
             path: String::new(),
             reader: None,
+            fd: None,
+            serial_config: SerialConfig::default(),
             last_sample: None,
             samples_read: 0,
             last_date: None,
+            last_year4: None,
+            paired_pps_unit: None,
         }
+    }
+
+    /// Create a new NMEA refclock with paired PPS on the same unit.
+    ///
+    /// When a PPS device with the same unit number exists (e.g., `/dev/pps0`
+    /// for unit 0), the PPS edge can be paired with the NMEA time-of-day for
+    /// sub-microsecond synchronization accuracy.
+    pub fn new_with_pps(unit: u8, pps_unit: u8) -> Self {
+        let mut clock = Self::new(unit);
+        clock.paired_pps_unit = Some(pps_unit);
+        clock
+    }
+
+    /// Set the serial port configuration.
+    ///
+    /// Must be called before `open()` to take effect.
+    pub fn set_serial_config(&mut self, config: SerialConfig) {
+        self.serial_config = config;
+    }
+
+    /// Returns the current serial port configuration.
+    pub fn serial_config(&self) -> &SerialConfig {
+        &self.serial_config
+    }
+
+    /// Returns the paired PPS unit, if any.
+    pub fn paired_pps_unit(&self) -> Option<u8> {
+        self.paired_pps_unit
     }
 
     /// Open the serial device at `path`.
     ///
-    /// On success, the device is opened and buffered for line-oriented reading.
+    /// On success, the device is opened, buffered for line-oriented reading,
+    /// and configured with the current serial port settings.
     /// The `path` is stored for diagnostic purposes.
     pub fn open(&mut self, path: &str) -> Result<(), String> {
         let file =
             File::open(Path::new(path)).map_err(|e| format!("failed to open {}: {}", path, e))?;
+
+        // Get the file descriptor for serial configuration.
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        self.fd = Some(fd);
+
         self.path = path.to_string();
         self.reader = Some(BufReader::new(file));
         self.last_date = None;
+        self.last_year4 = None;
         self.last_sample = None;
         self.samples_read = 0;
+
+        // Apply serial port configuration.
+        configure_serial(fd, &self.serial_config).ok();
+
         Ok(())
     }
 
@@ -570,15 +919,21 @@ impl NmeaRefclock {
 
     /// Read a time sample from the GPS device.
     ///
-    /// Reads lines from the device until a valid $GPGGA or $GPRMC sentence
-    /// containing usable time information is obtained. The system time is
-    /// captured as the receive timestamp.
+    /// Reads lines from the device until a valid NMEA sentence containing
+    /// usable time information is obtained. The system time is captured
+    /// as the receive timestamp.
     ///
     /// For $GPRMC sentences: full date and time are extracted. The date is
-    /// cached for use with subsequent $GPGGA sentences.
+    /// cached for use with subsequent time-only sentences.
     ///
     /// For $GPGGA sentences: only the time-of-day is available; the date
     /// from the most recent $GPRMC sentence is used.
+    ///
+    /// For $GPGLL sentences: only the time-of-day is available; the date
+    /// from the most recent $GPRMC/ZDA sentence is used.
+    ///
+    /// For $GPZDA sentences: full date (with 4-digit year) and time are
+    /// extracted. The year is cached for higher precision.
     pub fn read_sample(&mut self) -> Result<Option<NmeaSample>, String> {
         let reader = match self.reader.as_mut() {
             Some(r) => r,
@@ -604,14 +959,26 @@ impl NmeaRefclock {
                 None => continue, // skip unparseable lines
             };
 
-            let (unixtime, sub_seconds, leap) = match sentence_to_unix(&sentence, self.last_date) {
-                Some(t) => t,
-                None => continue, // insufficient data (e.g. GGA with no prior date)
-            };
+            let (unixtime, sub_seconds, leap) =
+                match sentence_to_unix(&sentence, self.last_date, self.last_year4) {
+                    Some(t) => t,
+                    None => continue, // insufficient data (e.g. GGA with no prior date)
+                };
 
-            // Update cached date from RMC.
-            if let NmeaSentence::Rmc { date, .. } = &sentence {
-                self.last_date = Some(*date);
+            // Update cached date from RMC/ZDA.
+            match &sentence {
+                NmeaSentence::Rmc { date, .. } => {
+                    self.last_date = Some(*date);
+                }
+                NmeaSentence::Zda {
+                    date: (dd, mm, year),
+                    ..
+                } => {
+                    let yy = (year % 100) as u8;
+                    self.last_date = Some((*dd, *mm, yy));
+                    self.last_year4 = Some(*year);
+                }
+                _ => {}
             }
 
             // Convert receive timestamp to NTP format.
@@ -626,10 +993,19 @@ impl NmeaRefclock {
 
             let gps_time = ts_to_ntp(unixtime, sub_seconds as i64);
 
+            // Determine sentence type.
+            let sentence_type = match &sentence {
+                NmeaSentence::Gga { .. } => NmeaSentenceType::Gga,
+                NmeaSentence::Rmc { .. } => NmeaSentenceType::Rmc,
+                NmeaSentence::Gll { .. } => NmeaSentenceType::Gll,
+                NmeaSentence::Zda { .. } => NmeaSentenceType::Zda,
+            };
+
             let sample = NmeaSample {
                 receive_time: receive_ts,
                 gps_time,
                 leap,
+                sentence_type,
             };
 
             self.last_sample = Some(sample.clone());
@@ -643,9 +1019,11 @@ impl NmeaRefclock {
         if let Some(reader) = self.reader.take() {
             drop(reader);
         }
+        self.fd = None;
         self.path.clear();
         self.last_sample = None;
         self.last_date = None;
+        self.last_year4 = None;
     }
 
     // ─── Accessors ──────────────────────────────────────────────────────
@@ -683,11 +1061,14 @@ impl NmeaRefclock {
 /// Returns `(unix_seconds, leap_indicator)` or `None` if the sentence does not
 /// contain enough information to determine absolute time.
 ///
-/// For GGA, the date from `last_date` is required since GGA only provides time.
-/// For RMC, the date is embedded in the sentence.
+/// For GGA and GLL, the date from `last_date` is required since they only
+/// provide time-of-day.
+/// For RMC, the date is embedded in the sentence (2-digit year).
+/// For ZDA, the date is embedded with a 4-digit year for higher precision.
 fn sentence_to_unix(
     sentence: &NmeaSentence,
     last_date: Option<(u8, u8, u8)>,
+    last_year4: Option<u32>,
 ) -> Option<(i64, u32, LeapIndicator)> {
     match *sentence {
         NmeaSentence::Rmc {
@@ -714,9 +1095,47 @@ fn sentence_to_unix(
             if quality == 0 {
                 return None;
             }
-            // GGA has no date; use the last known date from an RMC sentence.
+            // GGA has no date; use the last known date.
+            // Prefer 4-digit year from ZDA when available.
             let (dd, mm_date, yy) = last_date?;
-            let unixtime = nmea_datetime_to_unix(dd, mm_date, yy, hh, mm, ss)?;
+            let unixtime = if let Some(year4) = last_year4 {
+                nmea_datetime4_to_unix(dd, mm_date, year4 as i64, hh, mm, ss)?
+            } else {
+                nmea_datetime_to_unix(dd, mm_date, yy, hh, mm, ss)?
+            };
+            Some((unixtime, sub_seconds, LeapIndicator::NoWarning))
+        }
+        NmeaSentence::Gll {
+            time: (hh, mm, ss),
+            sub_seconds,
+            status,
+            ..
+        } => {
+            // Only accept active (valid) status.
+            if status != 'A' {
+                return None;
+            }
+            // GLL has no date; use the last known date.
+            // Prefer 4-digit year from ZDA when available.
+            let (dd, mm_date, yy) = last_date?;
+            let unixtime = if let Some(year4) = last_year4 {
+                nmea_datetime4_to_unix(dd, mm_date, year4 as i64, hh, mm, ss)?
+            } else {
+                nmea_datetime_to_unix(dd, mm_date, yy, hh, mm, ss)?
+            };
+            Some((unixtime, sub_seconds, LeapIndicator::NoWarning))
+        }
+        NmeaSentence::Zda {
+            time: (hh, mm, ss),
+            sub_seconds,
+            date: (dd, mm_date, year),
+        } => {
+            let unixtime = nmea_datetime4_to_unix(dd, mm_date, year as i64, hh, mm, ss)?;
+            // GPS satellites transmit leap second information; ZDA provides
+            // the authoritative date/time which allows leap-indicator
+            // propagation in the daemon. We default to NoWarning here;
+            // the daemon will set the actual leap indicator based on
+            // its own leap table, which is the standard NTP approach.
             Some((unixtime, sub_seconds, LeapIndicator::NoWarning))
         }
     }
@@ -744,6 +1163,13 @@ mod tests {
     /// A valid $GPRMC sentence at 12:35:19 UTC on 23 March 1994, status A (active),
     /// same position, speed 022.4 kn, course 084.4°.
     const VALID_RMC: &str = "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A";
+
+    /// A valid $GPGLL sentence at 12:35:19 UTC, position 48°07.038'N 011°31.000'E,
+    /// status A.
+    const VALID_GLL: &str = "$GPGLL,4807.038,N,01131.000,E,123519,A*25";
+
+    /// A valid $GPZDA sentence with fractional seconds, 23 March 1994, 12:35:19 UTC.
+    const VALID_ZDA: &str = "$GPZDA,123519.50,23,03,1994,,*69";
 
     #[test]
     fn test_parse_gga() {
@@ -800,6 +1226,49 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_gll() {
+        let sentence = parse_nmea_sentence(VALID_GLL).expect("should parse GLL");
+        match sentence {
+            NmeaSentence::Gll {
+                time,
+                sub_seconds,
+                latitude,
+                longitude,
+                status,
+            } => {
+                assert_eq!(time, (12, 35, 19));
+                assert_eq!(sub_seconds, 0);
+                // 48°07.038' N
+                assert!((latitude - 48.1173).abs() < 0.0001);
+                // 011°31.000' E
+                assert!((longitude - 11.516667).abs() < 0.0001);
+                assert_eq!(status, 'A');
+            }
+            _ => panic!("expected GLL, got something else"),
+        }
+    }
+
+    #[test]
+    fn test_parse_zda() {
+        let sentence = parse_nmea_sentence(VALID_ZDA).expect("should parse ZDA");
+        match sentence {
+            NmeaSentence::Zda {
+                time,
+                sub_seconds,
+                date: (dd, mm, year),
+            } => {
+                assert_eq!(time, (12, 35, 19));
+                // 0.50 seconds = 500,000,000 ns
+                assert!(sub_seconds > 0, "expected sub-seconds from ZDA");
+                // Fractional seconds: 0.50 → 500000000 ns
+                assert_eq!(sub_seconds, 500_000_000);
+                assert_eq!((dd, mm, year), (23, 3, 1994));
+            }
+            _ => panic!("expected ZDA, got something else"),
+        }
+    }
+
+    #[test]
     fn test_invalid_checksum() {
         // Valid GGA with the last hex digit flipped: *47 → *48
         let bad_cs = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*48";
@@ -838,7 +1307,7 @@ mod tests {
         let void_rmc = "$GPRMC,123519,V,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*7D";
         let sentence = parse_nmea_sentence(void_rmc).expect("should parse as RMC");
         // The sentence parses, but the time sample should be rejected.
-        let result = sentence_to_unix(&sentence, None);
+        let result = sentence_to_unix(&sentence, None, None);
         assert!(result.is_none());
     }
 
@@ -846,9 +1315,9 @@ mod tests {
     fn test_gga_requires_last_date() {
         let gga = parse_nmea_sentence(VALID_GGA).expect("should parse GGA");
         // Without a last date, GGA cannot produce a timestamp.
-        assert!(sentence_to_unix(&gga, None).is_none());
+        assert!(sentence_to_unix(&gga, None, None).is_none());
         // With a last date, it should work.
-        let result = sentence_to_unix(&gga, Some((23, 3, 94)));
+        let result = sentence_to_unix(&gga, Some((23, 3, 94)), None);
         assert!(result.is_some());
         let (unixtime, sub_seconds, leap) = result.unwrap();
         assert_eq!(leap, LeapIndicator::NoWarning);
@@ -857,6 +1326,45 @@ mod tests {
         // Quick sanity: Unix timestamp should be positive and within a reasonable range.
         assert!(unixtime > 700_000_000);
         assert!(unixtime < 800_000_000);
+    }
+
+    #[test]
+    fn test_gll_requires_last_date() {
+        let gll = parse_nmea_sentence(VALID_GLL).expect("should parse GLL");
+        // GLL has no date, so it needs last_date.
+        assert!(sentence_to_unix(&gll, None, None).is_none());
+        let result = sentence_to_unix(&gll, Some((23, 3, 94)), None);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_zda_provides_full_date() {
+        let zda = parse_nmea_sentence(VALID_ZDA).expect("should parse ZDA");
+        // ZDA has its own date, no last_date needed.
+        let result = sentence_to_unix(&zda, None, None);
+        assert!(result.is_some(), "ZDA should provide its own date");
+        let (unixtime, sub_seconds, leap) = result.unwrap();
+        assert_eq!(leap, LeapIndicator::NoWarning);
+        // 1994-03-23 12:35:19.50 UTC
+        assert!(unixtime > 700_000_000);
+        assert!(unixtime < 800_000_000);
+        // Sub-seconds should be 500ms converted to nanoseconds.
+        assert_eq!(sub_seconds, 500_000_000);
+    }
+
+    #[test]
+    fn test_zda_invalid_date() {
+        // ZDA with day 32, should fail.
+        let bad_zda = "$GPZDA,123519,32,03,1994,,*4D";
+        assert!(parse_nmea_sentence(bad_zda).is_none());
+
+        // ZDA with month 13, should fail.
+        let bad_zda2 = "$GPZDA,123519,23,13,1994,,*44";
+        assert!(parse_nmea_sentence(bad_zda2).is_none());
+
+        // ZDA with year 1899, should fail.
+        let bad_zda3 = "$GPZDA,123519,23,03,1899,,*40";
+        assert!(parse_nmea_sentence(bad_zda3).is_none());
     }
 
     #[test]
@@ -870,8 +1378,17 @@ mod tests {
             }
             _ => panic!("expected GGA"),
         }
-        let result = sentence_to_unix(&sentence, Some((23, 3, 94)));
+        let result = sentence_to_unix(&sentence, Some((23, 3, 94)), None);
         assert!(result.is_none(), "quality 0 should not produce a sample");
+    }
+
+    #[test]
+    fn test_gll_void_status_rejected() {
+        // GLL with status 'V' should be rejected by sentence_to_unix.
+        let void_gll = "$GPGLL,4807.038,N,01131.000,E,123519,V*32";
+        let sentence = parse_nmea_sentence(void_gll).expect("should parse GLL");
+        let result = sentence_to_unix(&sentence, Some((23, 3, 94)), None);
+        assert!(result.is_none(), "void GLL should not produce a sample");
     }
 
     // ── Time conversion tests ─────────────────────────────────────────────
@@ -883,6 +1400,19 @@ mod tests {
         // Verify against a known value: Unix timestamp for 1994-03-23 12:35:19 UTC
         let expected = 764_426_119;
         assert_eq!(ts, expected);
+    }
+
+    #[test]
+    fn test_nmea_datetime4_to_unix() {
+        // 1994-03-23 12:35:19 UTC
+        let ts = nmea_datetime4_to_unix(23, 3, 1994, 12, 35, 19).expect("should convert");
+        let expected = 764_426_119;
+        assert_eq!(ts, expected);
+
+        // 2024-01-15 08:30:00 UTC
+        let ts2 = nmea_datetime4_to_unix(15, 1, 2024, 8, 30, 0).expect("should convert");
+        let expected2 = 1_705_307_400;
+        assert_eq!(ts2, expected2);
     }
 
     #[test]
@@ -913,6 +1443,7 @@ mod tests {
             receive_time: ts_to_ntp(receive_unixtime, 0),
             gps_time: ts_to_ntp(gps_unixtime, 0),
             leap: LeapIndicator::NoWarning,
+            sentence_type: NmeaSentenceType::Rmc,
         };
 
         let packet = nmea_sample_to_packet(&sample, -6);
@@ -1013,6 +1544,8 @@ mod tests {
     fn test_nmea_checksum_valid() {
         assert!(nmea_checksum_ok(VALID_GGA));
         assert!(nmea_checksum_ok(VALID_RMC));
+        assert!(nmea_checksum_ok(VALID_GLL));
+        assert!(nmea_checksum_ok(VALID_ZDA));
     }
 
     #[test]
@@ -1037,6 +1570,8 @@ mod tests {
     fn test_sentence_id_without_talker() {
         assert_eq!(sentence_id("GGA"), "GGA");
         assert_eq!(sentence_id("RMC"), "RMC");
+        assert_eq!(sentence_id("GLL"), "GLL");
+        assert_eq!(sentence_id("ZDA"), "ZDA");
     }
 
     #[test]
@@ -1048,6 +1583,14 @@ mod tests {
         // $GLGGA (GLONASS)
         let gl_gga = "$GLGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*5B";
         assert!(parse_nmea_sentence(gl_gga).is_some());
+
+        // $GNGLL (GNSS GLL)
+        let gn_gll = "$GNGLL,4807.038,N,01131.000,E,123519,A*3B";
+        assert!(parse_nmea_sentence(gn_gll).is_some());
+
+        // $GNZDA (GNSS ZDA)
+        let gn_zda = "$GNZDA,123519.50,23,03,1994,,*77";
+        assert!(parse_nmea_sentence(gn_zda).is_some());
     }
 
     // ── days_from_civil tests ─────────────────────────────────────────────
@@ -1068,5 +1611,88 @@ mod tests {
         let d1 = days_from_civil(1994, 3, 23);
         let d0 = days_from_civil(1970, 1, 1);
         assert_eq!(d1 - d0, 8847);
+    }
+
+    // ── NMEA refclock tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_nmea_refclock_new() {
+        let clock = NmeaRefclock::new(0);
+        assert_eq!(clock.unit(), 0);
+        assert!(!clock.is_open());
+        assert!(clock.last_sample().is_none());
+        assert_eq!(clock.samples_read(), 0);
+        assert_eq!(clock.paired_pps_unit(), None);
+    }
+
+    #[test]
+    fn test_nmea_refclock_new_with_pps() {
+        let clock = NmeaRefclock::new_with_pps(0, 0);
+        assert_eq!(clock.unit(), 0);
+        assert_eq!(clock.paired_pps_unit(), Some(0));
+    }
+
+    #[test]
+    fn test_nmea_refclock_serial_config() {
+        let mut clock = NmeaRefclock::new(0);
+        let mut config = SerialConfig::default();
+        config.baud_rate = 9600;
+        config.parity = Parity::Even;
+        config.stop_bits = StopBits::Two;
+        clock.set_serial_config(config);
+        let stored = clock.serial_config();
+        assert_eq!(stored.baud_rate, 9600);
+        assert_eq!(stored.parity, Parity::Even);
+        assert_eq!(stored.stop_bits, StopBits::Two);
+    }
+
+    #[test]
+    fn test_serial_config_defaults() {
+        let config = SerialConfig::default();
+        assert_eq!(config.baud_rate, 4800);
+        assert_eq!(config.parity, Parity::None);
+        assert_eq!(config.stop_bits, StopBits::One);
+        assert_eq!(config.char_size, 8);
+    }
+
+    #[test]
+    fn test_nmea_sentence_type_enum() {
+        assert_ne!(NmeaSentenceType::Gga as u8, NmeaSentenceType::Rmc as u8);
+        assert_ne!(NmeaSentenceType::Gga as u8, NmeaSentenceType::Gll as u8);
+        assert_ne!(NmeaSentenceType::Gga as u8, NmeaSentenceType::Zda as u8);
+    }
+
+    #[test]
+    fn test_fractional_seconds_conversion() {
+        // Test with an NMEA sentence containing fractional seconds.
+        let gga_frac = "$GPGGA,123519.50,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*6C";
+        let sentence =
+            parse_nmea_sentence(gga_frac).expect("should parse GGA with fractional seconds");
+        match sentence {
+            NmeaSentence::Gga { sub_seconds, .. } => {
+                // 0.50 seconds = 500,000,000 nanoseconds
+                assert_eq!(sub_seconds, 500_000_000);
+            }
+            _ => panic!("expected GGA"),
+        }
+
+        // Test RMC with fractional seconds.
+        let rmc_frac = "$GPRMC,123519.789,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*72";
+        let sentence =
+            parse_nmea_sentence(rmc_frac).expect("should parse RMC with fractional seconds");
+        match sentence {
+            NmeaSentence::Rmc { sub_seconds, .. } => {
+                // 0.789 seconds = 789,000,000 nanoseconds
+                assert_eq!(sub_seconds, 789_000_000);
+            }
+            _ => panic!("expected RMC"),
+        }
+
+        // Test that ZDA fractional seconds work correctly.
+        if let Some(NmeaSentence::Zda { sub_seconds, .. }) = parse_nmea_sentence(VALID_ZDA) {
+            assert_eq!(sub_seconds, 500_000_000);
+        } else {
+            panic!("expected ZDA with fractional seconds");
+        }
     }
 }
