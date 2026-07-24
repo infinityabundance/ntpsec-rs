@@ -122,8 +122,9 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     63,                               // uname
     72,                               // fcntl
     78,                               // getdents64
-    79,                               // getcwd
+    79,                               // getdents64
     82,                               // rename (atomic drift write)
+    83,                               // mkdir (stats directory creation)
     96,                               // gettimeofday
     97,                               // getrlimit
     98,                               // getrusage
@@ -133,7 +134,9 @@ const ALLOWED_SYSCALLS: &[u64] = &[
     108,                              // getegid
     110,                              // getppid
     115,                              // getgroups
+    117,                              // setresuid
     118,                              // getresuid
+    119,                              // setresgid
     120,                              // getresgid
     123,                              // gettid
     131,                              // sigaltstack
