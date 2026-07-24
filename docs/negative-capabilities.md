@@ -14,6 +14,14 @@ implement** that upstream ntpsec does — along with the rationale.
 5. Three-tier effort estimate: production blockers, mainline parity, historical breadth
 6. Removed double-counting in remaining-effort table
 
+**Revision 2.1 corrections:**
+1. Stub classification: 6 MISSING / 6 SUBSTITUTED / 1 WONTFIX (was 6/5/1 with parse double-counted)
+2. Missing stub debt: 7,460 lines (was ~8,634 — included substituted files)
+3. Tier 2 LOC column: uses actual line counts, not byte sizes (4,044 not 106K; 3,496 not 72K; 2,929 not 84K)
+4. Config counting: 5-layer methodology defined (lexical=101, typed=14, engine=7, daemon=8, oracle=5)
+5. Effort aggregation: formulas documented; uncorrelated=19-35mo, sequential=25-56mo, parallel=8-16mo
+6. Archaeology atlas: 155K → 5,729 lines / ~155KB
+
 ## Classification categories
 
 - **🔲 LAB-ONLY**: Implemented in the core but gated behind a feature flag;
@@ -110,12 +118,19 @@ These files are empty shells. The table below shows **actual C line counts** (no
 | `ntp_lists.rs` | `include/ntp_lists.h` | ~100 | 4 (empty) | 🏗️ SUBSTITUTED | Rust Vec replaces |
 
 **Type breakdown:**
-- ⚠️ MISSING (actual capability gap): 6 files (~8,634 lines C)
-- 🏗️ SUBSTITUTED (architecturally replaced): 5 files (~598 lines C)
-- 🚫 WONTFIX: 1 file (0 lines)
-- Stub dependency (parse.rs): 735 lines
+- ⚠️ MISSING (actual capability gap): **6 files / 7,460 upstream lines**
+  - `refclock_generic.c`: 5,729
+  - `parse.c`: 737
+  - `ntp_dns.c`: 207
+  - `ntp_packetstamp.c`: 401
+  - `ntp_signd.c`: 351
+  - `ntp_syscall.h`: 35
+- 🏗️ SUBSTITUTED (architecturally replaced, report separately): **6 files / ~1,667 lines**
+  - `binio.c`, `ieee754io.c`, `gpstolfp.c`, `ntp_scanner.c`, `refclock_pps_api.h`, `ntp_lists.h`
+- 🚫 WONTFIX: 1 file (`leap_query.rs` — not in ntpsec)
+- Total comment-only modules: **13 files**
 
-**Actual C debt from stubs: ~8,634 lines** (not 240K as Revision 1 claimed).
+**Missing capability debt: 7,460 lines** (not 240K as Revision 1 claimed, not 8.6K as Revision 2 claimed.).
 
 #### 2. Config Recognition (4-Level Table)
 
@@ -327,13 +342,34 @@ by engine (server/peer/pool/refclock/restrict), 0 with full oracle parity.
 
 ## Config Directive Status: Complete 4-Level Table
 
-| Level | Count | Directives |
-|-------|:-----:|------------|
-| ✅ Lexically recognized | **101** | All entries in `RECOGNIZED_DIRECTIVES` |
-| ✅ Typed ConfigOption | **~10** | Server, Peer, Pool, Refclock, Restrict, DriftFile, LeapFile, Keys, StatsDir, Enable/Disable, Include |
-| ✅ Applied by engine | **~5** | Server, Peer, Pool, Refclock, Restrict |
-| ✅ Engine-applied + oracle-tested | **~5** | Server, Peer, Pool, Refclock, Restrict (partial — Alpine only) |
-| ❌ Accepted but not wired | **~86** | All other RECOGNIZED_DIRECTIVES |
+Counting methodology — five distinct measurement layers:
+
+| Layer | Definition | Count |
+|-------|-----------|:-----:|
+| **Lexically recognized** | String matches a name in `RECOGNIZED_DIRECTIVES` array | **101** |
+| **Typed enum variant** | Has a dedicated `ConfigOption::*` variant (not `Other{..}`) | **14** |
+| **Engine-applied** | `DaemonEngine::apply_config()` writes state or logs behavior | **7** |
+| **Whole-daemon handled** | Engine + shell together produce observable behavior | **8** |
+| **Oracle-tested** | Verified against real C ntpsec via Docker matrix | **5** |
+
+### Typed enum variants (14)
+`Server`, `Peer`, `Pool`, `Refclock`, `Restrict`,
+`DriftFile`, `LeapFile`, `Keys`, `StatsDir`,
+`Enable`, `Disable`, `Include`,
+`TrustedKey`, `ControlKey`
+
+### Engine-applied directives (7)
+`server`, `peer`, `pool`, `refclock`, `restrict`,
+`driftfile` (path stored), `statsdir` (path stored)
+
+### Whole-daemon handled (8)
+Engine-applied 7 + `keys` (loaded by shell via `-k` flag)
+
+### Oracle-tested (5)
+`server`, `peer`, `pool`, `refclock`, `restrict` — verified on Alpine
+
+### Not wired (~86-93)
+All other lexically recognized directives — parsed but not behaviorally applied.
 
 ---
 
@@ -442,10 +478,10 @@ Items needed for full behavioral compatibility with current NTPsec.
 | NTS-KE server role | `nts_server.rs` + daemon integration | 2-4 months | 5 files |
 | NTS daemon integration | Packet-receive path | 2-4 months | — |
 | Statistics file I/O | `ntp_filegen.rs` | 2-3 weeks | ~650 |
-| Full Mode 6 variable set | `ntp_control.rs` | 2-4 weeks | 106K C |
-| Configuration semantics | `ntp_config.rs` + engine | 2-4 months | 72K C |
-| Hardware packet timestamps | `ntp_packetstamp.rs` | 2-4 weeks | ~500 |
-| Full clock intersection/cluster | `ntp_proto.rs` | 2-4 weeks | 84K C |
+| Full Mode 6 variable set | `ntp_control.rs` | 2-4 weeks | 4,044 lines / ~106KB |
+| Configuration semantics | `ntp_config.rs` + engine | 2-4 months | 3,496 lines / ~72KB |
+| Hardware packet timestamps | `ntp_packetstamp.rs` | 2-4 weeks | 401 lines |
+| Full clock intersection/cluster | `ntp_proto.rs` | 2-4 weeks | 2,929 lines / ~84KB |
 | Prefer peer / PPS selection | `daemon_engine.rs` | 2 weeks | — |
 | Burst/iburst/manycast | `ntp_proto.rs` | 2-4 weeks | — |
 | Samba signing | `ntp_signd.rs` | 1-2 weeks | ~400 |
@@ -481,18 +517,25 @@ Items for complete compatibility with obscure or legacy NTPsec surfaces.
 
 ### Total Effort (Non-Overlapping)
 
-| Tier | Description | Estimate |
-|:----:|-------------|:--------:|
-| 1 | Production replacement blockers | 3-5 months |
-| 2 | Mainline NTPsec feature parity | 8-16 months |
-| 3 | Historical/full breadth parity | 8-14 months |
-| **Total (uncorrelated)** | | **14-22 months** |
-| **Total (correlated, sequential)** | | **19-35 months** |
-| **Total (parallel, aggressive)** | | **9-14 months** |
+Aggregation methodology:
 
-**Note:** The 14-22 month figure from Revision 1 was inflated by bytes-vs-LOC
-confusion and double-counting. The corrected range reflects actual C line counts.
-Tier 1 (production blockers) is estimated at 3-5 months, not 14-22.
+- **Uncorrelated total** = Tier1_low + Tier2_low + Tier3_low through Tier1_high + Tier2_high + Tier3_high. Assumes zero overlap between tiers. Best for separate-team budgeting.
+- **Sequential total** = uncorrelated_low × 1.3 through uncorrelated_high × 1.6. Accounts for dependencies, integration overhead, and context switching between tiers. Best for single-developer reality.
+- **Parallel aggressive** = max(Tier1_low, Tier2_low, Tier3_low) through max(Tier1_high, Tier2_high, Tier3_high). Assumes full parallelization across 3+ developers. Best for team staffing.
+
+| Tier | Description | Low | High |
+|:----:|-------------|:---:|:----:|
+| 1 | Production replacement blockers | 3 months | 5 months |
+| 2 | Mainline NTPsec feature parity | 8 months | 16 months |
+| 3 | Historical/full breadth parity | 8 months | 14 months |
+
+| Aggregation | Formula | Total |
+|:------------|:--------|:-----:|
+| Uncorrelated | Low₁+Low₂+Low₃ to High₁+High₂+High₃ | **19–35 months** |
+| Sequential | Uncorrelated × 1.3 to × 1.6 | **25–56 months** |
+| Parallel (3 devs) | Max(Low₁,Low₂,Low₃) to Max(High₁,High₂,High₃) | **8–16 months** |
+
+**The ranges are larger than Revision 1's 14–22 months because the byte-to-line correction made the true scope of remaining Tier 2+3 work visible. Tier 1 alone (production blockers) is 3–5 months. The old estimate collapsed all three tiers into one number without separating architectural substitution from missing capability.**
 
 ---
 

@@ -916,9 +916,10 @@ Parses $GPGGA, $GPRMC, $GPZDA, $GPGLL. Subsecond precision requires
 TCP to localhost gpsd. Supports multiple GPS receivers. More reliable than
 serial NMEA because gpsd handles serial parsing.
 
-**GENERIC (type 8):** 155K C file — the largest in ntpd/. Routes timecodes
-from various radio clocks through the `libparse/` decoding engine. Supports
-DCF77, MSF, WWVB, CHU, and many others through the `clk_*.c` parsers.
+**GENERIC (type 8):** 5,729-line C file (~155KB) — the largest in ntpd/.
+Routes timecodes from various radio clocks through the `libparse/` decoding
+engine. Supports DCF77, MSF, WWVB, CHU, and many others through the `clk_*.c`
+parsers.
 
 ---
 
