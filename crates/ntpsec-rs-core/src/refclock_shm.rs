@@ -246,6 +246,11 @@ impl ShmRefclock {
     pub fn samples_read(&self) -> u64 {
         self.samples_read
     }
+
+    /// Return the unit number of this refclock instance.
+    pub fn unit(&self) -> u8 {
+        self.unit
+    }
 }
 
 impl Drop for ShmRefclock {
@@ -262,12 +267,15 @@ pub fn ntp_shm_key(unit: u8) -> i32 {
 
 /// Build a synthetic NTP packet from a SHM sample, suitable for feeding
 /// into the daemon engine as a server response.
-pub fn shm_sample_to_packet(sample: &ShmSample, precision: i8) -> NtpPacket {
+pub fn shm_sample_to_packet(sample: &ShmSample, precision: i8, unit: u8) -> NtpPacket {
     let mut pkt = NtpPacket::zeroed();
     pkt.li_vn_mode = NtpPacket::set_li_vn_mode(sample.leap, NtpVersion::V4, NtpMode::Server);
     pkt.stratum = 0; // stratum will be set by the engine
     pkt.precision = precision;
-    pkt.reference_id = u32::from_be_bytes(*b"SHM\0");
+
+    // Use unit number in reference ID
+    let refid_bytes = [b'S', b'H', b'M', b'0' + unit];
+    pkt.reference_id = u32::from_ne_bytes(refid_bytes);
     pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.clock_time);
     pkt.originate_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.receive_time);
     pkt.receive_ts = crate::ntp_fp::ntp_ts64_to_ntpts(sample.clock_time);
@@ -311,12 +319,15 @@ mod tests {
             leap: LeapIndicator::NoWarning,
             precision: -6,
         };
-        let pkt = shm_sample_to_packet(&sample, -6);
+        let pkt = shm_sample_to_packet(&sample, -6, 0);
         assert_eq!(pkt.mode(), NtpMode::Server);
         assert_eq!(pkt.version(), NtpVersion::V4);
         assert_eq!(pkt.leap_indicator(), LeapIndicator::NoWarning);
         assert_eq!(pkt.precision, -6);
-        assert_eq!(pkt.reference_id, u32::from_be_bytes(*b"SHM\0"));
+        assert_eq!(
+            pkt.reference_id,
+            u32::from_ne_bytes([b'S', b'H', b'M', b'0'])
+        );
     }
 
     #[test]

@@ -23,16 +23,20 @@ impl RefClockDriver for LocalClockDriver {
         1
     }
     fn poll(&mut self) -> Option<RefClockSample> {
-        // Local clock always returns zero offset
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs() as i64 - 2208988800i64; // NTP epoch offset
+        let frac = ((now.as_nanos() % 1_000_000_000) as u64 * 4_294_967_296 / 1_000_000_000) as u32;
         Some(RefClockSample {
+            time: crate::ntp_types::NtpTs64 {
+                seconds: secs,
+                fraction: frac,
+            },
             offset: 0.0,
             delay: 0.0,
-            dispersion: 0.001, // 1 ms dispersion
-            time: NtpTs64 {
-                seconds: 0,
-                fraction: 0,
-            }, // filled by caller
-            leap: LeapIndicator::NoWarning,
+            dispersion: 0.001,
+            leap: crate::ntp_types::LeapIndicator::NoWarning,
         })
     }
     fn timeout(&self) -> u32 {

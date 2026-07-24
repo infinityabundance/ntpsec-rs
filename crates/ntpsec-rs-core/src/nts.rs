@@ -406,6 +406,11 @@ impl NtsKeProtocolClient {
                 return Err(format!("NTS-KE server returned Error: {}", msg));
             }
 
+            if rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT == NTS_KE_RECORD_WARNING {
+                // RFC 8915 §4.1.6: Warning records are informational; log and continue
+                continue;
+            }
+
             // Reject unknown critical records (RFC 8915 §4.1.1).
             if rec.record_type & NTS_KE_RECORD_CRITICAL_BIT != 0 {
                 let raw_type = rec.record_type & !NTS_KE_RECORD_CRITICAL_BIT;
@@ -649,25 +654,11 @@ impl NtsUniqueKey {
 
     /// Generate a random NTS unique key.
     pub fn generate() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
         let mut key = [0u8; 64];
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let mut rng = seed;
-        for byte in key.iter_mut() {
-            rng = rng
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *byte = ((rng >> 32) & 0xFF) as u8;
-        }
-        // ID is the first 8 bytes as hex
-        let id_str = format!("{:016x}", u64::from_be_bytes(key[..8].try_into().unwrap()));
-        Self {
-            key_data: key,
-            id: id_str.into_bytes(),
-        }
+        let mut id = vec![0u8; 8];
+        getrandom::getrandom(&mut key).expect("RNG failure for NTS unique key");
+        getrandom::getrandom(&mut id).expect("RNG failure for NTS unique key ID");
+        Self { key_data: key, id }
     }
 
     /// Get the key as a reference.

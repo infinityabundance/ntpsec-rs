@@ -73,6 +73,10 @@ const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
 
+/// AArch64 (ARM64) audit arch constant for seccomp architecture matching.
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH_AARCH64: u32 = 0xc00000b7;
+
 // ──── x86_64 syscall allowlist (derived from full lifecycle strace) ───────
 // Covers: startup, polling, Mode 6, stats append, drift write+rename, shutdown.
 // Removed: execve, setuid, setgid, mkdir, link, symlink, fanotify_*.
@@ -179,9 +183,18 @@ const ALLOWED_SYSCALLS: &[u64] = &[
 ///   RET KILL  (no syscall matched → die)
 #[cfg(target_os = "linux")]
 fn install_seccomp_filter() -> Result<(), String> {
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        return Err("seccomp only supports x86_64".to_string());
+        return Err("seccomp only supports x86_64 and aarch64".to_string());
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // AArch64 is recognized but the syscall allowlist is architecture-specific
+        // and has not yet been tuned for aarch64.  To enable, port the syscall
+        // number table to aarch64 (different syscall numbers) and register it
+        // under `#[cfg(target_arch = "aarch64")]`.
+        return Err("aarch64 seccomp allowlist not yet implemented".to_string());
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -231,7 +244,7 @@ fn install_seccomp_filter() -> Result<(), String> {
         };
 
         // Use TSYNC to propagate filter to all existing threads (signal handlers)
-        let ret = unsafe {
+        let mut ret = unsafe {
             libc::syscall(
                 libc::SYS_seccomp,
                 libc::SECCOMP_SET_MODE_FILTER,
@@ -239,6 +252,20 @@ fn install_seccomp_filter() -> Result<(), String> {
                 &prog as *const libc::sock_fprog,
             )
         };
+
+        if ret != 0 {
+            // Fallback: try prctl(PR_SET_SECCOMP) which does not support
+            // TSYNC but is available on older kernels.
+            ret = unsafe {
+                libc::prctl(
+                    libc::PR_SET_SECCOMP,
+                    libc::SECCOMP_MODE_FILTER as i64,
+                    &prog as *const libc::sock_fprog as i64,
+                    0i64,
+                    0i64,
+                ) as i64
+            };
+        }
 
         if ret != 0 {
             return Err(format!(

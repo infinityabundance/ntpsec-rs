@@ -28,6 +28,7 @@ digest = "0.10"
 aes-siv = { version = "0.7", default-features = false, features = ["alloc"] }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 getrandom = "0.2"
+tracing = "0.1"
 
 # NTS-KE TLS transport
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

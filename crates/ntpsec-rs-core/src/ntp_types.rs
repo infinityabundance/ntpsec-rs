@@ -176,6 +176,8 @@ impl NtpVersion {
 }
 
 /// NTP association states.
+///
+/// Placeholder for NTP association state tracking; not yet wired to engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NtpAssociationState {
     /// Initial state — not yet synchronized.

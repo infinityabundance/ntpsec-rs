@@ -535,7 +535,10 @@ pub fn peer_status(peer: &super::ntp_peer::Peer, selection: SelectionStatus) -> 
     flags |= selection.to_bits() & 0x07;
 
     // Low byte: event count (bits 7-4) and event code (bits 3-0)
-    ((flags as u16) << 8) | 0x0000
+    // Use count=1, code=0 (EVENT_UNSPEC/"no event") as the baseline.
+    // Real event tracking will increment this peer_event_count properly.
+    let event_field: u16 = 0x0010; // count=1, code=0 = "no event"
+    ((flags as u16) << 8) | event_field
 }
 
 /// Encode a list of variables in key=value format (matching ntpq output).

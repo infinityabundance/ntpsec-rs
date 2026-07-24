@@ -54,6 +54,10 @@ impl NtpStrBuf {
 }
 
 /// MAC computation type.
+///
+/// Note: `DigestType` in `ntp_auth.rs` covers the same concept and should be
+/// used for new code. This enum is retained for backward compatibility during
+/// the forensic reconstruction transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacType {
     None,

@@ -569,6 +569,7 @@ dependencies = [
  "sha-1",
  "sha2",
  "thiserror",
+ "tracing",
  "webpki-roots 0.26.11",
  "zeroize",
 ]

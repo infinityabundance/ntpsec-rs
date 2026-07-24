@@ -6,6 +6,7 @@
 // =============================================================================
 
 use crate::ntp_types::*;
+use tracing;
 
 /// A receive buffer (matches ntpsec's `recvbuf`).
 #[derive(Debug)]
@@ -61,6 +62,7 @@ impl RecvBufPool {
             self.total_count += 1;
             unsafe { std::mem::zeroed() }
         } else {
+            tracing::warn!("receive buffer pool exhausted, returning zeroed buffer");
             // Reuse the oldest buffer
             unsafe { std::mem::zeroed() }
         }

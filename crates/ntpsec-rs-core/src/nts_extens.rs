@@ -51,6 +51,8 @@ pub const EXTENSION_FIELD_NTS_COOKIE: u16 = 0x0204;
 pub const EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER: u16 = 0x0304;
 /// NTS Authenticator — AEAD encryption result (RFC 8915 §5.3).
 pub const EXTENSION_FIELD_NTS_AUTHENTICATOR: u16 = 0x0404;
+/// NTS Authentication Result extension field (RFC 8915 §5.4).
+pub const EXTENSION_FIELD_NTS_AUTH_RESULT: u16 = 0x0106;
 
 // ──── NTP Extension Field Header ──────────────────────────────────────
 
@@ -143,6 +145,12 @@ impl ExtensionField {
 
         // Length must include at least the 4-byte header.
         if length < 4 {
+            return None;
+        }
+
+        // RFC 7821: maximum extension field size is 4096 bytes
+        let max_ext_len = 4096usize;
+        if length as usize > max_ext_len {
             return None;
         }
 
@@ -296,6 +304,27 @@ impl NtsAuthenticator {
 
         Some(Self { nonce, ciphertext })
     }
+}
+
+/// Validate that the total size of a sequence of extension fields does not
+/// exceed the maximum allowed by the NTP packet format.
+///
+/// RFC 8915 §5: The total size of all extension fields must fit within an
+/// NTP packet, which has a maximum payload size of 65535 bytes (including
+/// the NTP header).
+pub fn validate_extension_fields_total_size(fields: &[ExtensionField]) -> Result<(), String> {
+    const MAX_TOTAL_SIZE: usize = 65535;
+    let mut total: usize = 0;
+    for field in fields {
+        total += field.wire_size();
+        if total > MAX_TOTAL_SIZE {
+            return Err(format!(
+                "extension fields total size {} exceeds maximum {}",
+                total, MAX_TOTAL_SIZE
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ──── Tests ───────────────────────────────────────────────────────────

@@ -9,12 +9,12 @@
 //   - ntpsec libntp/emalloc.c
 // =============================================================================
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{alloc_zeroed, dealloc, realloc, Layout};
 
 /// Zeroed allocation of `size` bytes (matches ntpsec's `emalloc_zeroed()`).
 pub fn emalloc(size: usize) -> *mut u8 {
     let layout = Layout::from_size_align(size, 1).expect("invalid layout");
-    unsafe { alloc(layout) }
+    unsafe { alloc_zeroed(layout) }
 }
 
 /// Zeroed allocation for a type.

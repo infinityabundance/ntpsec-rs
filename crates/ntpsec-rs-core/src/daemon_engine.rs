@@ -255,9 +255,11 @@ impl RefclockManager {
                 match driver {
                     RefclockDriver::Shm(ref mut shm) => {
                         if let Ok(Some(sample)) = shm.read_sample() {
+                            let unit = shm.unit();
                             let pkt = crate::refclock_shm::shm_sample_to_packet(
                                 &sample,
                                 sample.precision,
+                                unit,
                             );
                             inst.samples_collected += 1;
                             actions.push(DaemonAction::RefclockSample {
@@ -815,9 +817,16 @@ impl DaemonEngine {
                 }];
             }
 
-            // ─── Server or SymPassive response → update matching peer ──
-            NtpMode::Server | NtpMode::SymPassive => {
+            // ─── Server response → update matching peer ────────────────
+            NtpMode::Server => {
                 return self.handle_server_response(pkt, dgram);
+            }
+
+            // ─── Symmetric passive (Mode 2) — not yet implemented ────────
+            NtpMode::SymPassive => {
+                return vec![DaemonAction::Log(
+                    "symmetric passive packet received (not yet handled)".to_string(),
+                )];
             }
 
             // ─── Unsupported modes ─────────────────────────────────────────
@@ -1243,9 +1252,14 @@ impl DaemonEngine {
             peer.receive_time = rx_time;
             peer.transmit_time = t3;
 
+            // Compute per-instance dispersion from precision.
+            // In NTP dispersion doubles every poll interval starting from
+            // the precision-based minimum: 2^precision seconds.
+            let refclock_dispersion = 2.0_f64.powi(self.precision as i32);
+
             // Accept the sample through clock filter (add_sample + filter
             // to pick delay-minimum, compute jitter, update reachability)
-            crate::ntp_proto::accept_sample(peer, offset, delay, 0.001, rx_time);
+            crate::ntp_proto::accept_sample(peer, offset, delay, refclock_dispersion, rx_time);
         }
 
         // Run clock selection to potentially elect this peer as system peer

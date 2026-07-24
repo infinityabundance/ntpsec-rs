@@ -4,4 +4,7 @@
 // PPS API declarations for refclock drivers.
 // =============================================================================
 
-// Stub — PPS API.
+/// Check if the kernel PPS API is available on this system.
+pub fn pps_api_available() -> bool {
+    std::path::Path::new("/dev/pps0").exists()
+}

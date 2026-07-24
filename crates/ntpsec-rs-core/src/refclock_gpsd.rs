@@ -336,6 +336,9 @@ pub fn gpsd_fix_to_packet(fix: &GpsdFix, receive_time: NtpTs64) -> NtpPacket {
     pkt.root_delay = 0;
     pkt.root_dispersion = 0;
 
+    // Reference timestamp: the GPS fix time.
+    pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_ntpts(fix.time);
+
     // Reference identifier: "GPSD" in ASCII.
     pkt.reference_id = u32::from_be_bytes(*b"GPSD");
 

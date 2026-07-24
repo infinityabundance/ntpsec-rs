@@ -291,7 +291,10 @@ pub fn pps_stamp_to_packet(stamp: &PpsStamp) -> NtpPacket {
     let mut pkt = NtpPacket::zeroed();
     pkt.li_vn_mode =
         NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
+    pkt.stratum = 0; // primary refclock
     pkt.precision = -30; // ~1 ns precision for PPS
+    pkt.root_delay = 0;
+    pkt.root_dispersion = 0;
     pkt.reference_id = u32::from_be_bytes(*b"PPS\0");
 
     // Convert from the 64-bit NtpTs64 used internally to the

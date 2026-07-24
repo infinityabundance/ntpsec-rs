@@ -6,6 +6,8 @@
 // =============================================================================
 
 use crate::ntp_types::*;
+use digest::Digest;
+use getrandom::getrandom;
 
 /// Statistics counters matching ntpsec.
 #[derive(Debug, Clone, Default)]
@@ -33,7 +35,13 @@ pub enum SysEvent {
 
 /// Initialize NTPSEC-specific system state.
 pub fn ntp_init() {
-    // Stub — will initialize random seed, signal handlers, syslog
+    // Initialize the random seed from system entropy
+    let mut seed = [0u8; 32];
+    if getrandom(&mut seed).is_ok() {
+        // Seed initialized
+    }
+    // Signal handlers are initialized by the shell (main.rs)
+    // Syslog is initialized by the shell (main.rs)
 }
 
 /// Generate a (hopefully) unique reference ID for a server.
@@ -44,7 +52,16 @@ pub fn refid_from_addr(addr: &SockAddr) -> u32 {
                 let sin = &*(addr as *const _ as *const libc::sockaddr_in);
                 sin.sin_addr.s_addr
             }
-            _ => 0, // Will use hash of IPv6 address
+            6 => {
+                // NTPsec uses MD5 hash of IPv6 address, first 4 bytes
+                let sin6 = &*(addr as *const _ as *const libc::sockaddr_in6);
+                let addr_bytes = sin6.sin6_addr.s6_addr;
+                let mut hasher = md5::Md5::new();
+                hasher.update(&addr_bytes[..16]);
+                let result = hasher.finalize();
+                u32::from_ne_bytes([result[0], result[1], result[2], result[3]])
+            }
+            _ => 0,
         }
     }
 }

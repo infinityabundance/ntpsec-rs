@@ -41,6 +41,8 @@ pub enum NmeaSentence {
     Gga {
         /// UTC time as (hours, minutes, seconds).
         time: (u8, u8, u8),
+        /// Sub-second nanoseconds extracted from the time field.
+        sub_seconds: u32,
         /// Latitude in decimal degrees (positive north).
         latitude: f64,
         /// Longitude in decimal degrees (positive east).
@@ -54,6 +56,8 @@ pub enum NmeaSentence {
     Rmc {
         /// UTC time as (hours, minutes, seconds).
         time: (u8, u8, u8),
+        /// Sub-second nanoseconds extracted from the time field.
+        sub_seconds: u32,
         /// Date as (day, month, 2-digit year).
         date: (u8, u8, u8),
         /// Status: 'A' = active/valid, 'V' = void/invalid.
@@ -196,7 +200,7 @@ fn parse_gga(fields: &[&str]) -> Option<NmeaSentence> {
     }
 
     let time_str = fields.get(1)?;
-    let (hh, mm, ss) = parse_time(time_str)?;
+    let (hh, mm, ss, sub_seconds) = parse_time(time_str)?;
 
     let lat_raw = fields.get(2)?;
     let lat_hemi = fields.get(3)?;
@@ -217,6 +221,7 @@ fn parse_gga(fields: &[&str]) -> Option<NmeaSentence> {
 
     Some(NmeaSentence::Gga {
         time: (hh, mm, ss),
+        sub_seconds,
         latitude,
         longitude,
         quality,
@@ -247,7 +252,7 @@ fn parse_rmc(fields: &[&str]) -> Option<NmeaSentence> {
     }
 
     let time_str = fields.get(1)?;
-    let (hh, mm, ss) = parse_time(time_str)?;
+    let (hh, mm, ss, sub_seconds) = parse_time(time_str)?;
 
     let status_str = fields.get(2)?;
     let status = status_str.chars().next()?;
@@ -275,6 +280,7 @@ fn parse_rmc(fields: &[&str]) -> Option<NmeaSentence> {
 
     Some(NmeaSentence::Rmc {
         time: (hh, mm, ss),
+        sub_seconds,
         date: (dd, mm_date, yy),
         status,
         latitude,
@@ -285,7 +291,7 @@ fn parse_rmc(fields: &[&str]) -> Option<NmeaSentence> {
 }
 
 /// Parse an NMEA time field in HHMMSS[.sss] format.
-fn parse_time(raw: &str) -> Option<(u8, u8, u8)> {
+fn parse_time(raw: &str) -> Option<(u8, u8, u8, u32)> {
     if raw.len() < 6 {
         return None;
     }
@@ -295,7 +301,32 @@ fn parse_time(raw: &str) -> Option<(u8, u8, u8)> {
     if hh > 23 || mm > 59 || ss > 59 {
         return None;
     }
-    Some((hh, mm, ss))
+
+    // Extract fractional seconds and convert to nanoseconds.
+    let nanos = if raw.len() > 6 && raw.as_bytes().get(6) == Some(&b'.') {
+        let frac_str = &raw[7..];
+        let mut val: u32 = 0;
+        let mut digits = 0u32;
+        for c in frac_str.chars() {
+            if let Some(d) = c.to_digit(10) {
+                if digits < 9 {
+                    val = val * 10 + d;
+                    digits += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        // Scale to nanoseconds (right-pad with zeros).
+        for _ in digits..9 {
+            val *= 10;
+        }
+        val
+    } else {
+        0
+    };
+
+    Some((hh, mm, ss, nanos))
 }
 
 /// Parse an NMEA date field in DDMMYY format.
@@ -573,7 +604,7 @@ impl NmeaRefclock {
                 None => continue, // skip unparseable lines
             };
 
-            let (unixtime, leap) = match sentence_to_unix(&sentence, self.last_date) {
+            let (unixtime, sub_seconds, leap) = match sentence_to_unix(&sentence, self.last_date) {
                 Some(t) => t,
                 None => continue, // insufficient data (e.g. GGA with no prior date)
             };
@@ -593,7 +624,7 @@ impl NmeaRefclock {
                 Err(_) => ts_to_ntp(0, 0),
             };
 
-            let gps_time = ts_to_ntp(unixtime, 0);
+            let gps_time = ts_to_ntp(unixtime, sub_seconds as i64);
 
             let sample = NmeaSample {
                 receive_time: receive_ts,
@@ -609,7 +640,9 @@ impl NmeaRefclock {
 
     /// Close the device.
     pub fn close(&mut self) {
-        self.reader = None;
+        if let Some(reader) = self.reader.take() {
+            drop(reader);
+        }
         self.path.clear();
         self.last_sample = None;
         self.last_date = None;
@@ -655,10 +688,11 @@ impl NmeaRefclock {
 fn sentence_to_unix(
     sentence: &NmeaSentence,
     last_date: Option<(u8, u8, u8)>,
-) -> Option<(i64, LeapIndicator)> {
+) -> Option<(i64, u32, LeapIndicator)> {
     match *sentence {
         NmeaSentence::Rmc {
             time: (hh, mm, ss),
+            sub_seconds,
             date: (dd, mm_date, yy),
             status,
             ..
@@ -668,10 +702,11 @@ fn sentence_to_unix(
                 return None;
             }
             let unixtime = nmea_datetime_to_unix(dd, mm_date, yy, hh, mm, ss)?;
-            Some((unixtime, LeapIndicator::NoWarning))
+            Some((unixtime, sub_seconds, LeapIndicator::NoWarning))
         }
         NmeaSentence::Gga {
             time: (hh, mm, ss),
+            sub_seconds,
             quality,
             ..
         } => {
@@ -682,7 +717,7 @@ fn sentence_to_unix(
             // GGA has no date; use the last known date from an RMC sentence.
             let (dd, mm_date, yy) = last_date?;
             let unixtime = nmea_datetime_to_unix(dd, mm_date, yy, hh, mm, ss)?;
-            Some((unixtime, LeapIndicator::NoWarning))
+            Some((unixtime, sub_seconds, LeapIndicator::NoWarning))
         }
     }
 }
@@ -719,12 +754,14 @@ mod tests {
         match sentence {
             NmeaSentence::Gga {
                 time,
+                sub_seconds,
                 latitude,
                 longitude,
                 quality,
                 altitude,
             } => {
                 assert_eq!(time, (12, 35, 19));
+                assert_eq!(sub_seconds, 0);
                 // 48°07.038' N = 48 + 7.038/60 = 48.1173
                 assert!((latitude - 48.1173).abs() < 0.0001);
                 // 011°31.000' E = 11 + 31.000/60 = 11.516667
@@ -744,12 +781,14 @@ mod tests {
                 time,
                 date,
                 status,
+                sub_seconds,
                 latitude,
                 longitude,
                 speed,
                 course,
             } => {
                 assert_eq!(time, (12, 35, 19));
+                assert_eq!(sub_seconds, 0);
                 assert_eq!(date, (23, 3, 94)); // DD=23, MM=03, YY=94
                 assert_eq!(status, 'A');
                 // 48°07.038' N
@@ -814,8 +853,9 @@ mod tests {
         // With a last date, it should work.
         let result = sentence_to_unix(&gga, Some((23, 3, 94)));
         assert!(result.is_some());
-        let (unixtime, leap) = result.unwrap();
+        let (unixtime, sub_seconds, leap) = result.unwrap();
         assert_eq!(leap, LeapIndicator::NoWarning);
+        assert_eq!(sub_seconds, 0);
         // 1994-03-23 12:35:19 UTC
         // Quick sanity: Unix timestamp should be positive and within a reasonable range.
         assert!(unixtime > 700_000_000);
@@ -940,9 +980,9 @@ mod tests {
 
     #[test]
     fn test_parse_time_valid() {
-        assert_eq!(parse_time("123519"), Some((12, 35, 19)));
-        assert_eq!(parse_time("000000"), Some((0, 0, 0)));
-        assert_eq!(parse_time("235959"), Some((23, 59, 59)));
+        assert_eq!(parse_time("123519"), Some((12, 35, 19, 0)));
+        assert_eq!(parse_time("000000"), Some((0, 0, 0, 0)));
+        assert_eq!(parse_time("235959"), Some((23, 59, 59, 0)));
     }
 
     #[test]

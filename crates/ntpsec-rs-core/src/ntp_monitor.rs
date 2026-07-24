@@ -46,6 +46,11 @@ impl MonList {
                         let b = &*(addr as *const _ as *const libc::sockaddr_in);
                         a.sin_addr.s_addr == b.sin_addr.s_addr
                     }
+                    libc::AF_INET6 => {
+                        let a = &*(&e.addr as *const _ as *const libc::sockaddr_in6);
+                        let b = &*(addr as *const _ as *const libc::sockaddr_in6);
+                        a.sin6_addr.s6_addr == b.sin6_addr.s6_addr
+                    }
                     _ => false,
                 }
         }) {
@@ -88,11 +93,28 @@ impl MonList {
                         let b = &*(&ss as *const _ as *const libc::sockaddr_in);
                         a.sin_addr.s_addr == b.sin_addr.s_addr
                     }
+                    libc::AF_INET6 => {
+                        let a = &*(&e.addr as *const _ as *const libc::sockaddr_in6);
+                        let b = &*(&ss as *const _ as *const libc::sockaddr_in6);
+                        a.sin6_addr.s6_addr == b.sin6_addr.s6_addr
+                    }
                     _ => false,
                 }
         }) {
-            // Basic rate limiting: if more than 10 packets in the min_distance window
-            (entry.count > 10, entry.count)
+            // Rate-limiting algorithm from ntpsec:
+            // Compute the average interval between successive packets.
+            // If it falls below MIN_INTERVAL, the source is rate-limited.
+            const MIN_INTERVAL: f64 = 0.2; // 200 ms (~5 packets/sec max)
+            if entry.count > 1 {
+                let dt = (entry.last_pkt.seconds - entry.first_pkt.seconds) as f64
+                    + (entry.last_pkt.fraction as f64 - entry.first_pkt.fraction as f64)
+                        / 4_294_967_296.0;
+                let avg_interval = dt / (entry.count as f64 - 1.0);
+                (avg_interval < MIN_INTERVAL, entry.count)
+            } else {
+                // With only 1 packet, we can't measure rate yet.
+                (false, entry.count)
+            }
         } else {
             (false, 0)
         }

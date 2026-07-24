@@ -298,10 +298,6 @@ impl AuthKeyStore {
     }
 }
 
-// ──── Crypto stubs (Phase 2: replace with proper md-5, sha-1, aes-siv crates)
-
-/// Real
-
 // ──── Hex Encoding/Decoding ───────────────────────────────────────────
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
