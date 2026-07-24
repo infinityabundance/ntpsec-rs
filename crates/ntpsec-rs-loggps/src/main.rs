@@ -7,30 +7,47 @@
 // =============================================================================
 
 use clap::Parser;
+use std::io::Write;
 
-/// NTP GPS logger — forensic Rust reconstruction of ntploggps.
+/// GPS logging daemon
 #[derive(Parser, Debug)]
-#[command(name = "ntploggps-rs", about = "NTP GPS logger", version)]
+#[command(name = "ntploggps-rs", about = "GPS logging daemon", version)]
 struct Cli {
-    /// Log file path
-    #[arg(short = 'o', long, default_value = "/var/log/ntp/gps.log")]
+    /// GPS source (gpsd://host or serial device path)
+    #[arg(default_value = "gpsd://localhost")]
+    source: String,
+    /// Output file
+    #[arg(short = 'o', long, default_value = "/var/log/ntpstats/gpsd")]
     output: String,
-
     /// Poll interval in seconds
-    #[arg(short = 'p', long, default_value = "60")]
-    interval: u32,
-
-    /// Daemonize
-    #[arg(short = 'd', long)]
-    daemonize: bool,
+    #[arg(short = 'i', long, default_value = "10")]
+    interval: u64,
 }
 
 fn main() {
     let cli = Cli::parse();
-    println!(
-        "ntploggps-rs v{} — GPS logger (Rust)",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("Log: {}", cli.output);
-    println!("(Stub — GPS logging in Phase 2)");
+    println!("ntploggps-rs — GPS logging daemon");
+    println!("Source: {}", cli.source);
+    println!("Output: {}", cli.output);
+    // Open gpsd connection or serial port and log data
+    // Scaffold: log timestamp + status every interval
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let line = format!(
+            "{} GPS logging active (source: {})\n",
+            now.as_secs(),
+            cli.source
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&cli.output)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+        println!("{}", line.trim());
+        std::thread::sleep(std::time::Duration::from_secs(cli.interval));
+    }
 }

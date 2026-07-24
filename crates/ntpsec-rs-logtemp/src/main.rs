@@ -8,31 +8,58 @@
 // =============================================================================
 
 use clap::Parser;
+use std::io::Write;
 
-/// NTP temperature logger — forensic Rust reconstruction of ntplogtemp.
+/// Temperature logging daemon
 #[derive(Parser, Debug)]
-#[command(name = "ntplogtemp-rs", about = "NTP temperature logger", version)]
+#[command(name = "ntplogtemp-rs", about = "Temperature logging daemon", version)]
 struct Cli {
-    /// Log file path
-    #[arg(short = 'o', long, default_value = "/var/log/ntp/temp.log")]
+    /// Temperature source path (sysfs)
+    #[arg(default_value = "/sys/class/thermal/thermal_zone0/temp")]
+    source: String,
+    /// Output file
+    #[arg(short = 'o', long, default_value = "/var/log/ntpstats/temperature")]
     output: String,
-
     /// Poll interval in seconds
-    #[arg(short = 'p', long, default_value = "300")]
-    interval: u32,
+    #[arg(short = 'i', long, default_value = "60")]
+    interval: u64,
+}
 
-    /// Daemonize
-    #[arg(short = 'd', long)]
-    daemonize: bool,
-
-    /// Temperature sensor device
-    #[arg(short = 's', long)]
-    sensor: Option<String>,
+fn read_temperature(path: &str) -> Result<f64, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let millidegrees: f64 = content
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad temp data: {e}"))?;
+    Ok(millidegrees / 1000.0)
 }
 
 fn main() {
     let cli = Cli::parse();
-    println!("ntplogtemp-rs v{} — Temperature logger (Rust)", env!("CARGO_PKG_VERSION"));
-    println!("Log: {}", cli.output);
-    println!("(Stub — temperature logging in Phase 2)");
+    println!("ntplogtemp-rs — Temperature logging daemon");
+    println!("Source: {}", cli.source);
+    println!("Output: {}", cli.output);
+
+    loop {
+        match read_temperature(&cli.source) {
+            Ok(temp) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let line = format!("{} {:.3}\n", now.as_secs(), temp);
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&cli.output)
+                {
+                    let _ = f.write_all(line.as_bytes());
+                }
+                println!("{} {:.1}°C", now.as_secs(), temp);
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(cli.interval));
+    }
 }

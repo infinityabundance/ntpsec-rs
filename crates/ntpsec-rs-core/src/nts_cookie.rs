@@ -64,6 +64,14 @@ pub struct CookieCipher {
     keys: Vec<(CookieKeyIndex, [u8; 32])>,
 }
 
+impl Clone for CookieCipher {
+    fn clone(&self) -> Self {
+        Self {
+            keys: self.keys.clone(),
+        }
+    }
+}
+
 impl CookieCipher {
     /// Create an empty cipher with no keys configured.
     pub fn new() -> Self {
