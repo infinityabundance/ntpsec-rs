@@ -126,7 +126,7 @@ Disposition states — precise, non-collapsible:
 | 77 | **Samba signing** | MS-SNTP | ✅ CLOSED | Unix domain socket; full protocol round-trip |
 | 78 | **adjtimex syscall** | ntp_syscall.h | ✅ CLOSED | Full struct + convenience constructors |
 | 79 | **Timecode parsing** | parse engine | ✅ CLOSED | GGA/RMC/ZDA parser; composite parser; checksum validation |
-| 80 | **ntpq forward parity** | ntpq output | 🔄 PARTIAL | wire-order, 60-char wrap, quoting, event names ~95% match; wrapping differs at column boundaries |
+| 80 | **ntpq forward parity** | ntpq output | 🔄 PARTIAL | wire-order, 60-char wrap, quoting, event names, refclock names ~97% match; wrapping differs at column boundaries |
 | 81 | **Mode 6 variable set** | All ~80 vars | 🔄 PARTIAL | ~40 vars populated; remaining 40+ not populated by engine (clk_jitter, clk_wander, clock, etc.) |
 | 82 | **glibc privilege drop** | -u ntp on glibc | 🔄 PARTIAL | Works on Alpine; Debian/Ubuntu/Fedora `-u ntp` fails (UID stays 0) |
 | 83 | **NTS-KE daemon startup** | Auto-start on boot | 🔄 PARTIAL | Standalone server implemented; not auto-started by daemon lifecycle |

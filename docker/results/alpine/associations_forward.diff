@@ -5,4 +5,4 @@
  ind assid status  conf reach auth condition  last_event cnt
  ===========================================================
 -  1 37547  961a   yes   yes  none  sys.peer    sys_peer  1
-+  1 37547  961a   yes   yes   none  sys.peer    sys_peer  1
++  1 37547  961a   yes  yes  none  sys.peer    sys_peer  1

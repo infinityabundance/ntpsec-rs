@@ -1,6 +1,6 @@
 image: ntpsec-oracle:alpine
-date: 2026-07-24T06:05:43Z
-git_commit: 17359a86bc70da25f83a6e9d43073f4e3fc0cbf0
+date: 2026-07-24T06:23:33Z
+git_commit: ef4d4a0f85a7e45b6100deca08a196261bff9f93
 
 --- Forward Court (ntpq-rs vs real ntpd) ---
 rv_forward: FAIL

@@ -1242,12 +1242,25 @@ impl PeerRow {
 
         // For refclocks, format the remote as DRIVERNAME(unit);
         // otherwise use srcaddr or fall back to refid.
-        let remote = if is_refclock && !srcaddr.is_empty() {
-            format_refclock_remote(srcaddr).unwrap_or_else(|| srcaddr.to_string())
+        let remote = if is_refclock {
+            // Try parsing srcaddr as 127.127.x.y first
+            if let Some(formatted) = format_refclock_remote(srcaddr) {
+                formatted
+            } else if pv_refid == "LOCL" {
+                // Local clock: type 1, unit 0
+                "LOCAL(0)".to_string()
+            } else if pv_refid == "PPS" {
+                "PPS(0)".to_string()
+            } else if !srcaddr.is_empty() {
+                srcaddr.to_string()
+            } else {
+                // Fall back to refid wrapped in dots (matching real ntpq)
+                format_refid(pv_refid)
+            }
         } else if !srcaddr.is_empty() {
             srcaddr.to_string()
         } else {
-            pv_refid.to_string()
+            format_refid(pv_refid)
         };
         let refid = format_refid(pv.get("refid").unwrap_or(""));
         let stratum = pv.stratum();
@@ -1455,7 +1468,7 @@ pub fn format_associations(assocs: &[AssociationStatus]) -> String {
         let event_count = sys_status::decode_event_count(assoc.status);
         let last_event = ntpq_event_name(event_code);
         out.push_str(&format!(
-            "  {} {:5}  {:04x}   {:4}  {:4}  {:4}  {:<10}  {:>8} {:>2}\n",
+            "  {} {:5}  {:04x}   {:<3}  {:<3}  {:<4}  {:<10}  {:>8} {:>2}\n",
             i + 1,
             assoc.associd,
             assoc.status,
@@ -1539,9 +1552,7 @@ fn peer_event_name(code: u16) -> &'static str {
 /// Render peers billboard in ntpq-compatible format.
 pub fn format_peers(rows: &[PeerRow]) -> String {
     let mut out = String::new();
-    out.push_str(
-        "     remote           refid      st t when poll reach   delay   offset  jitter\n",
-    );
+    out.push_str("remote           refid      st t when poll reach   delay   offset  jitter\n");
     out.push_str(
         "==============================================================================\n",
     );
@@ -1554,7 +1565,7 @@ pub fn format_peers(rows: &[PeerRow]) -> String {
         };
         let reach_str = format!("{:o}", row.reach); // Octal display
         out.push_str(&format!(
-            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            "{}{:15} {:12} {:2} {} {:>5} {:>4} {:>5} {:>9.3} {:>8.3} {:>7.3}\n",
             row.tally,
             row.remote,
             row.refid,
@@ -2233,7 +2244,7 @@ mod tests {
                    ev: &str,
                    cnt: u16| {
             format!(
-                "  {} {:5}  {:04x}   {:4}  {:4}  {:4}  {:<10}  {:>8} {:>2}\n",
+                "  {} {:5}  {:04x}   {:<3}  {:<3}  {:<4}  {:<10}  {:>8} {:>2}\n",
                 i, aid, st, conf, reach, auth, cond, ev, cnt
             )
         };
@@ -2302,19 +2313,19 @@ mod tests {
         // Build expected using the same format specs used by the production code
         let mut expected = String::new();
         expected.push_str(
-            "     remote           refid      st t when poll reach   delay   offset  jitter\n",
+            "remote           refid      st t when poll reach   delay   offset  jitter\n",
         );
         expected.push_str(
             "==============================================================================\n",
         );
         // Row 1
         expected.push_str(&format!(
-            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            "{}{:15} {:12} {:2} {} {:>5} {:>4} {:>5} {:>9.3} {:>8.3} {:>7.3}\n",
             '*', "time.example.com", ".NTP.", 2, 'u', "10", 64, "377", 0.001, 0.002, 0.001,
         ));
         // Row 2
         expected.push_str(&format!(
-            "{}{:15} {:12} {:2} {} {:>4} {:>4} {:>5} {:>7.3} {:>8.3} {:>7.3}\n",
+            "{}{:15} {:12} {:2} {} {:>5} {:>4} {:>5} {:>9.3} {:>8.3} {:>7.3}\n",
             ' ', "192.168.1.100", ".GPS.", 1, 'u', "-", 64, "377", 0.003, -0.001, 0.002,
         ));
         assert_eq!(out, expected, "frozen peers output mismatch");
