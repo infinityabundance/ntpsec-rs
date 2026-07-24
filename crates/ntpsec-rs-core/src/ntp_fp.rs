@@ -196,6 +196,29 @@ pub fn ntp_ts64_to_ntpts(ts: NtpTs64) -> NtpTs64 {
     ts
 }
 
+/// Correct a wire-format NTP timestamp to the current era.
+///
+/// Wire timestamps carry `u32` seconds which wrap every ~136 years (2^32 s).
+/// The current era is inferred from the reference timestamp `now`:
+/// if the wire timestamp is more than 2^31 seconds (~68 years) from `now`,
+/// we shift it by one or more era boundaries to bring it into the current era.
+///
+/// This implements the algorithm described in RFC 5905 §6 for era correction:
+/// the difference between the wire timestamp and `now` is masked to the
+/// nearest 2^31-second boundary and then added back, effectively rounding
+/// into the correct era.
+pub fn correct_era(wire_ts: NtpTs, now: NtpTs64) -> NtpTs64 {
+    let wire_secs = wire_ts.seconds as i64;
+    let now_secs = now.seconds;
+    // If wire timestamp is more than 2^31 seconds (~68 years) from now,
+    // it's probably from a different era.
+    let era_shift = ((now_secs - wire_secs) >> 31) << 31; // round to nearest 2^31 boundary
+    NtpTs64 {
+        seconds: wire_secs + era_shift,
+        fraction: wire_ts.fraction,
+    }
+}
+
 /// Convert wire-format NtpTs (u32 seconds) to NtpTs64 (i64 seconds).
 /// Handles the unsigned-to-signed conversion through NTP era boundaries.
 pub fn ntp_ts_to_ntpts(ts: NtpTs) -> NtpTs64 {

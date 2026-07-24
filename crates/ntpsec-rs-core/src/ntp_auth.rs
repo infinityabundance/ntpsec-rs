@@ -202,6 +202,12 @@ impl AuthKeyStore {
         self.control_key
     }
 
+    /// Returns `true` if authentication is enabled — i.e. there is at least
+    /// one configured key and at least one trusted key, or a control key is set.
+    pub fn is_auth_enabled(&self) -> bool {
+        !self.keys.is_empty() && (!self.trusted_keys.is_empty() || self.control_key.is_some())
+    }
+
     /// Parse an ntp.keys file.
     ///
     /// File format (matching ntpsec's authreadkeys.c):

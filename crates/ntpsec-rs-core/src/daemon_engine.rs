@@ -925,9 +925,28 @@ impl DaemonEngine {
                 )];
             }
 
-            // ─── Unsupported modes ─────────────────────────────────────────
-            _ => {
+            // ─── Broadcast (Mode 5) — not yet supported ────────────────────
+            NtpMode::Broadcast => {
+                return vec![DaemonAction::Log(
+                    "broadcast packet received (not yet supported)".to_string(),
+                )];
+            }
+
+            // ─── Private/ntpdc (Mode 7) — deprecated ───────────────────────
+            NtpMode::Private => {
+                return vec![DaemonAction::Log(
+                    "private mode packet (ntpdc) received — deprecated, dropped".to_string(),
+                )];
+            }
+
+            // ─── Reserved (Mode 0) — should not occur ──────────────────────
+            NtpMode::Reserved => {
                 return vec![];
+            }
+
+            // ─── NtpControl (Mode 6) — already handled above; unreachable here ─
+            NtpMode::NtpControl => {
+                unreachable!("NtpControl already handled before NTP decode");
             }
         }
     }
@@ -968,6 +987,15 @@ impl DaemonEngine {
                     // Remove this pending request so we don't match against it again
                     self.pending_requests.remove(req_idx);
                     return vec![];
+                }
+
+                // Auth verification
+                let mut auth_log: Option<String> = None;
+                if self.auth.is_auth_enabled() {
+                    // For now, log that auth verification is not yet wired for NTP
+                    // response packets.  Full verification will walk extension fields
+                    // and MAC, look up the key-id, recompute the digest, and compare.
+                    auth_log = Some("auth verification not yet wired for NTP packets".to_string());
                 }
 
                 // Compute offset and delay
@@ -1013,6 +1041,11 @@ impl DaemonEngine {
 
                 // Remove the pending request — response consumed
                 self.pending_requests.remove(req_idx);
+
+                // Include auth log message if auth is enabled
+                if let Some(msg) = auth_log {
+                    return vec![DaemonAction::Log(msg)];
+                }
             }
         } else {
             // Unsolicited response or broadcast — silently drop

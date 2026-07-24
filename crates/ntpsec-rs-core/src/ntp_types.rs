@@ -216,6 +216,26 @@ pub mod kiss_codes {
     pub const RSTR: u32 = u32::from_be_bytes(*b"RSTR");
     /// Step — server stepped, client should re-sync.
     pub const STEP: u32 = u32::from_be_bytes(*b"STEP");
+    /// Manycast server.
+    pub const ACST: u32 = u32::from_be_bytes(*b"ACST");
+    /// Auth failure.
+    pub const AUTH: u32 = u32::from_be_bytes(*b"AUTH");
+    /// Autokey failure.
+    pub const AUTO: u32 = u32::from_be_bytes(*b"AUTO");
+    /// Broadcast server.
+    pub const BCST: u32 = u32::from_be_bytes(*b"BCST");
+    /// Crypto failure.
+    pub const CRYP: u32 = u32::from_be_bytes(*b"CRYP");
+    /// Lost peer.
+    pub const DROP: u32 = u32::from_be_bytes(*b"DROP");
+    /// Assoc initialized.
+    pub const INIT: u32 = u32::from_be_bytes(*b"INIT");
+    /// Manycast client.
+    pub const MCST: u32 = u32::from_be_bytes(*b"MCST");
+    /// No key found.
+    pub const NKEY: u32 = u32::from_be_bytes(*b"NKEY");
+    /// Nmde — NTP Mobile Discrete Event.
+    pub const NMDE: u32 = u32::from_be_bytes(*b"NMDE");
 }
 
 // ──── NTP Packet Header ─────────────────────────────────────────────────────
@@ -337,6 +357,71 @@ impl NtpPacket {
     pub fn set_li_vn_mode(li: LeapIndicator, vn: NtpVersion, mode: NtpMode) -> u8 {
         (li.to_bits() << 6) | (vn.to_bits() << 3) | mode.to_bits()
     }
+
+    /// Parse a complete NTP packet including extension fields and MAC.
+    ///
+    /// Returns `(header, extension_fields, mac)` where:
+    ///   - `header` is the decoded 48-byte NTP header
+    ///   - `extension_fields` is any extension field data between the header
+    ///     and the MAC (raw bytes, still TLV-encoded)
+    ///   - `mac` is the trailing MAC (key-id + digest), if present
+    ///
+    /// NTPv4 extension fields (RFC 7821, RFC 5905 §7):
+    ///   - Each field has a 4-byte header: type (u16), length (u16, includes
+    ///     the 4-byte header, padded to 4-byte boundary)
+    ///   - A MAC is identified by its key-id: if the last 4 bytes of the
+    ///     packet look like a plausible key-id and are followed by a digest,
+    ///     we treat the trailing data as a MAC.
+    pub fn decode_full(data: &[u8]) -> Option<(Self, &[u8], Option<&[u8]>)> {
+        if data.len() < NTP_HEADER_SIZE {
+            return None;
+        }
+        let (header, rest) = data.split_at(NTP_HEADER_SIZE);
+        let pkt = Self::decode_header(header).ok()?;
+
+        if rest.is_empty() {
+            return Some((pkt, &[], None));
+        }
+
+        // Walk extension fields (RFC 7821, RFC 5905 §7).
+        // Extension fields use a TLV format:
+        //   - type  (2 bytes, big-endian)
+        //   - length (2 bytes, big-endian; includes the 4-byte header,
+        //     padded to a 4-byte boundary)
+        // Any remaining bytes after all valid extension fields
+        // are treated as a MAC (key-id + optional digest).
+        let mut ext_end = 0;
+        let mut cursor = rest;
+
+        while cursor.len() >= 4 {
+            let remaining = cursor.len();
+            let field_len = u16::from_be_bytes([cursor[2], cursor[3]]) as usize;
+
+            // Extension fields must have length >= 4 and fit in remaining space.
+            // If this doesn't parse as a valid extension field header,
+            // the rest is the MAC.
+            if field_len < 4 || field_len > remaining {
+                break;
+            }
+
+            let padded_len = (field_len + 3) & !3; // round up to 4-byte boundary
+            if padded_len > remaining {
+                break;
+            }
+
+            ext_end += padded_len;
+            cursor = &rest[ext_end..];
+        }
+
+        let ext_fields = &rest[..ext_end];
+        let mac_data = if !cursor.is_empty() {
+            Some(cursor)
+        } else {
+            None
+        };
+
+        Some((pkt, ext_fields, mac_data))
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -394,5 +479,65 @@ mod tests {
         assert_eq!(kiss_codes::RATE, 0x52415445); // "RATE"
         assert_eq!(kiss_codes::RSTR, 0x52535452); // "RSTR"
         assert_eq!(kiss_codes::STEP, 0x53544550); // "STEP"
+        assert_eq!(kiss_codes::AUTH, 0x41555448); // "AUTH"
+        assert_eq!(kiss_codes::DROP, 0x44524f50); // "DROP"
+        assert_eq!(kiss_codes::INIT, 0x494e4954); // "INIT"
+        assert_eq!(kiss_codes::NMDE, 0x4e4d4445); // "NMDE"
+    }
+
+    #[test]
+    fn test_decode_full_minimal() {
+        // A bare 48-byte header with no extensions or MAC
+        let mut raw = [0u8; 48];
+        raw[0] =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
+        raw[1] = 1; // stratum 1
+        let (pkt, ext, mac) = NtpPacket::decode_full(&raw).unwrap();
+        assert_eq!(pkt.li_vn_mode, raw[0]);
+        assert_eq!(pkt.stratum, 1);
+        assert!(ext.is_empty());
+        assert!(mac.is_none());
+    }
+
+    #[test]
+    fn test_decode_full_too_short() {
+        assert!(NtpPacket::decode_full(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn test_decode_full_with_mac() {
+        // 48-byte header + 4-byte Crypto-NAK
+        let mut raw = [0u8; 52];
+        raw[0] =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
+        raw[48] = 0x00;
+        raw[49] = 0x00;
+        raw[50] = 0x00;
+        raw[51] = 0x01; // key-id = 1
+        let (pkt, ext, mac) = NtpPacket::decode_full(&raw).unwrap();
+        assert_eq!(pkt.stratum, 0);
+        assert!(ext.is_empty());
+        assert_eq!(mac, Some(&raw[48..]));
+    }
+
+    #[test]
+    fn test_decode_full_with_extension_field() {
+        // 48-byte header + one extension field (8 bytes)
+        let mut raw = [0u8; 56];
+        raw[0] =
+            NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Server);
+        // Extension field: type=0x0001, length=8 (4-byte header + 4-byte value, padded)
+        raw[48] = 0x00;
+        raw[49] = 0x01; // type
+        raw[50] = 0x00;
+        raw[51] = 0x08; // length (includes header)
+        raw[52] = 0xde;
+        raw[53] = 0xad;
+        raw[54] = 0xbe;
+        raw[55] = 0xef; // value
+        let (pkt, ext, mac) = NtpPacket::decode_full(&raw).unwrap();
+        assert_eq!(pkt.stratum, 0);
+        assert_eq!(ext, &raw[48..56]);
+        assert!(mac.is_none());
     }
 }
