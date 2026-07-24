@@ -187,19 +187,21 @@ pub mod sys_status {
         status & EVENT_CODE_MASK
     }
 
-    /// Clock source name matching ntpq output.
-    /// Maps the 6-bit source value to its display name.
+    /// Clock source name matching real ntpq output.
+    /// Maps the CTL_SST source type value to its display name.
     pub fn source_name(source: u16) -> &'static str {
         match source & 0x3F {
             0 => "sync_unspec",
-            1 => "sync_lcl",
-            2 => "sync_pps",
-            3 => "sync_ntp",
-            4 => "sync_nist",
-            5 => "sync_acts",
-            6 => "sync_radio",
-            7 => "sync_hwclock",
-            _ => "sync_unknown",
+            1 => "sync_local",      // CTL_SST_TS_LOCAL
+            2 => "sync_pps",        // CTL_SST_TS_ATOM
+            3 => "sync_ntp",        // CTL_SST_TS_NTP
+            4 => "sync_uhf",        // CTL_SST_TS_UHF
+            5 => "sync_local",      // CTL_SST_TS_LOCAL (alt)
+            6 => "sync_ntp",        // CTL_SST_TS_NTP (alt)
+            7 => "sync_other",      // CTL_SST_TS_UDPTIME
+            8 => "sync_wristwatch", // CTL_SST_TS_WRSTWTCH
+            9 => "sync_telephone",  // CTL_SST_TS_TELEPHONE
+            _ => "sync_unspec",
         }
     }
 

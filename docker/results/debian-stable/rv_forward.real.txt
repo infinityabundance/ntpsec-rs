@@ -1,7 +1,7 @@
 associd=0 status=0514 leap_none, sync_local, 1 event, freq_mode,
 leap=00, stratum=11, precision=-24, rootdelay=0.0, rootdisp=7947.515,
-refid=127.127.1.0, reftime=ee0d259e.fbbba42c 2026-07-23T23:43:26.983Z, tc=6,
+refid=127.127.1.0, reftime=ee0d441d.df6c8553 2026-07-24T01:53:33.872Z, tc=6,
 peer=17767, offset=0.0, frequency=0.0, sys_jitter=0.0, clk_jitter=5.6e-05,
-clock=ee0d259f.fea9c267 2026-07-23T23:43:27.994Z, processor="x86_64",
+clock=ee0d441e.e13ff867 2026-07-24T01:53:34.879Z, processor="x86_64",
 system="Linux/7.1.3-2-cachyos", version="ntpd ntpsec-1.2.2", clk_wander=0.0,
 mintc=0

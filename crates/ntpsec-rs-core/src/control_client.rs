@@ -440,12 +440,15 @@ impl SystemVariables {
         let ev_cnt = sys_status::decode_event_count(s);
         let ev_code = sys_status::decode_event_code(s);
 
+        let ev_name = ntpq_event_name(ev_code);
+        let freq_mode = if s & 0x0080 != 0 { ", freq_mode" } else { "" };
         format!(
-            "{}, {}, {} event{}",
+            "{}, {}, {} {}{}",
             sys_status::li_name(li),
             sys_status::source_name(source),
             ev_cnt,
-            if s & 0x0080 != 0 { ", freq_mode" } else { "" },
+            ev_name,
+            freq_mode,
         )
     }
 }
@@ -1379,10 +1382,15 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
 /// Render peer READVAR variables in ntpq-compatible format (multi-line, matching real C ntpq).
 pub fn format_peer_readvar(peer: &PeerVariables) -> String {
     let mut out = String::new();
+    let peer_ev_code = sys_status::decode_event_code(peer.status);
+    let peer_ev_name = peer_event_name(peer_ev_code);
+    let peer_ev_count = sys_status::decode_event_count(peer.status);
     out.push_str(&format!(
-        "associd={} status={:04x} 1 event, {},\n",
+        "associd={} status={:04x} {} {}, {},\n",
         peer.associd,
         peer.status,
+        peer_ev_count,
+        peer_ev_name,
         peer.get("srcaddr").unwrap_or("unknown"),
     ));
     let preferred = [
@@ -1484,6 +1492,29 @@ fn ntpq_event_name(code: u16) -> &'static str {
         12 => "prot_test",
         13 => "crypto",
         14 => "nopeer",
+        _ => "unknown",
+    }
+}
+
+/// Map a peer status event code (lower 4 bits of peer status word)
+/// to its display name, matching real C ntpq output.
+fn peer_event_name(code: u16) -> &'static str {
+    match code {
+        0 => "no event",
+        1 => "reach",
+        2 => "authen",
+        3 => "mobilze",
+        4 => "pkt_int",
+        5 => "assoc",
+        6 => "sel_rep",
+        7 => "sys_clk",
+        8 => "rate_excd",
+        9 => "mobilze",
+        10 => "demobil",
+        11 => "unreach",
+        12 => "seltest",
+        13 => "popcorn",
+        14 => "intervnt",
         _ => "unknown",
     }
 }
@@ -2012,12 +2043,12 @@ mod tests {
     #[test]
     fn test_readvar_format() {
         // Status description decodes from the status word, not variables.
-        // 0x0622: li=0(none), source=6(radio), count=2, event=2
+        // 0x0622: li=0(none), source=6(CTL_SST_TS_NTP), count=2, event=2(no_reply)
         let text = r#"version="ntpd 4.2.8",stratum=2,offset=0.005"#;
         let sv = SystemVariables::from_text(text, 0, 0x0622);
         let out = format_readvar(&sv);
         assert!(out.contains("associd=0"));
-        assert!(out.contains("leap_none, sync_radio, 2 event"));
+        assert!(out.contains("leap_none, sync_ntp, 2 no_reply"));
         assert!(out.contains("stratum=2"));
     }
 
@@ -2040,7 +2071,7 @@ mod tests {
         let sv = SystemVariables::from_text(text, 0, 0x0322);
         let out = format_readvar(&sv);
         let expected = concat!(
-            "associd=0 status=0322 leap_none, sync_ntp, 2 event,\n",
+            "associd=0 status=0322 leap_none, sync_ntp, 2 no_reply,\n",
             "version=ntpd 4.2.8p3\n",
             "processor=x86_64\n",
             "system=Linux/4.19.0\n",
@@ -2127,7 +2158,7 @@ mod tests {
         let pv = PeerVariables::from_text(text, 49723, 0x9614);
         let out = format_peer_readvar(&pv);
         let expected = concat!(
-            "associd=49723 status=9614 1 event, 192.168.1.1,\n",
+            "associd=49723 status=9614 1 pkt_int, 192.168.1.1,\n",
             "srcaddr=192.168.1.1\n",
             "stratum=2\n",
             "offset=0.002\n",
@@ -2569,10 +2600,10 @@ mod tests {
         assert_eq!(sv.get("offset"), Some("0.005"));
         assert_eq!(sv.leap_str(), "leap_none");
         // Verify layer 2: typed model → exact text output
-        // Status 0x0622: li=0(none), source=6(radio), count=2, event=2
+        // Status 0x0622: li=0(none), source=6(CTL_SST_TS_NTP), count=2, event=2(no_reply)
         let out = format_readvar(&sv);
         assert!(out.starts_with("associd=0 status=0622 "));
-        assert!(out.contains("leap_none, sync_radio, 2 event"));
+        assert!(out.contains("leap_none, sync_ntp, 2 no_reply"));
         assert!(out.contains("stratum=2"));
         assert!(out.contains("offset=0.005"));
     }
