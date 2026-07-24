@@ -27,9 +27,9 @@ use crate::ntp_types::*;
 /// Encoded via `_IOWR('n', 4, struct pps_fetch_params)`.
 /// On x86_64 Linux this produces `0xc050a004` (dir=3, size=80, type='n'=0x6e...).
 ///
-/// We define it as a `c_ulong` since `libc::ioctl` accepts that type.
+/// We define it as a `u32` and cast at the call site.
 #[cfg(target_os = "linux")]
-const PPS_FETCH: libc::c_ulong = 0xc050a004;
+const PPS_FETCH: u32 = 0xc050a004;
 
 /// Kernel PPS time-stamp structure (struct pps_kinfo in `<linux/pps.h>`).
 ///
@@ -202,7 +202,7 @@ impl PpsRefclock {
             },
         };
 
-        let ret = unsafe { libc::ioctl(fd, PPS_FETCH, &mut params as *mut PpsFetchParams) };
+        let ret = unsafe { libc::ioctl(fd, PPS_FETCH as _, &mut params as *mut PpsFetchParams) };
 
         if ret < 0 {
             let errno = std::io::Error::last_os_error();

@@ -1,13 +1,31 @@
 --- /tmp/expected.txt
 +++ /tmp/actual.txt
-@@ -1,8 +1,2 @@
+@@ -1,8 +1,20 @@
 -associd=0 status=0514 leap_none, sync_local, 1 event, freq_mode,
--leap=00, stratum=11, precision=-23, rootdelay=0.000, rootdisp=7947.500,
--refid=127.127.1.0, reftime=XXX 2026-07-24THH:MM:SS.601,
+-leap=00, stratum=11, precision=-24, rootdelay=0.000, rootdisp=7947.500,
+-refid=127.127.1.0, reftime=XXX 2026-07-24THH:MM:SS.496,
 -tc=6, peer=37547, offset=0.000000, frequency=0.000000,
--sys_jitter=0.000000, clk_jitter=0.000112,
--clock=XXX 2026-07-24THH:MM:SS.591, processor="x86_64",
+-sys_jitter=0.000000, clk_jitter=0.000056,
+-clock=XXX 2026-07-24THH:MM:SS.489, processor="x86_64",
 -system="Linux/7.1.3-2-cachyos", version="ntpd ntpsec-1.2.2a",
 -clk_wander=0.000000, mintc=0
-+associd=0 status=0514 leap_none, sync_acts, 1 event
-+version="ntpd ntpsec-1.2.2a", processor="x86_64", system="Linux/7.1.3-2-cachyos", leap=00, stratum=11, precision=-23, rootdelay=0.000, rootdisp=7947.500, refid=127.127.1.0, reftime=XXX, peer=37547, tc=6, offset=0.000000, frequency=0.000000, sys_jitter=0.000000, clk_jitter=0.000112, clock=XXX, clk_wander=0.000000, mintc=0, 
++associd=0 status=0514 leap_none, sync_local, 1 reach_brd,
++version=ntpd ntpsec-1.2.2a
++processor=x86_64
++system=Linux/7.1.3-2-cachyos
++leap=00
++stratum=11
++precision=-24
++rootdelay=0.000
++rootdisp=7947.500
++refid=127.127.1.0
++reftime=XXX
++peer=37547
++tc=6
++offset=0.000000
++frequency=0.000000
++sys_jitter=0.000000
++clk_jitter=0.000056
++clock=XXX
++clk_wander=0.000000
++mintc=0

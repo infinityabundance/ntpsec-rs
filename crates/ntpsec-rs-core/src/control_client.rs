@@ -1332,7 +1332,7 @@ fn format_var_value(key: &str, val: &str) -> String {
     format!("{}={}", key, v)
 }
 
-/// Render system variables in ntpq-compatible format (multi-line, matching real C ntpq).
+/// Render system variables in ntpq-compatible format (wrapped, comma-separated, matching real C ntpq).
 pub fn format_readvar(sys: &SystemVariables) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -1341,7 +1341,6 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         sys.status,
         sys.status_description(),
     ));
-    // Render preferred system keys first, then any remaining variables from ordered_vars
     let preferred_order = [
         "version",
         "processor",
@@ -1361,20 +1360,38 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         "rootdist",
     ];
     let mut rendered = std::collections::HashSet::new();
+    // Collect all key=val pairs in preferred order, then remaining
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for key in &preferred_order {
         if let Some(val) = sys.get(key) {
-            out.push_str(&format_var_value(key, val));
-            out.push('\n');
+            pairs.push((key.to_string(), val.to_string()));
             rendered.insert(key.to_string());
         }
     }
-    // Emit remaining variables in order received
     for (key, val) in &sys.ordered_vars {
         if !rendered.contains(key) {
-            out.push_str(&format_var_value(key, val));
-            out.push('\n');
+            pairs.push((key.clone(), val.clone()));
             rendered.insert(key.clone());
         }
+    }
+    // Output wrapped at ~60 chars per line, comma-separated, trailing comma
+    let mut line = String::new();
+    for (key, val) in &pairs {
+        let kv = format_var_value(key, val);
+        // +1 for comma, +1 for space = +2
+        if line.len() + kv.len() + 2 > 60 && !line.is_empty() {
+            out.push_str(line.trim_end());
+            out.push_str(",\n");
+            line = String::new();
+        }
+        if !line.is_empty() {
+            line.push_str(", ");
+        }
+        line.push_str(&kv);
+    }
+    if !line.is_empty() {
+        out.push_str(line.trim_end());
+        out.push_str(",\n");
     }
     out
 }
@@ -2053,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn test_readvar_contains_all_vars() {
+    fn test_readvar_extra_vars() {
         // Verify that format_readvar includes variables beyond the preferred list
         let text = "version=ntpd,stratum=2,offset=0.005,leap=00,extra_var=42";
         let sv = SystemVariables::from_text(text, 0, 0x0622);
@@ -2072,21 +2089,10 @@ mod tests {
         let out = format_readvar(&sv);
         let expected = concat!(
             "associd=0 status=0322 leap_none, sync_ntp, 2 no_reply,\n",
-            "version=ntpd 4.2.8p3\n",
-            "processor=x86_64\n",
-            "system=Linux/4.19.0\n",
-            "stratum=2\n",
-            "precision=-24\n",
-            "rootdelay=0.001\n",
-            "rootdisp=0.005\n",
-            "refid=.NTP.\n",
-            "reftime=0\n",
-            "peer=0\n",
-            "tc=6\n",
-            "offset=0.002\n",
-            "frequency=0.123\n",
-            "sys_jitter=0.001\n",
-            "rootdist=0.006\n",
+            "version=ntpd 4.2.8p3, processor=x86_64, system=Linux/4.19.0,\n",
+            "stratum=2, precision=-24, rootdelay=0.001, rootdisp=0.005,\n",
+            "refid=.NTP., reftime=0, peer=0, tc=6, offset=0.002,\n",
+            "frequency=0.123, sys_jitter=0.001, rootdist=0.006,\n",
         );
         assert_eq!(out, expected, "frozen system readvar output mismatch");
     }
@@ -2106,30 +2112,27 @@ mod tests {
             "extra_var must appear in output"
         );
         assert!(out.contains("z_var=99"), "z_var must appear in output");
-        // Preferred vars (version, stratum, offset) should come before extra_var
-        let version_line = out.lines().position(|l| l.starts_with("version=")).unwrap();
-        let stratum_line = out.lines().position(|l| l.starts_with("stratum=")).unwrap();
-        let offset_line = out.lines().position(|l| l.starts_with("offset=")).unwrap();
-        let extra_line = out
-            .lines()
-            .position(|l| l.starts_with("extra_var="))
-            .unwrap();
-        let z_line = out.lines().position(|l| l.starts_with("z_var=")).unwrap();
+        // Preferred vars (version, stratum, offset) should appear before extra_var
+        let version_pos = out.find("version=").unwrap();
+        let stratum_pos = out.find("stratum=").unwrap();
+        let offset_pos = out.find("offset=").unwrap();
+        let extra_pos = out.find("extra_var=").unwrap();
+        let z_pos = out.find("z_var=").unwrap();
         assert!(
-            version_line < extra_line,
+            version_pos < extra_pos,
             "preferred var 'version' should appear before extra_var"
         );
         assert!(
-            stratum_line < extra_line,
+            stratum_pos < extra_pos,
             "preferred var 'stratum' should appear before extra_var"
         );
         assert!(
-            offset_line < extra_line,
+            offset_pos < extra_pos,
             "preferred var 'offset' should appear before extra_var"
         );
         // Both extra vars appear after preferred ones
         assert!(
-            extra_line < z_line,
+            extra_pos < z_pos,
             "extra_var should appear before z_var (input order preserved)"
         );
     }
