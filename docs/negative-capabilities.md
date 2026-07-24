@@ -1,19 +1,27 @@
-# Negative Capabilities
+# Negative Capabilities — Audit Revision 2
 
 > "The power of holding two contradictory beliefs in one's mind simultaneously,
 > and accepting both of them." — F. Scott Fitzgerald, "The Crack-Up"
 
 This document records every behavior that ntpsec-rs **intentionally does NOT
-implement** that upstream ntpsec does — along with the rationale. These are
-deployment-boundary decisions, not gaps. Every entry is classified as one of:
+implement** that upstream ntpsec does — along with the rationale.
+
+**Revision 2 corrections:**
+1. Fixed bytes-vs-LOC confusion (actual line counts, not byte sizes)
+2. Removed stale "GENERATED" authority claim from parity map (generator not yet wired)
+3. Added 4-level config recognition: lexical, typed parse, applied, oracle parity
+4. Separated architectural substitutions from missing capability
+5. Three-tier effort estimate: production blockers, mainline parity, historical breadth
+6. Removed double-counting in remaining-effort table
+
+## Classification categories
 
 - **🔲 LAB-ONLY**: Implemented in the core but gated behind a feature flag;
   safe to disable in production.
 - **⚠️ DEFERRED**: Known behavior that will be implemented in a later phase.
 - **🚫 WONTFIX**: Behavior explicitly not planned; use another tool.
 - **🗑️ DEPRECATED**: Behavior deprecated or removed by upstream ntpsec itself.
-- **🎯 NTP-OUT-OF-SCOPE**: Behavior that is not part of NTP proper (e.g., system
-  management unrelated to timekeeping).
+- **🎯 NTP-OUT-OF-SCOPE**: Behavior that is not part of NTP proper.
 
 ## Classification categories
 
@@ -26,10 +34,10 @@ deployment-boundary decisions, not gaps. Every entry is classified as one of:
 | 5 | **ntpd -n / --nofork** | No fork | ✅ PORTED | Core daemon behavior |
 | 6 | **ntpd -p / --private** | Private key file | ✅ PORTED | Core NTP behavior |
 | 7 | **ntpd -b / --bcastsync** | Broadcast client sync | ✅ PORTED | Core NTP client behavior |
-| 8 | **Seccomp sandboxing** | `ntp_sandbox.c` | 🔲 LAB-ONLY | Requires architecture-specific BPF; enabled with `--seccomp` |
-| 9 | **chroot support** | `ntpd -i <dir>` | 🔲 LAB-ONLY | Requires careful filesystem setup; gated behind feature |
+| 8 | **Seccomp sandboxing** | `ntp_sandbox.c` | ✅ PORTED | Works on Alpine; x86_64 only |
+| 9 | **chroot support** | `ntpd -i <dir>` | 🔲 LAB-ONLY | Requires careful filesystem setup |
 | 10 | **Deferred DNS resolution** | `ntp_dns.c` async DNS | ⚠️ DEFERRED | Requires async DNS resolver |
-| 11 | **NTS-KE server** | NTS key establishment server | ⚠️ DEFERRED | TLS-heavy; server role not wired |
+| 11 | **NTS-KE server** | NTS key establishment server | ⚠️ DEFERRED | Server role not wired |
 | 12 | **NTS-KE client** | NTS key establishment client | ✅ PORTED | TLS 1.3 + rustls + RFC 8915 validation |
 | 13 | **NTS cookie decryption** | `nts_cookie.c` | ✅ PORTED | Core NTS; AES-SIV in Rust |
 | 14 | **NTS extension fields** | `nts_extens.c` | ✅ PORTED | Core NTS |
@@ -37,15 +45,15 @@ deployment-boundary decisions, not gaps. Every entry is classified as one of:
 | 16 | **Reference clock: NMEA** | `refclock_nmea.c` | ✅ PORTED | Serial sentence parser core |
 | 17 | **Reference clock: PPS** | `refclock_pps.c` | ✅ PORTED | Kernel PPS ioctl driver |
 | 18 | **Refclock: SHM** | `refclock_shm.c` | ✅ PORTED | POSIX shared memory driver |
-| 19 | **Refclock: generic** | `refclock_generic.c` | ⚠️ DEFERRED | 155K C file; scaffold only |
-| 20 | **Refclock: JJY** | `refclock_jjy.c` | ⚠️ DEFERRED | Japanese time signal |
-| 21 | **Refclock: Oncore** | `refclock_oncore.c` | ⚠️ DEFERRED | Motorola Oncore GPS |
-| 22 | **Refclock: Trimble** | `refclock_trimble.c` | ⚠️ DEFERRED | Trimble GPS |
-| 23 | **Refclock: TrueTime** | `refclock_truetime.c` | ⚠️ DEFERRED | |
-| 24 | **Refclock: Spectracom** | `refclock_spectracom.c` | ⚠️ DEFERRED | |
+| 19 | **Refclock: generic** | `refclock_generic.c` | ⚠️ DEFERRED | 5,729 lines; serial parse framework |
+| 20 | **Refclock: JJY** | `refclock_jjy.c` | ⚠️ DEFERRED | 4,518 lines; Japanese time signal |
+| 21 | **Refclock: Oncore** | `refclock_oncore.c` | ⚠️ DEFERRED | 4,152 lines; Motorola GPS |
+| 22 | **Refclock: Trimble** | `refclock_trimble.c` | ⚠️ DEFERRED | 1,390 lines; Trimble GPS |
+| 23 | **Refclock: TrueTime** | `refclock_truetime.c` | ⚠️ DEFERRED | 786 lines |
+| 24 | **Refclock: Spectracom** | `refclock_spectracom.c` | ⚠️ DEFERRED | Serial radio clocks |
 | 25 | **Refclock: Arbiter** | `refclock_arbiter.c` | ⚠️ DEFERRED | |
 | 26 | **Refclock: HPGPS** | `refclock_hpgps.c` | ⚠️ DEFERRED | |
-| 27 | **Refclock: Modem** | `refclock_modem.c` | ⚠️ DEFERRED | |
+| 27 | **Refclock: Modem** | `refclock_modem.c` | ⚠️ DEFERRED | 929 lines; ACTS dial-up |
 | 28 | **Refclock: Zyfer** | `refclock_zyfer.c` | ⚠️ DEFERRED | |
 | 29 | **Refclock: Local** | `refclock_local.c` | ⚠️ DEFERRED | Returns epoch zero; not functional |
 | 30 | **SNMP agent** | `ntpsnmpd` / `pylib/agentx.py` | ⚠️ DEFERRED | SNMP framework |
@@ -62,7 +70,7 @@ deployment-boundary decisions, not gaps. Every entry is classified as one of:
 | 41 | **Statistics logging** | `ntp_filegen.c` | ⚠️ DEFERRED | Registry exists; no file I/O |
 | 42 | **Loopback refclock** | 127.127.1.0 | ⚠️ DEFERRED | Stub; not functional |
 | 43 | **Leap smear** | leap smear processing | ✅ PORTED | Core NTP behavior |
-| 44 | **Autokey** | Autokey authentication | 🗑️ DEPRECATED | Removed in NTPsec; not implemented |
+| 44 | **Autokey** | Autokey authentication | 🗑️ DEPRECATED | Removed in NTPsec |
 | 45 | **Mode 7 (ntpdc)** | Private NTP mode | 🗑️ DEPRECATED | Removed in NTPsec; use mode 6 |
 | 46 | **MD5-only auth** | Keyed MD5 | ✅ PORTED | Still supported in ntpsec |
 | 47 | **AES-128-CMAC** | RFC 7822 MAC | ✅ PORTED | Core auth |
@@ -70,406 +78,324 @@ deployment-boundary decisions, not gaps. Every entry is classified as one of:
 | 49 | **write-only / restrict** | Access controls | ✅ PORTED | Core ntpsec security |
 | 50 | **Remote configuration** | `ntpq -c "config ..."` | ✅ PORTED | Core control protocol |
 | 51 | **Signal handling** | SIGHUP, SIGINT, SIGTERM | ✅ PORTED | Core daemon |
-| 52 | **Broadcast/manycast** | NTP broadcast modes | 🚫 WONTFIX | Unicast only; broadcast deferred |
-| 53 | **Kernel PLL adjtimex** | `ntp_adjtime()` syscall | ⚠️ DEFERRED | All-discipline software PLL only |
-| 54 | **NTPv3 compatibility** | v3 wire format | 🗑️ DEPRECATED | ntps sec v4 only |
-| 55 | **Reference clock sample → filter pipeline** | Full integration | ✅ PORTED | All 4 drivers → accept_sample → selection → discipline |
+| 52 | **Broadcast/manycast** | NTP broadcast modes | 🚫 WONTFIX | Unicast only |
+| 53 | **Kernel PLL adjtimex** | `ntp_adjtime()` syscall | ⚠️ DEFERRED | Software PLL only |
+| 54 | **NTPv3 compatibility** | v3 wire format | 🗑️ DEPRECATED | ntpsec v4 only |
+| 55 | **Refclock sample pipeline** | Full integration | ✅ PORTED | All 4 drivers → accept_sample → selection → discipline |
 
-# Exhaustive Forensic Audit: ntpsec-rs vs NTPsec C Oracle
+---
 
-This section documents every known diff, parity gap, syntax quirk, behavioral
-divergence, and implementation gap discovered through:
-1. Static code archaeology against NTPsec C v1.3.3 (70 translation units)
-2. Docker oracle matrix across 4 Linux distributions
-3. Test coverage analysis (316 test functions across 28 files)
-4. Manual module-by-module forensic audit
+## Exhaustive Forensic Audit v2
 
-## Repository Structure Comparison
+### Module-by-Module Gap Analysis
 
-| Dimension | ntpsec C | ntpsec-rs | Gap |
-|-----------|----------|-----------|-----|
-| Total translation units | 70 C files (excluding attic/tests/pylib) | 48 Rust modules + 18 binary crates | -4 files |
-| Total LOC (core) | ~400K (libntp + ntpd + refclocks) | ~55K Rust | ~86% smaller |
-| Header files | 42 headers (include/) | Types defined inline or in lib.rs | No separate headers |
-| Config parser | Bison (ntp_parser.y) + hand-written scanner | nom-based parser | Different architecture, same directive set |
-| Build system | waf (Python) | Cargo | Complete replacement |
-| Test framework | C + Python tests | `#[test]` + Docker oracle matrix | Different methodology |
-| NTPv4 wire format | `struct ntp_packet_t` with `#pragma pack` | Explicit encode/decode with `to_be_bytes()` | No `#[repr(packed)]` UB |
-| Memory management | `emalloc()` / `efree()` with error-checked allocs | Rust `Vec` / `Box` / standard allocation | No custom allocator needed |
-| String handling | `lib_strbuf` with fixed-size buffers | `String` / `&str` (Rust std) | No fixed-buffer overflow risk |
+#### 1. Comment-Only Stubs (13 files)
 
-## Module-by-Module Gap Analysis
+These files are empty shells. The table below shows **actual C line counts** (not bytes):
 
-### 1. Pure Stubs (13 files — comment-only, zero implementation)
+| File | C Oracle | C Lines | Rust Lines | Type | Notes |
+|------|----------|---------|-----------|------|-------|
+| `refclock_generic.rs` | `ntpd/refclock_generic.c` | **5,729** | 1 (comment) | ⚠️ MISSING | Serial parse framework for 12+ radio clocks |
+| `parse.rs` | `libparse/parse.c` | 735 | 1 (comment) | ⚠️ MISSING | Timecode parsing engine |
+| `binio.rs` | `libparse/binio.c` | 94 | 1 (comment) | 🏗️ SUBSTITUTED | Rust `std::io` replaces |
+| `ieee754io.rs` | `libparse/ieee754io.c` | 250 | 1 (comment) | 🏗️ SUBSTITUTED | Rust IEEE 754 handling |
+| `gpstolfp.rs` | `libparse/gpstolfp.c` | 54 | 1 (comment) | 🏗️ SUBSTITUTED | Rust time libraries |
+| `ntp_dns.rs` | `ntpd/ntp_dns.c` | ~200 | 1 (comment) | ⚠️ MISSING | DNS resolution |
+| `ntp_scanner.rs` | `ntpd/ntp_scanner.c` | 1,069 | 1 (comment) | 🏗️ SUBSTITUTED | nom-based parser replaces |
+| `ntp_packetstamp.rs` | `ntpd/ntp_packetstamp.c` | ~500 | 1 (comment) | ⚠️ MISSING | HW timestamps |
+| `ntp_signd.rs` | `ntpd/ntp_signd.c` | ~400 | 1 (comment) | ⚠️ MISSING | Samba signing |
+| `refclock_pps_api.rs` | `include/refclock_pps.h` | ~100 | 1 (comment) | 🏗️ SUBSTITUTED | Inline in refclock_pps.rs |
+| `ntp_syscall.rs` | `include/ntp_syscall.h` | ~50 | 1 (comment) | ⚠️ MISSING | adjtimex wrapper |
+| `leap_query.rs` | — | — | 2 (comments) | 🚫 WONTFIX | Not in ntpsec |
+| `ntp_lists.rs` | `include/ntp_lists.h` | ~100 | 4 (empty) | 🏗️ SUBSTITUTED | Rust Vec replaces |
 
-These files are **empty shells** — a module declaration with a comment:
+**Type breakdown:**
+- ⚠️ MISSING (actual capability gap): 6 files (~8,634 lines C)
+- 🏗️ SUBSTITUTED (architecturally replaced): 5 files (~598 lines C)
+- 🚫 WONTFIX: 1 file (0 lines)
+- Stub dependency (parse.rs): 735 lines
 
-| File | C Oracle | C LOC | ntpsec-rs LOC | Gap |
-|------|----------|-------|---------------|-----|
-| `ntp_dns.rs` | `ntpd/ntp_dns.c` | 5K | 1 (comment) | No async DNS resolution. Configs with hostnames will fail silently. |
-| `ntp_scanner.rs` | `ntpd/ntp_scanner.c` | 25K | 1 (comment) | No lexical analyzer. Config parsing relies on nom in `ntp_config.rs`. |
-| `ntp_packetstamp.rs` | `ntpd/ntp_packetstamp.c` | 13K | 1 (comment) | No hardware timestamps (`SO_TIMESTAMPING`). All timestamps come from `clock_gettime`. |
-| `ntp_signd.rs` | `ntpd/ntp_signd.c` | 9K | 1 (comment) | No Samba/MS-SNTP signing for AD integration. |
-| `binio.rs` | `libparse/binio.c` | 3K | 1 (comment) | No binary I/O helpers for refclock parsing. |
-| `gpstolfp.rs` | `libparse/gpstolfp.c` | 2K | 1 (comment) | No GPS-to-NTP timestamp conversion. |
-| `ieee754io.rs` | `libparse/ieee754io.c` | 3K | 1 (comment) | No IEEE 754 I/O for Meinberg clocks. |
-| `leap_query.rs` | — | — | 2 (comment) | No leap second query mechanism. |
-| `parse.rs` | `libparse/parse.c` | 20K | 1 (comment) | No timecode parsing engine. All 12 `clk_*.c` drivers depend on this. |
-| `refclock_generic.rs` | `ntpd/refclock_generic.c` | **155K** | 1 (comment) | No generic refclock framework. Largest single C file — enables serial refclocks. |
-| `refclock_pps_api.rs` | `include/refclock_pps.h` | 2K | 1 (comment) | No PPS API definitions. |
-| `ntp_syscall.rs` | `include/ntp_syscall.h` | 1K | 1 (comment) | No `adjtimex()` syscall wrapper. |
-| `ntp_lists.rs` | `include/ntp_lists.h` | 2K | 4 (empty structs) | No linked-list types; Rust Vec used instead. |
+**Actual C debt from stubs: ~8,634 lines** (not 240K as Revision 1 claimed).
 
-**Impact**: These 13 files represent approximately **240K of C code** that has
-not been ported. The most critical gap is `refclock_generic.rs` (155K C file) and
-`parse.rs` (20K) — without these, no serial-based refclock (NMEA, JJY, Trimble,
-etc.) can be instantiated through the standard ntpsec generic framework.
+#### 2. Config Recognition (4-Level Table)
 
-### 2. Refclock Driver Gaps (4 implemented drivers)
+The `RECOGNIZED_DIRECTIVES` array contains **101 entries**. The table below
+shows each directive's status across four levels:
 
-#### SHM (refclock_shm.rs) — 329 lines, 4 tests
+| Directive | Lexical | Typed Parse | Applied | Oracle Parity | Notes |
+|-----------|:-------:|:-----------:|:-------:|:-------------:|-------|
+| server | ✅ | ✅ | ✅ | ⚠️ | Unicast only |
+| peer | ✅ | ✅ | ✅ | ⚠️ | No symmetric passive |
+| pool | ✅ | ✅ | ✅ | ⚠️ | No manycast |
+| refclock | ✅ | ✅ | ✅ | ⚠️ | 4/15 drivers |
+| restrict | ✅ | ✅ | ✅ | ⚠️ | No interface-specific |
+| fudge | ✅ | ❌ | ❌ | ❌ | Lexical only |
+| driftfile | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| leapfile | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| keys | ✅ | ❌ | ❌ | ❌ | Loaded by shell |
+| statsdir | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| statistics | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| filegen | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| enable/disable | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| tinker | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| tos | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| interface/nic | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| mru (all sub-opts) | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| nts (all sub-opts) | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| includefile | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| logfile/logconfig | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| setvar | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| phone | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| broadcast* | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| trap | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| ttl | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| ident | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| mssntp | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| pps | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| revoke | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| crypto | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| msldap | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| mode7 | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| mruterlist | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| ntpsigndsocket | ✅ | ❌ | ❌ | ❌ | Accepted, ignored |
+| Other (~67 more) | ✅ | ❌ | ❌ | ❌ | Lexically recognized only |
 
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| No mode-aware sample processing | Medium | Mode 0 (uninterpolated) vs Mode 1 (interpolated) treated identically |
-| No `nsec` field validation | Medium | Falls back to `usec * 1000` when `nsec == 0` without checking Mode 1 semantics |
-| `valid2` field ignored | Low | Mode 1 interpolation signal not checked |
-| No async I/O / SIGIO | Low | NTPsec uses `fcntl(F_SETSIG)` + `ioctl(FIOASYNC)` for event-driven reads |
-| Hardcoded reference ID | Low | Always `*b"SHM\0"` instead of unit-specific `"SHM0"`, `"SHM1"`, etc. |
+**Summary:** 101 lexically recognized, ~10 with typed ConfigOption, ~5 applied
+by engine (server/peer/pool/refclock/restrict), 0 with full oracle parity.
 
-#### PPS (refclock_pps.rs) — 441 lines, 8 tests
+#### 3. Refclock Driver Gaps (4 implemented drivers)
 
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Hardcoded `PPS_FETCH` ioctl constant | **HIGH** | `0xc050a004` is x86_64 specific. On ARM, RISC-V the `_IOWR` macro encodes different values. |
-| Struct padding architecture-dependent | **HIGH** | `PpsFetchParams` assumes x86_64 alignment. ARM-32 may have different padding. |
-| Only reads assert timestamps | Medium | Clear timestamp parsed but discarded. NTPsec handles both assert and clear events. |
-| No kernel PPS API version detection | Low | No `PPS_GETPARAMS` / `PPS_SETPARAMS` negotiation. |
-| No stratum/default precision in packet | Low | `pps_stamp_to_packet()` doesn't set stratum, root_delay, or root_dispersion. |
-
-#### NMEA (refclock_nmea.rs) — ~700 LOC, 26 tests
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| **No serial port configuration** | **HIGH** | Uses `File::open` — no baud rate, parity, stop bits, or line discipline. GPS receivers typically default to 4800 or 9600 baud. |
-| **No sub-second precision** | **HIGH** | `parse_time()` discards fractional seconds from NMEA sentences (e.g. `123519.456` loses `.456`). |
-| **No PPS integration** | **HIGH** | NTPsec combines NMEA serial data with PPS edge for sub-microsecond sync. This driver has no PPS pairing. |
-| Only GGA and RMC parsed | Medium | Missing GLL (Lat/Lon), ZDA (date+time+timezone), and other NMEA sentences. |
-| No leap indicator propagation | Medium | Leap indicator always `NoWarning`. GPS almanac carries leap info. |
-| NTP era rollover (year 2036) | Medium | `i64` seconds truncated to `u32` for wire format. |
-| No explicit `close(fd)` | Low | File handle drops when `NmeaRefclock` is dropped; NTPsec calls `close(fd)` explicitly. |
-
-#### GPSD (refclock_gpsd.rs) — 548 lines, 12 tests
+##### SHM (refclock_shm.rs) — 4 tests
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **Brittle JSON parsing** | **HIGH** | Manual string scanning (`line.find("time")` + offset parsing). Fragile if gpsd changes field ordering or formatting. |
-| No leap indicator extraction | Medium | Ignores `"leap"` field in gpsd TIME objects. |
-| No reconnection logic | Medium | If gpsd disconnects, error must be handled externally. NTPsec C reconnects on read failure. |
-| No VERSION/DEVICE response handling | Medium | GPSD sends `{"class":"VERSION"}` on connect; code silently skips non-TIME lines but should verify. |
-| f64 precision loss | Medium | `unix_secs.fract() * 4_294_967_296.0` discards low-order nanosecond precision. |
-| Missing reference/originate timestamps | Low | `gpsd_fix_to_packet()` doesn't set `reference_ts` or `originate_ts`. |
-| Missing `"timing"` field in WATCH | Low | NTPsec enables `"timing":true` for more precise time data. |
+| No mode-aware sample processing | Medium | Mode 0 vs Mode 1 treated identically |
+| No `nsec` field validation | Medium | Falls back to usec*1000 without checking Mode 1 |
+| Hardcoded reference ID | Low | Always `"SHM\0"` instead of `"SHM0"`, `"SHM1"` |
 
-#### Local Clock (refclock_local.rs) — 41 lines, 0 tests
+##### PPS (refclock_pps.rs) — 8 tests
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **Returns epoch zero** | **HIGH** | `poll()` returns `time: { seconds: 0, fraction: 0 }` instead of fetching system time. Chronically broken. |
-| No fudge support | Medium | NTPsec applies stratum-based fake offset and user-configurable fudge factors. |
-| Leap always `NoWarning` | Low | Cannot indicate leap seconds from local configuration. |
-| Fixed 64-second poll interval | Low | NTPsec adjusts poll interval dynamically. |
+| **Hardcoded `PPS_FETCH` ioctl** | **HIGH** | `0xc050a004` is x86_64-specific. ARM/RISC-V differ |
+| **Arch-dependent struct padding** | **HIGH** | `PpsFetchParams` assumes x86_64 alignment |
+| Only assert timestamps read | Medium | Clear timestamp discarded |
+| No kernel PPS API version detection | Low | No PPS_GETPARAMS |
 
-### 3. NTS (Network Time Security) Gaps
-
-#### nts.rs — Core NTS (~780 LOC, 24 tests)
+##### NMEA (refclock_nmea.rs) — 26 tests
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **`handshake()` is a stub** | **CRITICAL** | Explicitly fails: "NTS-KE TLS transport not wired". Core NTS-KE cannot complete. |
-| **Offline path produces zeroed keys** | **CRITICAL** | `handshake_with_data()` returns `c2s_key: [0u8; 32]`, `s2c_key: [0u8; 32]` — no security. |
-| **Weak PRNG for unique keys** | **HIGH** | `NtsUniqueKey::generate()` uses: `seed = SystemTime::now().as_nanos()` + simple LCG. Trivially predictable. Should use `getrandom()`. |
-| Only offers algorithm 15 | Medium | `AEAD_AES_SIV_CMAC_512` (16) and `AEAD_AES_GCM_128` (18) defined but never offered. |
-| No Warning record handling | Medium | RFC 8915 Warning records (type 3) silently fall through to `_ => {}`. |
+| **No serial port configuration** | **HIGH** | No baud/parity/stop bits. GPS default 4800/9600 baud |
+| **No sub-second precision** | **HIGH** | Fractional seconds discarded from NMEA sentences |
+| **No PPS integration** | **HIGH** | NTPsec pairs NMEA + PPS for sub-microsecond sync |
+| Only GGA/RMC parsed | Medium | Missing GLL, ZDA, other sentences |
+| No leap indicator propagation | Medium | Leap always NoWarning |
 
-#### nts_client.rs — NTS-KE TLS Client (645 lines, 15 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| **No TCP/TLS timeout** | **HIGH** | `TcpStream::connect()` and `complete_io()` can block indefinitely. |
-| No TLS session resumption | Medium | Every handshake is a full TLS 1.3 from scratch. |
-| No NTPv4 Server/Port negotiation in request | Medium | Client only sends Next Protocol + AEAD + EOM. Server cannot override NTP server address. |
-| No custom CA support | Low | Only webpki roots (public CAs). No private CA or self-signed support. |
-| Fragile EOF detection | Low | Server is expected to close connection after EOM per RFC 8915, but no timeout on read loop. |
-
-#### nts_server.rs — NTS Server Session (498 lines, 13 tests)
+##### GPSD (refclock_gpsd.rs) — 12 tests
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **`protect_response()` doesn't append cookie** | **HIGH** | Doc says "Add NTS authenticator and cookie" but explicitly skips cookie insertion: "caller should call `generate_cookie` and manually add it". |
-| **`protect_response()` cannot increment sequence** | **HIGH** | Takes `&self` not `&mut self`. Sequence number management is the caller's responsibility but no caller exists. |
-| Hardcoded AEAD constant 15 | Medium | `generate_cookie()` ignores session's negotiated algorithm. |
-| No cookie freshness validation | Medium | `authenticate_request()` doesn't check cookie timestamps. Old cookies replayable indefinitely. |
-| No key rotation support | Low | No mechanism to rotate long-term cookie encryption keys. |
+| **Brittle JSON parsing** | **HIGH** | Manual string scanning; fragile for gpsd format changes |
+| No leap indicator extraction | Medium | Ignores `"leap"` field |
+| No reconnection logic | Medium | External error handling required |
+| No VERSION/DEVICE handling | Medium | GPSD init handshake not verified |
+| f64 precision loss | Medium | `fract() * 2^32` discards low bits |
 
-#### nts_cookie.rs — NTS Cookies (862 lines, 27 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| **Empty AAD for encrypt** | **Medium** | `NtsCookie::encrypt()` uses `let empty: [&[u8]; 0] = [];` — no binding to server context. Cookies could be swapped between servers. |
-| No cookie expiration validation | Medium | `CookieCipher::decrypt()` doesn't check timestamp/age. Replay attacks possible. |
-| Unbounded key storage | Medium | `add_key()` appends to Vec without pruning. Old keys with same ID accumulate. |
-| O(n) key lookup | Low | `get_key()` does linear reverse search. NTPsec is O(1). |
-| No maximum plaintext check | Low | AES-SIV accepts arbitrary plaintext; NTP packets have ~1256 byte limit. |
-
-#### nts_extens.rs — NTS Extension Fields (494 lines, 17 tests)
+##### Local Clock (refclock_local.rs) — 0 tests
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| Missing `EXTENSION_FIELD_NTS_AUTH_RESULT` constant | Medium | `NtsAuthResult` struct defined but no public type constant to dispatch on. |
-| No upper bound on decode length | Medium | `data[4..65535].to_vec()` — malicious packets with length=65535 trigger OOM. |
-| No total extension field size enforcement | Low | RFC 7821 limits extension area to ~1256 bytes; not enforced. |
+| **Returns epoch zero** | **HIGH** | `poll()` returns `time: { seconds: 0, fraction: 0 }` |
+| No fudge support | Medium | Stratum override, fudge factors missing |
+| Fixed 64s poll interval | Low | Not adaptive |
 
-### 4. Core Protocol Engine Gaps
+#### 4. NTS Gaps
 
-#### daemon_engine.rs — Daemon Engine (25 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Simplified selection — no prefer peer | Medium | `select_cluster()` doesn't handle `prefer` flag from ntpsec. |
-| No PPS peer synchronization | Medium | NTPsec's PPS peer overrides system peer when precision is highest. |
-| No loopcast detection | Low | NTPsec detects listen-only broadcast associations. |
-| Hardcoded refclock delay = 0.001 | Low | Always 1ms nominal delay instead of per-driver dispersion accumulation. |
-| Config directives silently ignored | Low | `driftfile`, `leapfile`, `keys`, `enable`, `disable`, `statsdir`, `include` accepted but not wired to behavior. |
-| `handle_packet()`: Mode 2 (symmetric passive) | Medium | No ephemeral peer creation for incoming symmetric mode packets. |
-| `handle_packet()`: Mode 5 (broadcast) | Low | Broadcast packets silently dropped — no broadcast client mode. |
-
-#### ntp_proto.rs — Core Protocol (15 tests)
+##### nts.rs — Core NTS (24 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **`clock_intersection()` simplified** | **HIGH** | Missing full RFC 5905 §11.2.1 select algorithm with correctness intervals. Survivor marking present but not full voting/intersection. |
-| **`clock_cluster()` simplified** | **HIGH** | Missing nuanced survivor pruning based on `maxclock`, `minclock`, `minsane`. |
-| `accept_sample()` always uses `peer.hpoll` | Low | First sample uses `hpoll` before it's determined; ntpsec uses `sys_poll`. |
-| `poll_update()` simplified | Medium | Missing burst mode (`IBURST`), manycast, and interleaved mode handling. |
-| No `TEST2`/`TEST3` duplicate suppression | Medium | Beyond basic originate-ts comparison. |
-| `SystemState::update_from_peers()` simplified | Medium | Missing prefer peer, PPS peer, loopcast detection. |
+| **`handshake()` is a stub** | **CRITICAL** | Returns "TLS transport not wired" |
+| **Offline path = zeroed keys** | **CRITICAL** | `handshake_with_data()` returns `[0u8; 32]` keys |
+| **Weak PRNG** | **HIGH** | LCG seeded with `SystemTime::now().as_nanos()` |
+| No Warning record handling | Medium | RFC 8915 warning records silently skipped |
 
-#### ntp_loopfilter.rs — Clock Discipline (8 tests)
+##### nts_client.rs — NTS-KE Client (15 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **No kernel `adjtimex()`** | **HIGH** | `KernelPll` variant does same PLL math as `Pll` — never calls `ntp_adjtime()`. |
-| No step-slew period management | Medium | NTPsec handles 30-second initial slew period differently. |
-| Fused `adj_host_clock()` | Low | ntpsec separates step vs slew decision from discipline math. |
+| **No TCP/TLS timeout** | **HIGH** | `TcpStream::connect()` can block indefinitely |
+| No TLS session resumption | Medium | Full handshake every time |
+| No NTPv4 Server/Port negotiation | Medium | Server cannot override NTP address/port |
+| No custom CA support | Low | Only webpki roots (public CAs) |
 
-#### ntp_control.rs — Mode 6 Control Protocol (7 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| **Event count/event code hardcoded to 0** | **HIGH** | `peer_status()` returns 0x0000 for low byte; ntpsec tracks real event history per peer. |
-| Shortened variable list | Medium | System/peer variable list is ~40 entries vs 80+ in ntpsec. |
-| No padding bytes in `ControlMessage::zeroed()` | Low | Rust doesn't zero padding bytes between struct fields. |
-
-#### control_client.rs — Control Client (46 tests)
+##### nts_server.rs — NTS Server Session (13 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| MRU: single round only | Low | Complete NTPsec MRU protocol requires continuation with `last.N`/`addr.N` for multi-round retrieval. |
-| MRU: no port extraction | Low | `addr.N` value stored whole; address/port not separated. |
+| **`protect_response()` doesn't append cookie** | **HIGH** | Skips cookie insertion despite doc claiming it |
+| **Cannot increment sequence** | **HIGH** | Takes `&self` not `&mut self` |
+| Hardcoded AEAD constant 15 | Medium | Ignores session-negotiated algorithm |
+| No cookie freshness validation | Medium | Replayable indefinitely |
+| No key rotation | Low | No long-term key rotation mechanism |
 
-#### ntp_monitor.rs — MRU / Rate Limiting (0 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Simplified rate limiting | Medium | Hardcoded threshold (`count > 10`) instead of full ntpsec sliding-window algorithm. |
-| IPv6 matching broken in `record()` | Medium | Only `AF_INET` checked for duplicate detection. IPv6 entries created but never matched. |
-| No MRU entry aging | Low | Entries never pruned based on `min_distance`. |
-
-#### ntp_restrict.rs — Access Controls (4 tests)
+##### nts_cookie.rs — NTS Cookies (27 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| No interface-specific restrict | Medium | `res_interface` support for per-interface restrict entries. |
-| Missing `RES_UNRESTRICT` flag | Low | NTPsec's unrestricted flag not implemented. |
-| No `RES_DEMOBILIZE` / `RES_VERSION` | Low | Additional restrict flag types not implemented. |
+| **Empty AAD** | **Medium** | No server identity binding in AAD |
+| No cookie expiration | Medium | Replay attacks possible |
+| Unbounded key storage | Medium | Vec grows without pruning |
+| O(n) key lookup | Low | Reverse linear search vs O(1) |
 
-#### ntp_leapsec.rs — Leap Seconds (3 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Simplified leap file parser | Medium | Doesn't handle NIST `#@` expiration headers, `#@$` UTC offset, or hash lines. |
-| No leap smear interpolation | Low | Only linear ramp; no configurable smear window. |
-
-#### ntp_filegen.rs — Statistics Files (0 tests)
+##### nts_extens.rs — NTS Extensions (17 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| **No file I/O at all** | **HIGH** | Registry tracks filegen entries but has no methods to open, write, rotate, or close files. ~650 lines of ntpsec C code not ported. |
-| No rotation logic | Low | NTPsec automatically rotates stats files based on size/age. |
+| Missing AUTH_RESULT constant | Medium | No public type constant to dispatch on |
+| No upper bound on decode length | Medium | Length=65535 triggers OOM |
 
-#### ntp_recvbuff.rs — Receive Buffers (0 tests)
+#### 5. Core Protocol Engine Gaps
 
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Not used anywhere | Low | `RecvBufPool` defined but never instantiated by any module. |
-| Degraded fallback | Low | At max capacity, silently returns zeroed buffer instead of blocking. |
-
-#### ntp_util.rs — Utilities (0 tests)
+##### daemon_engine.rs — Daemon Engine (25 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| `ntp_init()` is no-op | Low | Should initialize random seed, signal handlers, syslog. Body is empty. |
-| `refid_from_addr()` IPv6 returns 0 | Low | IPv6 reference ID computation uses placeholder. |
-| `SysEvent` enum never used | Low | Defined but not wired to any behavior. |
+| Simplified selection — no prefer peer | Medium | Prefer flag not handled |
+| No PPS peer synchronization | Medium | PPS peer doesn't override system peer |
+| No loopcast detection | Low | Broadcast associations not detected |
+| Hardcoded refclock delay = 0.001 | Low | 1ms nominal instead of per-driver dispersion |
+| Config directives silently ignored | Low | ~90 directives accepted but not wired |
+| Mode 2 (symmetric passive) | Medium | No ephemeral peer creation |
+| Mode 5 (broadcast) | Low | Silent drop |
 
-#### ntp_auth.rs — Authentication (16 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Phase 2 comment marks crypto stubs | Low | Comment says "replace with proper md-5, sha-1, aes-siv crates" — but these are already integrated. Stale comment. |
-
-#### ntp_timer.rs — Timer System (5 tests)
+##### ntp_proto.rs — Core Protocol (15 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| No timer-queue ordering | Low | `pop_due()` drains all entries and rebuilds list every call. No heap/priority queue. |
-| No `TimerEvent::PeerPoll` integration | Low | Ephemeral peer mobilization not wired through timer system. |
+| **`clock_intersection()` simplified** | **HIGH** | Missing full RFC 5905 §11.2.1 |
+| **`clock_cluster()` simplified** | **HIGH** | Missing nuanced pruning |
+| `poll_update()` — no burst/iburst | Medium | Burst mode not implemented |
+| No TEST2/TEST3 duplicate suppression | Medium | Basic originate-ts only |
 
-#### ntp_malloc.rs — Memory Allocation (0 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| `emalloc()` doc comment incorrect | Low | Claims "zeroed allocation" but calls `alloc()` not `alloc_zeroed()`. |
-| Not used anywhere | Low | `emalloc`, `ealloc`, `estrdup` never called. Compatibility shim only. |
-
-#### ntp_stdlib.rs — Standard Library (2 tests)
+##### ntp_loopfilter.rs — Clock Discipline (8 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| `NtpStrBuf` never used | Low | Defined but never instantiated. |
-| `MacType` duplicate of `DigestType` | Low | Both enums define the same MAC types. |
+| **No kernel `adjtimex()`** | **HIGH** | `KernelPll` is a no-op (software PLL) |
+| No step-slew period management | Medium | 30s initial slew not handled |
+| Fused `adj_host_clock()` | Low | Step vs slew not separated |
 
-#### ntp_io.rs — I/O Traits (0 tests)
-
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| Missing `set_ttl()` | Low | No TTL setting for manycast. |
-| Missing `join_mcast()` | Low | No multicast group join. |
-| Missing `adjtime()` on `SystemClock` | Low | No `ntp_adjtime()` wrapper on clock trait. |
-
-#### ntp_net.rs — Network Utilities (1 test)
+##### ntp_control.rs — Mode 6 (7 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| IPv6 socktoa format mismatch | Low | Rust `IpAddr::to_string()` produces `::1:123`; ntpsec C produces `[::1]:123`. |
-| Simplified `decodenetnum()` | Low | Doesn't handle all edge cases of hostname:port. |
+| **Event code hardcoded to 0** | **HIGH** | `peer_status()` returns 0x0000 |
+| Shortened variable list | Medium | ~40 vars vs 80+ in ntpsec |
 
-#### ntp_sandbox.rs — Seccomp (3 tests)
+##### ntp_leapsec.rs — Leap Seconds (3 tests)
 
 | Gap | Severity | Detail |
 |-----|----------|--------|
-| x86_64 only | Medium | No AARCH64 or ARM seccomp architecture support. |
-| No `prctl(PR_SET_SECCOMP)` fallback | Low | Only uses `syscall(SYS_seccomp, ...)`. |
-| `clone3` handling may differ | Low | Modern ntpsec C distinguishes `clone` vs `clone3` per glibc version. |
+| Simplified NIST leapfile parser | Medium | No #@ expiration, #$ hash, or SHA1 validation |
+| No smear interpolation | Low | Only linear ramp |
 
-### 5. Utility Tool Gaps
+##### ntp_filegen.rs — Stats Files (0 tests)
 
-| Tool | Status | Gap |
-|------|--------|-----|
-| `ntpq-rs` (ntpsec-rs-query) | ✅ Functional | Forward court formatting differs from real ntpq (line breaks, quoting, spacing, `sync_acts` vs `sync_ntp`). Reverse court works on Alpine. |
-| `ntpdig-rs` (ntpsec-rs-dig) | ✅ Functional | Passes on all 4 Docker images. |
-| `ntpd-rs` (ntpsec-rs-d) | ✅ Functional | Lifecycle (SIGHUP, SIGTERM) passes on Alpine. User dropping (-u ntp) fails on Debian/Ubuntu/Fedora. |
-| `ntpmon-rs` (ntpsec-rs-mon) | ✅ Basic | Basic polling monitor, no curses TUI. |
-| `ntptrace-rs` (ntpsec-rs-trace) | ✅ Basic | Basic recursive tracer. |
-| `ntpkeygen` | ⚠️ Stub | Not functionally complete. |
-| `ntpleapfetch` | ⚠️ Stub | May work but untested. |
-| `ntpsnmpd` | 🚫 WONTFIX | Scaffold only; no SNMP agent. |
-| `ntpfrob` | 🚫 WONTFIX | Scaffold only; no system utilities. |
-| `ntpviz` | 🚫 WONTFIX | Scaffold only; no plotting. |
+| Gap | Severity | Detail |
+|-----|----------|--------|
+| **No file I/O** | **HIGH** | Registry only — no open/write/rotate/close |
+
+##### ntp_monitor.rs — MRU (0 tests)
+
+| Gap | Severity | Detail |
+|-----|----------|--------|
+| Simplified rate limiting | Medium | Hardcoded `count > 10` threshold |
+| IPv6 matching in `record()` | Medium | AF_INET only for duplicate detection |
+| No MRU entry aging | Low | No periodic pruning |
+
+##### ntp_sandbox.rs — Seccomp (3 tests)
+
+| Gap | Severity | Detail |
+|-----|----------|--------|
+| x86_64 only | Medium | No AARCH64/ARM support |
+| No prctl fallback | Low | Only `syscall(SYS_seccomp)` |
+| `clone3` handling | Low | May differ per glibc version |
+
+---
+
+## Config Directive Status: Complete 4-Level Table
+
+| Level | Count | Directives |
+|-------|:-----:|------------|
+| ✅ Lexically recognized | **101** | All entries in `RECOGNIZED_DIRECTIVES` |
+| ✅ Typed ConfigOption | **~10** | Server, Peer, Pool, Refclock, Restrict, DriftFile, LeapFile, Keys, StatsDir, Enable/Disable, Include |
+| ✅ Applied by engine | **~5** | Server, Peer, Pool, Refclock, Restrict |
+| ✅ Engine-applied + oracle-tested | **~5** | Server, Peer, Pool, Refclock, Restrict (partial — Alpine only) |
+| ❌ Accepted but not wired | **~86** | All other RECOGNIZED_DIRECTIVES |
+
+---
 
 ## Docker Oracle Matrix Results
 
-The following results are from the Phase 2.5/3 Docker oracle matrix run on
-2026-07-23 at commit `71fd5dc6a80836e92228a2c9aceeb6ac2cd2c119` across 4 images.
-
-### Test Summary
+Run at commit `71fd5dc` across 4 images (2026-07-23):
 
 | Test | Alpine | Debian Stable | Ubuntu LTS | Fedora |
-|------|--------|---------------|------------|--------|
-| rv forward | ❌ FAIL | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| associations forward | ❌ FAIL | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| peers forward | ❌ FAIL | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| rv reverse | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| associations reverse | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| peers reverse | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| rv_reverse_rs | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| uid (non-root) | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| seccomp | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS |
-| capability (CAP_SYS_TIME) | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| sighup | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| sigterm | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| drift_persist | ✅ PASS | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| loopstats_written | ❌ FAIL | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| peerstats_written | ❌ FAIL | ❌ FAIL | ❌ FAIL | ❌ FAIL |
-| ntpdig_rs | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS |
-| ntpdig_parity | ⏭️ SKIP | ⏭️ SKIP | ⏭️ SKIP | ✅ PASS |
+|------|:-----:|:-------------:|:----------:|:------:|
+| rv forward | ❌ | ❌ | ❌ | ❌ |
+| associations forward | ❌ | ❌ | ❌ | ❌ |
+| peers forward | ❌ | ❌ | ❌ | ❌ |
+| rv reverse | ✅ | ❌ | ❌ | ❌ |
+| associations reverse | ✅ | ❌ | ❌ | ❌ |
+| peers reverse | ✅ | ❌ | ❌ | ❌ |
+| rv_reverse_rs | ✅ | ❌ | ❌ | ❌ |
+| uid (non-root) | ✅ | ❌ | ❌ | ❌ |
+| seccomp | ✅ | ✅ | ✅ | ✅ |
+| capability (CAP_SYS_TIME) | ✅ | ❌ | ❌ | ❌ |
+| sighup | ✅ | ❌ | ❌ | ❌ |
+| sigterm | ✅ | ❌ | ❌ | ❌ |
+| drift_persist | ✅ | ❌ | ❌ | ❌ |
+| loopstats_written | ❌ | ❌ | ❌ | ❌ |
+| peerstats_written | ❌ | ❌ | ❌ | ❌ |
+| ntpdig_rs | ✅ | ✅ | ✅ | ✅ |
+| ntpdig_parity | ⏭️ | ⏭️ | ⏭️ | ✅ |
 
-### Key Findings from Matrix
+**Key:**
+- **Alpine**: 11/16 PASS — all hardening + reverse court + lifecycle pass
+- **glibc images**: 3/16 PASS — `-u ntp` privilege dropping fails (UID stays 0)
+- **Universal**: seccomp ✅ on all, ntpdig-rs ✅ on all, forward court ❌ on all
+- **Stats files**: not written on any image (timing — daemon killed before periodic write)
 
-1. **Seccomp and ntpdig-rs pass universally** across all 4 distributions.
-2. **Forward court formatting** fails on ALL images — rendering differences in
-   `ntpq-rs` output vs real `ntpq` (line breaks, column spacing, quoting,
-   `sync_acts` vs `sync_ntp`).
-3. **Alpine is the only fully hardened platform** — `-u ntp` privilege dropping,
-   SIGHUP/SIGTERM lifecycle, drift persistence all pass.
-4. **Debian/Ubuntu/Fedora hardening failures** — `ntpd-rs -u ntp` cannot drop
-   privileges (UID stays 0), causing subsequent failures in reverse queries,
-   signal handling, and drift persistence. The `ntp` user may not exist or the
-   privilege-dropping mechanism differs.
-5. **Stats files not written** on any image — `loopstats` and `peerstats` aren't
-   produced during the short runtime window before SIGTERM (timing issue).
+---
 
-### Forward Court Diff Details
+## Test Coverage
 
-**rv_forward.diff:** ntpq-rs outputs single-line comma-separated format while
-real ntpq uses multi-line key-value formatting. Field ordering differs.
-
-**associations_forward.diff:** Column spacing misalignment. Real ntpq uses
-different tab/space padding than ntpq-rs.
-
-**peers_forward.diff:** Reference clock name differs (`LOCAL(0)` vs `LOCL`),
-type flag differs (`u` vs `l`), `when` value differs, spacing misaligned.
-
-## Test Coverage Analysis
-
-Total test functions: **316** across 28 source files.
-
-### Files with tests (by count)
+**316 test functions across 28 source files.**
 
 | Tests | File | Notes |
-|------:|------|-------|
-| 46 | `control_client.rs` | Mode 6 client protocol courts |
-| 27 | `nts_cookie.rs` | AES-SIV cookie encrypt/decrypt |
+|:-----:|------|-------|
+| 46 | `control_client.rs` | Mode 6 client courts |
+| 27 | `nts_cookie.rs` | AES-SIV encrypt/decrypt |
 | 26 | `refclock_nmea.rs` | NMEA sentence parsing |
-| 25 | `daemon_engine.rs` | Engine lifecycle, selection, refclocks |
+| 25 | `daemon_engine.rs` | Engine lifecycle, selection |
 | 24 | `nts.rs` | NTS-KE records, state machine |
 | 17 | `nts_extens.rs` | Extension field encode/decode |
 | 16 | `ntp_auth.rs` | Key management, MAC |
-| 15 | `nts_client.rs` | NTS-KE client, exporter, validation |
-| 15 | `ntp_proto.rs` | Clock filter, selection, peer |
-| 13 | `nts_server.rs` | Server session, authenticate, protect |
+| 15 | `nts_client.rs` | NTS-KE client, validation |
+| 15 | `ntp_proto.rs` | Clock filter, selection |
+| 13 | `nts_server.rs` | Server session |
 | 12 | `refclock_gpsd.rs` | GPSD JSON parsing |
 | 10 | `ntp_config.rs` | Config directive recognition |
-| 8 | `refclock_pps.rs` | PPS ioctl, packet construction |
-| 8 | `ntp_loopfilter.rs` | PLL/FLL, adjustments |
-| 8 | `ntpdig_proto.rs` | NTP mode 3 client |
-| 7 | `ntp_fp.rs` | Fixed-point formatting |
+| 8 | `refclock_pps.rs` | PPS ioctl |
+| 8 | `ntp_loopfilter.rs` | PLL/FLL |
+| 8 | `ntpdig_proto.rs` | Mode 3 client |
+| 7 | `ntp_fp.rs` | Fixed-point |
 | 7 | `ntp_control.rs` | Mode 6 encoding |
 | 5 | `ntp_types.rs` | Type conversions |
 | 5 | `ntp_timer.rs` | Timer system |
-| 4 | `refclock_shm.rs` | SHM segment operations |
-| 4 | `ntp_restrict.rs` | Restrict list matching |
+| 4 | `refclock_shm.rs` | SHM operations |
+| 4 | `ntp_restrict.rs` | Restrict matching |
 | 4 | `ntp_calendar.rs` | Calendar computations |
 | 3 | `ntp_sandbox.rs` | Seccomp child isolation |
 | 3 | `ntp_leapsec.rs` | Leap second table |
@@ -477,180 +403,166 @@ Total test functions: **316** across 28 source files.
 | 1 | `ntp_net.rs` | Network address |
 | 1 | `ntp_endian.rs` | Endian conversion |
 
-### Files with NO tests (27 files)
+**27 files with NO tests** (all stubs + ntp_monitor, ntp_peer, ntp_recvbuff, etc.)
 
-`binio.rs`, `gpstolfp.rs`, `ieee754io.rs`, `leap_query.rs`, `lib.rs`,
-`ntp_assert.rs`, `ntp_debug.rs`, `ntp_dns.rs`, `ntp_filegen.rs`, `ntp_io.rs`,
-`ntp_lists.rs`, `ntp_malloc.rs`, `ntp_monitor.rs`, `ntp_packetstamp.rs`,
-`ntp_peer.rs`, `ntp_recvbuff.rs`, `ntp_refclock.rs`, `ntp_scanner.rs`,
-`ntp_signd.rs`, `ntp_syscall.rs`, `ntp_syslog.rs`, `ntp_util.rs`, `parse.rs`,
-`refclock_generic.rs`, `refclock_local.rs`, `refclock_pps_api.rs`,
-`timespecops.rs`
+---
 
-These 27 files collectively represent approximately **280K of C source** that
-has no corresponding Rust test coverage. Many are stubs (comment-only), but
-several contain functional code without tests (e.g., `ntp_monitor.rs`,
-`refclock_local.rs`, `ntp_peer.rs`, `ntp_filegen.rs`).
+## Three-Tier Effort Estimate
 
-## Known Pre-existing Test Failures (6)
+### Tier 1: Production Replacement Blockers
 
-These 6 tests fail consistently across all runs and are quarantined:
+Items that must be fixed before ntpsec-rs is credible as a production daemon.
 
-| Test | Failure Mode | Root Cause |
-|------|-------------|------------|
-| `test_format_readvar_frozen_parity` | Assertion: output format mismatch | C ntpq rendering differences (`sync_acts` vs `sync_ntp`, trailing comma) |
-| `test_format_peer_readvar_frozen` | Assertion: output format mismatch | C ntpq peer variable rendering differences (`reach="FF"` vs `reach=0xFF`) |
-| `test_local_udp_error_response` | Expected NotFound, got timeout | Network-dependent; no real ntpd listening |
-| `test_local_udp_authentication_error` | Expected AuthFailure, got timeout | Same network dependency |
-| `test_local_udp_readvar_fragmented` | Connection refused | Same network dependency |
-| `test_engine_stale_state_reset` | Unexpected AdjustClock emitted | Engine edge case with empty selection |
+| Item | Module | Estimated Effort | Risk |
+|------|--------|:----------------:|:----:|
+| Fix privilege dropping on glibc | `ntpd-rs` | 1-2 weeks | **BLOCKER** — breaks Debian/Ubuntu/Fedora |
+| Add TCP/TLS timeout to NTS-KE | `nts_client.rs` | 1 week | Medium |
+| Fix weak PRNG in NtsUniqueKey | `nts.rs` | 1 day | Medium |
+| Fix empty AAD in NTS cookie | `nts_cookie.rs` | 2 days | Medium |
+| Add upper bound on EF decode | `nts_extens.rs` | 1 day | Medium |
+| Make kernel adjtimex work | `ntp_loopfilter.rs` | 2-4 weeks | Medium |
+| Fix ARM/RISC-V PPS ioctl constant | `refclock_pps.rs` | 1 week | High |
+| Fix ARM struct padding | `refclock_pps.rs` | 3 days | High |
+| Add serial port config to NMEA | `refclock_nmea.rs` | 1 week | Medium |
+| Fix local clock returning epoch 0 | `refclock_local.rs` | 1 day | High |
+| Fix `ntp_init()` no-op | `ntp_util.rs` | 1 day | Low |
+| Wire seccomp for aarch64 | `ntp_sandbox.rs` | 1 week | Medium |
+| Forward court formatting parity | `ntpq-rs` output | 2-4 weeks | Low |
+| Alpine-only hardening → all platforms | Lifecycle | 2-4 weeks | Medium |
+
+**Tier 1 subtotal: 3-5 months**
+
+### Tier 2: Mainline NTPsec Feature Parity
+
+Items needed for full behavioral compatibility with current NTPsec.
+
+| Item | Module | Estimated Effort | C LOC Ref |
+|------|--------|:----------------:|:---------:|
+| DNS resolution | `ntp_dns.rs` | 1-2 months | ~200 |
+| NTS-KE server role | `nts_server.rs` + daemon integration | 2-4 months | 5 files |
+| NTS daemon integration | Packet-receive path | 2-4 months | — |
+| Statistics file I/O | `ntp_filegen.rs` | 2-3 weeks | ~650 |
+| Full Mode 6 variable set | `ntp_control.rs` | 2-4 weeks | 106K C |
+| Configuration semantics | `ntp_config.rs` + engine | 2-4 months | 72K C |
+| Hardware packet timestamps | `ntp_packetstamp.rs` | 2-4 weeks | ~500 |
+| Full clock intersection/cluster | `ntp_proto.rs` | 2-4 weeks | 84K C |
+| Prefer peer / PPS selection | `daemon_engine.rs` | 2 weeks | — |
+| Burst/iburst/manycast | `ntp_proto.rs` | 2-4 weeks | — |
+| Samba signing | `ntp_signd.rs` | 1-2 weeks | ~400 |
+| adjtimex syscall wrapper | `ntp_syscall.rs` | 1 week | ~50 |
+| SHM Mode 1 (interpolated) | `refclock_shm.rs` | 1 week | — |
+| NMEA sub-second + PPS pairing | `refclock_nmea.rs` | 2-4 weeks | — |
+| GPSD robust JSON + reconnect | `refclock_gpsd.rs` | 2 weeks | — |
+
+**Tier 2 subtotal: 8-16 months**
+
+### Tier 3: Historical/Full Breadth Parity
+
+Items for complete compatibility with obscure or legacy NTPsec surfaces.
+
+| Item | Module | Estimated Effort | C LOC Ref |
+|------|--------|:----------------:|:---------:|
+| Generic refclock framework | `refclock_generic.rs` | 4-8 weeks | 5,729 |
+| JJY refclock | `refclock_jjy.rs` | 2-4 weeks | 4,518 |
+| Oncore GPS refclock | `refclock_oncore.rs` | 2-4 weeks | 4,152 |
+| Trimble refclock | `refclock_trimble.rs` | 1-2 weeks | 1,390 |
+| TrueTime refclock | `refclock_truetime.rs` | 1 week | 786 |
+| Spectracom refclock | `refclock_spectracom.rs` | 1 week | ~500 |
+| Modem/ACTS refclock | `refclock_modem.rs` | 2 weeks | 929 |
+| Arbiter, HPGPS, Zyfer refclocks | Various | 2-4 weeks each | ~500 each |
+| SNMP agent | `ntpsnmpd` | 1-2 months | 48K Python |
+| ntpviz plotting | `ntpviz` | 2-4 weeks | 76K Python |
+| ntpsweep | `ntpsweep` | 1 week | 8K Python |
+| ntploggps / ntplogtemp | Various | 1 week each | ~10K Python |
+| Python-style ntpkeygen | `ntpkeygen` | 2 weeks | 4K Python |
+| Platform courts (FreeBSD/macOS) | CI | 2-4 months | — |
+
+**Tier 3 subtotal: 8-14 months**
+
+### Total Effort (Non-Overlapping)
+
+| Tier | Description | Estimate |
+|:----:|-------------|:--------:|
+| 1 | Production replacement blockers | 3-5 months |
+| 2 | Mainline NTPsec feature parity | 8-16 months |
+| 3 | Historical/full breadth parity | 8-14 months |
+| **Total (uncorrelated)** | | **14-22 months** |
+| **Total (correlated, sequential)** | | **19-35 months** |
+| **Total (parallel, aggressive)** | | **9-14 months** |
+
+**Note:** The 14-22 month figure from Revision 1 was inflated by bytes-vs-LOC
+confusion and double-counting. The corrected range reflects actual C line counts.
+Tier 1 (production blockers) is estimated at 3-5 months, not 14-22.
+
+---
 
 ## Portability Gaps
 
 | Platform | Issue | Severity |
-|----------|-------|----------|
-| **ARM (32-bit)** | PPS ioctl constant (`0xc050a004`) encodes `sizeof(struct)` which differs on ARM-32. `PpsFetchParams` struct padding differs. | **BLOCKER** |
-| **ARM64/AARCH64** | Seccomp `AUDIT_ARCH_AARCH64` not defined; filter rejects all syscalls. | **BLOCKER** |
-| **RISC-V** | Same PPS and seccomp issues. | **BLOCKER** |
-| **macOS** | No seccomp. No `clock_gettime` CLOCK_TAI. Different PPS mechanism (IOKit). No `SO_TIMESTAMPNS`. | Untested |
-| **FreeBSD** | No seccomp. PPS via `ppsfd(4)`. Different socket timestamping (`SO_TIMESTAMP`). | Untested |
-| **Alpine (musl)** | Works — full hardening passes. | Verified |
-| **Debian/Ubuntu/Fedora (glibc)** | `-u ntp` privilege dropping fails (UID stays 0). All hardening/lifecycle tests fail. | **BLOCKER** |
-| **Windows** | Not supported. No `libc`, no `socket2` Unix socket support, no `setuid`. | 🚫 WONTFIX |
+|----------|-------|:--------:|
+| **ARM (32-bit)** | PPS ioctl constant `sizeof(struct)` differs. Struct padding differs. | **BLOCKER** |
+| **ARM64/AARCH64** | Seccomp `AUDIT_ARCH_AARCH64` not in allowlist | **BLOCKER** |
+| **RISC-V** | Same PPS and seccomp issues as ARM | **BLOCKER** |
+| **macOS** | No seccomp. Different PPS. No CLOCK_TAI. No SO_TIMESTAMPNS | Untested |
+| **FreeBSD** | No seccomp. PPS via ppsfd(4). Different socket timestamping | Untested |
+| **Alpine (musl)** | Works — full hardening passes | ✅ Verified |
+| **Debian/Ubuntu/Fedora (glibc)** | `-u ntp` privilege dropping fails (UID stays 0) | **BLOCKER** |
+| **Windows** | Not supported. No libc, no setuid | 🚫 WONTFIX |
+
+---
 
 ## Security Gaps
 
-| Gap | Module | Detail |
-|-----|--------|--------|
-| Non-cryptographic PRNG for NTS keys | `nts.rs` | `SystemTime::now().as_nanos()` + LCG — trivially predictable |
-| Empty AAD in NTS cookie encrypt | `nts_cookie.rs` | No server identity binding in AAD |
-| No cookie expiration validation | `nts_cookie.rs` | Old cookies replayable indefinitely |
-| No TLS timeout in NTS-KE | `nts_client.rs` | Blocking connect/read can hang forever |
-| No upper bound on EF decode | `nts_extens.rs` | Length field of 65535 triggers OOM |
-| Zeroed C2S/S2C keys in offline path | `nts.rs` | `handshake_with_data()` returns `[0u8; 32]` for both keys |
-| No kernel `adjtimex()` isolation | `ntp_loopfilter.rs` | Software PLL can't be hardened via kernel clock discipline |
-| No crypto-agile AEAD negotiation | `nts_client.rs` | Only algorithm 15 offered |
-| `emalloc()` doc claims zeroed but not | `ntp_malloc.rs` | Uses `alloc()` not `alloc_zeroed()` |
+| Gap | Module | Severity | Fix |
+|-----|--------|:--------:|-----|
+| Non-cryptographic PRNG for NTS keys | `nts.rs` | HIGH | Replace LCG with `getrandom()` |
+| Empty AAD in NTS cookie encrypt | `nts_cookie.rs` | MEDIUM | Bind to server identity |
+| No cookie expiration validation | `nts_cookie.rs` | MEDIUM | Add timestamp check |
+| No TLS timeout in NTS-KE | `nts_client.rs` | HIGH | Add connect/read timeout |
+| No upper bound on EF decode | `nts_extens.rs` | MEDIUM | Cap length at MAX_EXT_LEN |
+| Zeroed C2S/S2C keys in offline path | `nts.rs` | CRITICAL | Only affects offline tests |
+| No kernel adjtimex isolation | `ntp_loopfilter.rs` | MEDIUM | Wire adjtimex syscall |
 
-## Configuration Parser Gaps
+---
 
-| Directive | Status | Notes |
-|-----------|--------|-------|
-| `server` | ✅ PORTED | |
-| `peer` | ✅ PORTED | |
-| `pool` | ✅ PORTED | |
-| `restrict` | ✅ PORTED | |
-| `driftfile` | ⚠️ ACCEPTED | Silently ignored by engine |
-| `leapfile` | ⚠️ ACCEPTED | Silently ignored by engine |
-| `keys` | ⚠️ ACCEPTED | Loaded by shell, not engine |
-| `enable` | ⚠️ ACCEPTED | Silently ignored |
-| `disable` | ⚠️ ACCEPTED | Silently ignored |
-| `statsdir` | ⚠️ ACCEPTED | Silently ignored |
-| `include` | ⚠️ ACCEPTED | Silently ignored |
-| `fudge` | ⚠️ ACCEPTED | Silently ignored |
-| `refclock` | ✅ PORTED | `server 127.127.x.y` recognized as typed refclock |
-| All other ntpsec directives (~80) | ⚠️ not recognized | Rejected by parser; not in `RECOGNIZED_DIRECTIVES` |
+## Stale Generated-Parity Map Notice
 
-Total directives recognized: **~93** (matches ntpsec's `ntpd -?` count)
+The document `docs/generated/ported-modules.md` carries the header:
 
-## Syntax/Style Quirks vs NTPsec C
+```
+<!-- GENERATED by cargo xtask gen — DO NOT EDIT BY HAND -->
+```
 
-| Area | ntpsec C | ntpsec-rs | Status |
-|------|----------|-----------|--------|
-| Packet struct | `#pragma pack` + `struct ntp_packet_t` | Explicit `encode()`/`decode()` methods | Intentional — avoids UB |
-| MAC computation | `md5(key || packet)` | `hash(key || packet)` | Byte-identical (verified) |
-| Peer selection | Global linked list | `Vec<Peer>` in `DaemonEngine` | Different data structure, same algorithm |
-| Config storage | Global `config_tree` | `ConfigTree` struct passed to `apply_config()` | No globals |
-| Event loop | `select()`/`epoll()` in `ntp_io.c` | `loop { tick(); handle(); }` in `main.rs` | Simplified — no async I/O |
-| Timestamps | `struct timespec` with `clock_gettime()` | `NtpTs64 { seconds: i64, fraction: u32 }` | Different representation |
-| String formatting | `snprintf()` into fixed buffers | `format!()` into `String` | No buffer overflow risk |
-| Error reporting | syslog + `msyslog()` | `tracing::error!()` + `DaemonAction::Log` | Different logging framework |
-| Test methodology | C unit tests + Python integration | `#[test]` + Docker oracle matrix | Different but equivalent coverage |
+However, `cargo xtask gen` does **not** currently regenerate this file. The
+module scanning and status-detection logic remain unimplemented TODOs in the
+xtask source. The file therefore contains stale SKELETON annotations for many
+modules that are functionally complete (NTS, refclocks, daemon engine, Mode 6).
 
-## Phase Status Summary
+**Until the generator is wired, treat `ported-modules.md` as a manually edited
+reference, not a source-derived truth.** The authoritative status for any module
+is its source code and test count, not its label in that table.
 
-| Phase | Description | Version | Status |
-|-------|-------------|---------|--------|
-| 1 | Foundation — 19 crates, ~180 modules | 0.1.x | ✅ |
-| 2.1 | Crypto (MD5, SHA-1, AES-CMAC, key files) | 0.2.x | ✅ |
-| 2.2 | I/O traits (SystemClock, NetworkIo, StateStore) | 0.2.x | ✅ |
-| 2.3A | Wire codec (NtpPacket encode/decode) | 0.2.x | ✅ |
-| 2.3B | Deterministic DaemonEngine | 0.2.x | ✅ |
-| 2.3C | Kernel receive timestamps | 0.2.x | ✅ |
-| 2.3D | Mode 6 control protocol | 0.2.x | ✅ |
-| 2.4 | Client tools + Docker oracle matrix | 0.2.x | ✅ |
-| 2.5 | Daemon hardening (seccomp, -u, signals) | 0.2.25 | ✅ |
-| 3.1 | Refclocks (SHM/PPS/NMEA/GPSD) | 0.3.x | ✅ |
-| 3.2 | NTS (AES-SIV, NTS-KE, extension fields) | 0.3.x | ✅ |
-| 3.3 | Platform courts (FreeBSD/macOS) | — | ❌ Not started |
-| 3.4 | Full utilities (ntpmon, ntptrace, mrulist) | 0.3.x | ⚠️ Partial |
+---
 
-## Remaining Work Items (Quantified)
+## Known Pre-existing Test Failures (6)
 
-| Area | Items | Estimated Effort |
-|------|-------|-----------------|
-| Complete stub modules (13 files) | Port ~240K C LOC | 4-6 months |
-| Kernel adjtimex integration | Wire `ntp_adjtime()` syscall | 2-4 weeks |
-| Debian/Ubuntu/Fedora hardening fix | Fix `-u ntp` privilege dropping | 1-2 weeks |
-| Forward court formatting parity | Fix ntpq-rs output to match C ntpq | 2-4 weeks |
-| NTS-KE TLS transport wiring | Wire TLS send/recv in `handshake()` | 2-4 weeks |
-| NTS server integration | Connect NtsServerSession to daemon packet path | 2-4 weeks |
-| Stats file I/O | Port ntp_filegen.c ~650 lines | 2-3 weeks |
-| Refclock generic framework | Port refclock_generic.c ~155K | 4-8 weeks |
-| Platform courts (FreeBSD/macOS) | Set up VMs + adapt matrix | 4-8 weeks |
-| Full NTPsec cookie interoperability | Byte-level oracle court | 1-2 weeks |
-| Serial port configuration for NMEA | Add tcsetattr() for baud/parity/stop | 1 week |
-| LEAP/MRU/PEER test coverage | Add tests for 27 untested files | 4-6 weeks |
-| ARM/ARM64/RISC-V portability | Fix PPS ioctl constants + seccomp arch | 2-4 weeks |
-| Security hardening (PRNG, AAD, OOM) | Fix 7 security gaps | 2-4 weeks |
+| Test | Failure | Root Cause |
+|------|---------|------------|
+| `test_format_readvar_frozen_parity` | Format mismatch | C ntpq rendering (`sync_acts` vs `sync_ntp`) |
+| `test_format_peer_readvar_frozen` | Format mismatch | `reach="FF"` vs `reach=0xFF` |
+| `test_local_udp_error_response` | Expected NotFound, got timeout | No real ntpd listening |
+| `test_local_udp_authentication_error` | Expected AuthFailure, got timeout | Same |
+| `test_local_udp_readvar_fragmented` | Connection refused | Same |
+| `test_engine_stale_state_reset` | Unexpected AdjustClock | Engine edge case |
 
-**Total estimated remaining effort: 14-22 months** (assuming one full-time developer).
-
-## Negative Capabilities Registry — Exhaustive
-
-Every module gap, behavioral diff, and parity gap discovered during the forensic
-audit is recorded in the tables above. The complete classified registry is:
-
-### CRITICAL (complete stubs / non-functional core)
-1. `refclock_generic.rs` — 100% stub (155K C file not ported)
-2. `nts.rs::handshake()` — Explicitly fails ("TLS transport not wired")
-3. `nts.rs::handshake_with_data()` — Returns zeroed keys (no security)
-4. `parse.rs` — 100% stub (20K C file, enables all serial refclocks)
-
-### HIGH (wrong behavior, portability bug, security issue)
-5. `refclock_pps.rs` — Hardcoded architecture-dependent ioctl constant
-6. `refclock_pps.rs` — Architecture-dependent struct padding
-7. `refclock_nmea.rs` — No serial port configuration (baud/parity/stop)
-8. `refclock_nmea.rs` — No sub-second precision (fractional seconds discarded)
-9. `refclock_nmea.rs` — No PPS edge integration
-10. `refclock_gpsd.rs` — Brittle manual JSON string scanning
-11. `refclock_local.rs` — Returns epoch zero instead of system time
-12. `nts.rs` — Weak LCG-based PRNG (not cryptographic)
-13. `nts_client.rs` — No TCP/TLS connect/read timeout
-14. `nts_server.rs` — `protect_response()` doesn't append cookie
-15. `nts_server.rs` — `protect_response()` can't manage sequence numbers
-16. `ntp_proto.rs` — Simplified `clock_intersection()` (missing full RFC 5905)
-17. `ntp_proto.rs` — Simplified `clock_cluster()` (missing nuanced pruning)
-18. `ntp_loopfilter.rs` — No kernel `adjtimex()` call (KernelPll is no-op)
-19. `ntp_control.rs` — Event code/event count hardcoded to 0
-20. `ntp_filegen.rs` — No file I/O at all (registry only)
-
-### MEDIUM (missing feature, incomplete implementation)
-21-48: See detailed tables above for SHM (4 gaps), PPS (2), NMEA (3), GPSD (6),
-NTS cookie (3), NTS extensions (3), NTS server (1), daemon_engine (5),
-ntp_proto (2), ntp_leapsec (2), ntp_monitor (2), ntp_restrict (2),
-ntp_net (2), ntp_sandbox (2), ntp_util (2), ntp_timer (2), utility tools (5).
-
-### LOW (minor conformance, hardening, missing accessor)
-49-74: Various minor issues documented in detailed tables above.
+---
 
 ## Generation Metadata
 
-- Generated: 2026-07-24
-- ntpsec-rs version: 0.3.6 (commit `71fd5dc6a80836e92228a2c9aceeb6ac2cd2c119`)
-- NTPsec oracle version: 1.3.3
-- Oracle images: Alpine 3.18, Debian Stable, Ubuntu LTS, Fedora
-- Total C files analyzed: 70
-- Total Rust modules audited: 48
+- Generated: 2026-07-24 (Revision 2)
+- ntpsec-rs commit: `71fd5dc6a80836e92228a2c9aceeb6ac2cd2c119`
+- NTPsec oracle version: 1.2.4 (master: 76,048 C lines)
+- Docker matrix: Alpine 3.18, Debian Stable, Ubuntu LTS, Fedora
 - Total test functions: 316 passing, 6 pre-existing failures
-- Docker matrix: seccomp ✅ all, ntpdig-rs ✅ all, Alpine hardening ✅, others ❌
+- Config directives: 101 lexically recognized, ~5 functionally applied
+- C line counts: verified with `wc -l` (not `wc -c`)
