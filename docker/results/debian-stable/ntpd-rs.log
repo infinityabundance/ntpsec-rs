@@ -1,0 +1,2 @@
+[2m2026-07-24T04:59:17.691149Z[0m [31mERROR[0m SIGHUP config has errors — keeping old config
+[2m2026-07-24T04:59:17.691182Z[0m [31mERROR[0m   Config error: line 7: invalid fudge refclock-type '127.127.1.0'

@@ -1,6 +1,6 @@
 image: ntpsec-oracle:debian-stable
-date: 2026-07-23T23:44:19Z
-git_commit: 71fd5dc6a80836e92228a2c9aceeb6ac2cd2c119
+date: 2026-07-24T04:59:33Z
+git_commit: 9caa1a7f3745fa524545a46a1e71e382d7f5bb5f
 
 --- Forward Court (ntpq-rs vs real ntpd) ---
 rv_forward: FAIL
@@ -9,18 +9,18 @@ peers_forward: FAIL
 
 --- Reverse Court (real ntpq vs ntpd-rs -u ntp --seccomp) ---
 rv_reverse: FAIL
-associations_reverse: FAIL
+associations_reverse: PASS
 peers_reverse: FAIL
 
 --- Hardening ---
-uid: FAIL
+uid: PASS
 seccomp: PASS
-capability: FAIL
+capability: PASS
 sighup: FAIL
-sigterm: FAIL
+sigterm: PASS
 
 --- Rust Client Reverse ---
-rv_reverse_rs: FAIL
+rv_reverse_rs: PASS
 
 --- ntpdig ---
 ntpdig_rs: PASS

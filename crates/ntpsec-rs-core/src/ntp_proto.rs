@@ -70,6 +70,38 @@ pub const NTP_SHIFT: usize = 8;
 /// Weight factor for peer jitter in the combine algorithm (ntpsec default).
 pub const NTP_WEIGHT: f64 = 0.5;
 
+// ──── Auth statistics counters (matching ntpsec) ─────────────────────────
+
+/// Authentication statistics counters — tracks auth events across the daemon.
+#[derive(Debug, Clone, Default)]
+pub struct AuthCounters {
+    pub badauth: u64,
+    pub badkey: u64,
+    pub decrypts: u64,
+    pub encrypts: u64,
+    pub foundkey: u64,
+    pub notfound: u64,
+    pub reset_count: u64,
+}
+
+// ──── Server-side statistics counters (matching ntpsec) ──────────────────
+
+/// Server-side statistics counters — tracks packet handling events.
+#[derive(Debug, Clone, Default)]
+pub struct ServerCounters {
+    pub badauth: u64,
+    pub badlength: u64,
+    pub declined: u64,
+    pub delayed: u64,
+    pub kodsent: u64,
+    pub limited: u64,
+    pub oldver: u64,
+    pub received: u64,
+    pub rejected: u64,
+    pub restricted: u64,
+    pub thisver: u64,
+}
+
 // ──── Flash bits (matching ntpsec) ──────────────────────────────────────
 
 bitflags::bitflags! {
@@ -866,6 +898,38 @@ pub struct SystemState {
     pub sys_offset: f64,
     pub sys_frequency: f64,
     pub sys_rootdist: f64,
+
+    // ── New tracking fields for real system variables ────────────────────
+    /// Daemon start time (set once at engine initialization).
+    pub start_time: NtpTs64,
+    /// Clock wander (PPM) — variation in frequency estimates.
+    pub sys_wander: f64,
+    /// TAI offset (seconds) — current TAI - UTC.
+    pub tai_offset: i32,
+    /// System status word (leap, clock source, etc.) matching ntpsec format.
+    pub sys_status: u16,
+    /// System flash bits — aggregate peer flash status.
+    pub sys_flash: u32,
+    /// Uptime in seconds since daemon start.
+    pub uptime_secs: u64,
+    /// Authentication statistics counters.
+    pub auth_counters: AuthCounters,
+    /// Server-side packet handling counters.
+    pub server_counters: ServerCounters,
+    /// Leap file expiration timestamp (NTP seconds).
+    pub leap_expire: NtpTs64,
+    /// Leap second status: 0=no alert, 1=insert, 2=delete, -1=unsynced.
+    pub leap_second_status: i32,
+    /// Leap second alert flag.
+    pub leap_alert: i32,
+    /// Seconds before next leap second.
+    pub leap_before: i32,
+    /// Seconds after last leap second.
+    pub leap_after: i32,
+    /// Counter of broken selection attempts.
+    pub sel_broken: u64,
+    /// Association ID of the current system peer (0 if none).
+    pub sys_peer_associd: u16,
 }
 
 impl Default for SystemState {
@@ -887,6 +951,29 @@ impl Default for SystemState {
             sys_offset: 0.0,
             sys_frequency: 0.0,
             sys_rootdist: 0.0,
+
+            // New fields
+            start_time: NtpTs64 {
+                seconds: 0,
+                fraction: 0,
+            },
+            sys_wander: 0.0,
+            tai_offset: 37,
+            sys_status: 0,
+            sys_flash: 0,
+            uptime_secs: 0,
+            auth_counters: AuthCounters::default(),
+            server_counters: ServerCounters::default(),
+            leap_expire: NtpTs64 {
+                seconds: 0,
+                fraction: 0,
+            },
+            leap_second_status: 0,
+            leap_alert: 0,
+            leap_before: 0,
+            leap_after: 0,
+            sel_broken: 0,
+            sys_peer_associd: 0,
         }
     }
 }

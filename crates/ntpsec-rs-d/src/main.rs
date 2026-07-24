@@ -202,6 +202,9 @@ fn main() {
     let mut clock = ntpsec_rs_io::RealSystemClock::new();
     let mut network = ntpsec_rs_io::RealNetworkIo::new();
 
+    // Record daemon start time for uptime tracking
+    engine.system.start_time = clock.now();
+
     // Determine stats/drift directory from config or default
     let stats_dir = std::path::PathBuf::from("/var/lib/ntp");
     let drift_path = cli
@@ -412,10 +415,10 @@ fn main() {
     }
 
     // ──── Start NTS-KE Server (privileges already dropped) ──────────
-    if let Some(nts_config) = &engine.config.nts_config {
-        let nts_cfg = nts_config.clone();
+    if let Some(nts_config) = engine.nts_config.as_ref() {
+        let config = nts_config.clone();
         std::thread::spawn(move || {
-            if let Err(e) = ntpsec_rs_core::nts_server::start_nts_ke_server(nts_cfg) {
+            if let Err(e) = ntpsec_rs_core::nts_server::start_nts_ke_server(config) {
                 tracing::error!("NTS-KE server failed: {e}");
             }
         });
@@ -532,6 +535,12 @@ fn main() {
                         new_engine.loop_filter.wander = engine.loop_filter.wander;
                         new_engine.loop_filter.jitter = engine.loop_filter.jitter;
                         new_engine.precision = engine.precision;
+                        // Preserve start time, uptime, and counters across reload
+                        new_engine.system.start_time = engine.system.start_time;
+                        new_engine.system.uptime_secs = engine.system.uptime_secs;
+                        new_engine.system.auth_counters = engine.system.auth_counters.clone();
+                        new_engine.system.server_counters = engine.system.server_counters.clone();
+                        new_engine.system.sel_broken = engine.system.sel_broken;
                         // Load key files for the new config — abort swap on failure
                         let new_key_paths = collect_key_paths(&new_engine.config);
                         match load_key_files(&mut new_engine.auth, &new_key_paths) {
@@ -676,7 +685,8 @@ fn main() {
     // ──── Graceful Shutdown ──────────────────────────────────────────
     tracing::info!("Shutting down...");
 
-    // 1. Flush statistics
+    // 1. Flush statistics (loopstats and peerstats) immediately
+    engine.flush_stats();
     let stats_actions = engine.handle(DaemonEvent::Shutdown);
     execute_actions(&stats_actions, &mut clock, &mut network, &mut store);
 
@@ -899,6 +909,9 @@ fn run_lab_daemon(config: ConfigTree, cli: &Cli) {
     let mut network = ReplayNetwork::new(Vec::new());
     let mut store = MemoryStateStore::new();
 
+    // Record daemon start time
+    engine.system.start_time = clock.now();
+
     // Apply CLI overrides
     if cli.slew {
         engine.loop_filter.step_threshold = f64::MAX;
@@ -1051,7 +1064,12 @@ fn drop_privileges(user: &str) -> Result<(), String> {
         ));
     }
 
-    // Step 4: Change GID first, then UID (Linux capability semantics)
+    // Step 4: Change GID first, then UID (Linux capability semantics).
+    // Use setresuid() instead of setuid() for glibc compatibility:
+    // setuid() on glibc systems (Debian, Ubuntu, Fedora) can fail when the
+    // daemon lacks CAP_SETUID in its effective set but still has it in the
+    // permitted set.  setresuid() atomically sets all three UIDs (real,
+    // effective, saved) and works correctly with PR_SET_KEEPCAPS.
     let ret = unsafe { libc::setgid(gid) };
     if ret != 0 {
         return Err(format!(
@@ -1059,10 +1077,11 @@ fn drop_privileges(user: &str) -> Result<(), String> {
             std::io::Error::last_os_error()
         ));
     }
-    let ret = unsafe { libc::setuid(uid) };
+    let ret = unsafe { libc::setresuid(uid, uid, uid) };
     if ret != 0 {
         return Err(format!(
-            "setuid failed: {}",
+            "setresuid({}) failed: {}",
+            uid,
             std::io::Error::last_os_error()
         ));
     }

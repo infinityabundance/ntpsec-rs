@@ -1,3 +1,3 @@
 image=ntpsec-oracle:debian-stable
-date=2026-07-24T01:53:31Z
-git_commit=3daff924e5199c615f6b40d47ec7533be2697c3e
+date=2026-07-24T04:58:48Z
+git_commit=9caa1a7f3745fa524545a46a1e71e382d7f5bb5f

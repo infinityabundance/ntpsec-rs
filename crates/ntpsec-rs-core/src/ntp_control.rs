@@ -32,6 +32,7 @@
 
 use crate::ntp_auth::*;
 use crate::ntp_types::*;
+use libc;
 
 /// Mode 6 response/error codes matching ntpsec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,51 +450,68 @@ impl ControlExchange {
 /// peer status, selection vars, server-side counters, NTS, and orphans.
 pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> Option<String> {
     match name {
-        // ── Auth counters (not yet tracked; return placeholders) ──────
-        "auth_badauth" => Some("0".to_string()),
-        "auth_badkey" => Some("0".to_string()),
-        "auth_decrypts" => Some("0".to_string()),
-        "auth_encrypts" => Some("0".to_string()),
-        "auth_foundkey" => Some("0".to_string()),
-        "auth_notfound" => Some("0".to_string()),
-        "auth_reset" => Some("0".to_string()),
-        // ── Auth types ─────────────────────────────────────────────────
+        // ── Auth counters ────────────────────────────────────────────────
+        "auth_badauth" => Some(format!("{}", sys.auth_counters.badauth)),
+        "auth_badkey" => Some(format!("{}", sys.auth_counters.badkey)),
+        "auth_decrypts" => Some(format!("{}", sys.auth_counters.decrypts)),
+        "auth_encrypts" => Some(format!("{}", sys.auth_counters.encrypts)),
+        "auth_foundkey" => Some(format!("{}", sys.auth_counters.foundkey)),
+        "auth_notfound" => Some(format!("{}", sys.auth_counters.notfound)),
+        "auth_reset" => Some(format!("{}", sys.auth_counters.reset_count)),
+        // ── Auth types (not yet tracked) ─────────────────────────────────
         "auth_type" => Some("0".to_string()),
         "auth_flags" => Some("0".to_string()),
         "auth_keys" => Some("0".to_string()),
         "auth_keyno" => Some("0".to_string()),
-        // ── Clock discipline extensions ───────────────────────────────
+        // ── Clock discipline extensions ─────────────────────────────────
         "bias" => Some("0.0".to_string()),
         "candidate" => Some("0".to_string()),
-        "clock" => Some("0".to_string()),
+        "clock" => Some(crate::ntp_fp::dolfptoa(sys.reference_time, 6)),
         "clk_jitter" => Some(format!("{:?}", sys.sys_jitter)),
-        "clk_wander" => Some("0.0".to_string()),
-        // ── NTP core variables ─────────────────────────────────────────
-        "compliance" => Some("0".to_string()),
+        "clk_wander" => Some(format!("{:.6}", sys.sys_wander)),
+        // ── NTP core variables ───────────────────────────────────────────
+        "compliance" => {
+            if sys.sys_offset.abs() < 0.001 {
+                Some("1".to_string())
+            } else {
+                Some("0".to_string())
+            }
+        }
         "dstadr" => Some("0.0.0.0".to_string()),
         "dstport" => Some("123".to_string()),
-        // ── Leap/expiry ───────────────────────────────────────────────
-        "expire" => Some("0".to_string()),
-        "flash" => Some("0".to_string()),
+        // ── Leap/expiry ───────────────────────────────────────────────────
+        "expire" => {
+            if sys.leap_expire.seconds > 0 {
+                Some(format!("{}", sys.leap_expire.seconds))
+            } else {
+                Some("0".to_string())
+            }
+        }
+        "flash" => Some(format!("{:x}", sys.sys_flash)),
         "frequency" => Some(format!("{:?}", sys.sys_frequency)),
         "freq_drift" => Some(format!("{:?}", sys.sys_frequency)),
         "freq_ppm" => Some(format!("{:?}", sys.sys_frequency)),
-        // ── Host info ──────────────────────────────────────────────────
-        "hostname" => Some("localhost".to_string()),
-        "host" => Some("localhost".to_string()),
+        // ── Host info ────────────────────────────────────────────────────
+        "hostname" | "host" => Some(get_hostname()),
         "ident" => Some("".to_string()),
-        // ── Leap ───────────────────────────────────────────────────────
+        // ── Leap ─────────────────────────────────────────────────────────
         "leap" => Some(format!("{:02}", sys.leap as u8)),
-        "leapsec" => Some("0".to_string()),
-        "leap_alert" => Some("0".to_string()),
-        "leap_before" => Some("0".to_string()),
-        "leap_after" => Some("0".to_string()),
-        "leap_expire" => Some("0".to_string()),
-        // ── Mintc / tinker ─────────────────────────────────────────────
-        "mintc" => Some("0".to_string()),
+        "leapsec" => Some(format!("{}", sys.leap_second_status)),
+        "leap_alert" => Some(format!("{}", sys.leap_alert)),
+        "leap_before" => Some(format!("{}", sys.leap_before)),
+        "leap_after" => Some(format!("{}", sys.leap_after)),
+        "leap_expire" => {
+            if sys.leap_expire.seconds > 0 {
+                Some(format!("{}", sys.leap_expire.seconds))
+            } else {
+                Some("0".to_string())
+            }
+        }
+        // ── Mintc / tinker ───────────────────────────────────────────────
+        "mintc" => Some("3".to_string()),
         "minpoll" => Some(format!("{}", crate::ntp_proto::NTP_MINPOLL)),
         "maxpoll" => Some(format!("{}", crate::ntp_proto::NTP_MAXPOLL)),
-        // ── MRU list stats ─────────────────────────────────────────────
+        // ── MRU list stats (not yet tracked) ─────────────────────────────
         "mru_deepest" => Some("0".to_string()),
         "mru_enabled" => Some("0".to_string()),
         "mru_maxage" => Some("0".to_string()),
@@ -505,80 +523,96 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "mru_meminc" => Some("0".to_string()),
         "mru_npairs" => Some("0".to_string()),
         "mru_polls" => Some("0".to_string()),
-        // ── NTS ────────────────────────────────────────────────────────
+        // ── NTS (not yet tracked) ────────────────────────────────────────
         "nts" => Some("none".to_string()),
         "nts_enabled" => Some("0".to_string()),
         "nts_peers" => Some("0".to_string()),
         "nts_keys" => Some("0".to_string()),
         "nts_cookielen" => Some("0".to_string()),
         "nts_providers" => Some("0".to_string()),
-        // ── Offset / discipline ────────────────────────────────────────
+        // ── Offset / discipline ──────────────────────────────────────────
         "offset" => Some(format!("{:?}", sys.sys_offset)),
         "old_offset" => Some(format!("{:?}", sys.sys_offset)),
-        // ── Orphan mode ────────────────────────────────────────────────
+        // ── Orphan mode ──────────────────────────────────────────────────
         "orphan" => Some("0".to_string()),
         "orphwait" => Some("0".to_string()),
-        // ── Peer / association ─────────────────────────────────────────
+        // ── Peer / association ───────────────────────────────────────────
         "peer" => Some(format!("{}", sys.peer_count)),
         "peers" => Some(format!("{}", sys.peer_count)),
         "peer_count" => Some(format!("{}", sys.peer_count)),
-        // ── Precision / processor ──────────────────────────────────────
+        // ── Precision / processor ────────────────────────────────────────
         "precision" => Some(format!("{}", sys.precision)),
         "processor" => Some(std::env::consts::ARCH.to_string()),
-        // ── Reference ──────────────────────────────────────────────────
+        // ── Reference ────────────────────────────────────────────────────
         "refid" => Some(format_refid(sys.reference_id)),
         "reftime" => Some(crate::ntp_fp::dolfptoa(sys.reference_time, 6)),
         "refclock" => Some("".to_string()),
-        // ── Root ───────────────────────────────────────────────────────
+        // ── Root ─────────────────────────────────────────────────────────
         "rootdelay" => Some(format!("{:?}", sys.root_delay)),
         "rootdisp" => Some(format!("{:?}", sys.root_dispersion)),
         "rootdist" => Some(format!("{:?}", sys.sys_rootdist)),
-        // ── Selection vars ────────────────────────────────────────────
-        "selbroken" => Some("0".to_string()),
-        "seldisp" => Some("0.0".to_string()),
-        "selpeer" => Some("0".to_string()),
-        "selpeer_sel" => Some("0".to_string()),
-        "selpeer_src" => Some("0".to_string()),
+        // ── Selection vars ───────────────────────────────────────────────
+        "selbroken" => Some(format!("{}", sys.sel_broken)),
+        "seldisp" => Some(format!("{:?}", sys.sys_rootdist)),
+        "selpeer" => Some(format!("{}", sys.sys_peer_associd)),
+        "selpeer_sel" => Some(format!("{}", sys.sys_peer_associd)),
+        "selpeer_src" => Some(format!("{}", sys.sys_peer_associd)),
         "selpeer_previous" => Some("0".to_string()),
-        // ── Server-side (ss_) counters ────────────────────────────────
-        "ss_badauth" => Some("0".to_string()),
-        "ss_badlength" => Some("0".to_string()),
-        "ss_declined" => Some("0".to_string()),
-        "ss_delayed" => Some("0".to_string()),
-        "ss_kodsent" => Some("0".to_string()),
-        "ss_limited" => Some("0".to_string()),
-        "ss_oldver" => Some("0".to_string()),
-        "ss_received" => Some("0".to_string()),
-        "ss_rejected" => Some("0".to_string()),
+        // ── Server-side (ss_) counters ───────────────────────────────────
+        "ss_badauth" => Some(format!("{}", sys.server_counters.badauth)),
+        "ss_badlength" => Some(format!("{}", sys.server_counters.badlength)),
+        "ss_declined" => Some(format!("{}", sys.server_counters.declined)),
+        "ss_delayed" => Some(format!("{}", sys.server_counters.delayed)),
+        "ss_kodsent" => Some(format!("{}", sys.server_counters.kodsent)),
+        "ss_limited" => Some(format!("{}", sys.server_counters.limited)),
+        "ss_oldver" => Some(format!("{}", sys.server_counters.oldver)),
+        "ss_received" => Some(format!("{}", sys.server_counters.received)),
+        "ss_rejected" => Some(format!("{}", sys.server_counters.rejected)),
         "ss_reset" => Some("0".to_string()),
-        "ss_restricted" => Some("0".to_string()),
-        "ss_thisver" => Some("0".to_string()),
-        "ss_uptime" => Some("0".to_string()),
-        // ── Status ─────────────────────────────────────────────────────
-        "status" => Some("0000".to_string()),
+        "ss_restricted" => Some(format!("{}", sys.server_counters.restricted)),
+        "ss_thisver" => Some(format!("{}", sys.server_counters.thisver)),
+        "ss_uptime" => Some(format!("{}", sys.uptime_secs)),
+        // ── Status ───────────────────────────────────────────────────────
+        "status" => Some(format!("{:04x}", sys.sys_status)),
         "stratum" => Some(format!("{}", sys.stratum)),
-        // ── System info ────────────────────────────────────────────────
+        // ── System info ──────────────────────────────────────────────────
         "sys_jitter" => Some(format!("{:?}", sys.sys_jitter)),
         "sys_leap" => Some(format!("{}", sys.leap as u8)),
         "sys_stratum" => Some(format!("{}", sys.stratum)),
         "sys_peer" => Some(format!("{}", sys.peer_count)),
         "sys_offset" => Some(format!("{:?}", sys.sys_offset)),
         "sys_frequency" => Some(format!("{:?}", sys.sys_frequency)),
-        "system" => Some(format!("{}/{}", std::env::consts::OS, "linux")),
-        // ── TAI ────────────────────────────────────────────────────────
-        "tai" => Some("0".to_string()),
+        "system" => Some(format!("{}/linux", std::env::consts::OS)),
+        // ── TAI ──────────────────────────────────────────────────────────
+        "tai" => Some(format!("{}", sys.tai_offset)),
         "tai_leap" => Some("0".to_string()),
-        "tai_offset" => Some("0".to_string()),
-        // ── Time constant ──────────────────────────────────────────────
+        "tai_offset" => Some(format!("{}", sys.tai_offset as f64)),
+        // ── Time constant ────────────────────────────────────────────────
         "tc" => Some(format!("{}", sys.poll)),
         "tcincrement" => Some("0".to_string()),
-        // ── Version / uptime ───────────────────────────────────────────
+        // ── Version / uptime ─────────────────────────────────────────────
         "version" => Some("ntpsec-rs 1.3.3".to_string()),
         "version_ver" => Some("1.3.3".to_string()),
         "version_prot" => Some("4".to_string()),
-        "uptime" => Some("0".to_string()),
+        "uptime" => Some(format!("{}", sys.uptime_secs)),
         _ => None,
     }
+}
+
+/// Resolve the hostname using libc::gethostname.
+fn get_hostname() -> String {
+    let mut buf = [0i8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return "localhost".to_string();
+    }
+    // Convert C string to Rust string, stopping at the first NUL
+    let bytes: &[u8] = unsafe {
+        let ptr = buf.as_ptr() as *const u8;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        std::slice::from_raw_parts(ptr, len)
+    };
+    String::from_utf8_lossy(bytes).to_string()
 }
 
 /// Peer variable accessor — retrieves a named peer variable.
@@ -950,5 +984,231 @@ mod tests {
         let vars = [("leap", "00"), ("stratum", "1")];
         let encoded = encode_var_list(&vars);
         assert_eq!(encoded, "leap=00,stratum=1");
+    }
+
+    #[test]
+    fn test_system_variable_clock() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.reference_time = crate::ntp_fp::ts_to_ntp(3954678400, 500000);
+        let val = get_system_variable(&sys, "clock").unwrap();
+        // Should be a dolfptoa formatted string like "3954678400.xxx"
+        assert!(!val.is_empty(), "clock should not be empty");
+        // ts_to_ntp adds NTP_TO_UNIX_OFFSET (2208988800)
+        // 3954678400 + 2208988800 = 6163667200
+        // Accept NTP-epoch formatted seconds
+        assert!(
+            val.starts_with("6163667200."),
+            "clock should start with NTP-epoch seconds, got: {}",
+            val
+        );
+    }
+
+    #[test]
+    fn test_system_variable_compliance() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        // Offset < 1ms → compliance = 1
+        sys.sys_offset = 0.0005;
+        assert_eq!(get_system_variable(&sys, "compliance").unwrap(), "1");
+        // Offset > 1ms → compliance = 0
+        sys.sys_offset = 0.005;
+        assert_eq!(get_system_variable(&sys, "compliance").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_system_variable_hostname() {
+        let sys = crate::ntp_proto::SystemState::new();
+        let host = get_system_variable(&sys, "hostname").unwrap();
+        assert!(!host.is_empty(), "hostname should not be empty");
+        // Should be "host" alias too
+        let host2 = get_system_variable(&sys, "host").unwrap();
+        assert_eq!(host, host2);
+    }
+
+    #[test]
+    fn test_system_variable_flash_and_status() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.sys_flash = 0x1FF;
+        sys.sys_status = 0xC01E;
+        let flash = get_system_variable(&sys, "flash").unwrap();
+        assert_eq!(flash, "1ff", "flash should be hex");
+        let status = get_system_variable(&sys, "status").unwrap();
+        assert_eq!(status, "c01e", "status should be 4-char hex");
+    }
+
+    #[test]
+    fn test_system_variable_auth_counters() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.auth_counters.badauth = 42;
+        sys.auth_counters.badkey = 7;
+        sys.auth_counters.decrypts = 100;
+        sys.auth_counters.encrypts = 200;
+        sys.auth_counters.foundkey = 15;
+        sys.auth_counters.notfound = 3;
+        sys.auth_counters.reset_count = 1;
+        assert_eq!(get_system_variable(&sys, "auth_badauth").unwrap(), "42");
+        assert_eq!(get_system_variable(&sys, "auth_badkey").unwrap(), "7");
+        assert_eq!(get_system_variable(&sys, "auth_decrypts").unwrap(), "100");
+        assert_eq!(get_system_variable(&sys, "auth_encrypts").unwrap(), "200");
+        assert_eq!(get_system_variable(&sys, "auth_foundkey").unwrap(), "15");
+        assert_eq!(get_system_variable(&sys, "auth_notfound").unwrap(), "3");
+        assert_eq!(get_system_variable(&sys, "auth_reset").unwrap(), "1");
+    }
+
+    #[test]
+    fn test_system_variable_server_counters() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.server_counters.received = 1000;
+        sys.server_counters.rejected = 5;
+        sys.server_counters.restricted = 3;
+        sys.server_counters.kodsent = 2;
+        sys.server_counters.badlength = 1;
+        sys.server_counters.limited = 10;
+        sys.server_counters.badauth = 0;
+        sys.server_counters.declined = 4;
+        sys.server_counters.oldver = 7;
+        sys.server_counters.thisver = 993;
+        sys.server_counters.delayed = 0;
+
+        assert_eq!(get_system_variable(&sys, "ss_received").unwrap(), "1000");
+        assert_eq!(get_system_variable(&sys, "ss_rejected").unwrap(), "5");
+        assert_eq!(get_system_variable(&sys, "ss_restricted").unwrap(), "3");
+        assert_eq!(get_system_variable(&sys, "ss_kodsent").unwrap(), "2");
+        assert_eq!(get_system_variable(&sys, "ss_badlength").unwrap(), "1");
+        assert_eq!(get_system_variable(&sys, "ss_limited").unwrap(), "10");
+        assert_eq!(get_system_variable(&sys, "ss_badauth").unwrap(), "0");
+        assert_eq!(get_system_variable(&sys, "ss_declined").unwrap(), "4");
+        assert_eq!(get_system_variable(&sys, "ss_oldver").unwrap(), "7");
+        assert_eq!(get_system_variable(&sys, "ss_thisver").unwrap(), "993");
+        assert_eq!(get_system_variable(&sys, "ss_delayed").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_system_variable_clk_wander() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.sys_wander = 0.001234;
+        let val = get_system_variable(&sys, "clk_wander").unwrap();
+        assert_eq!(val, "0.001234", "clk_wander should be 6-decimal formatted");
+    }
+
+    #[test]
+    fn test_system_variable_expire() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        // Default: leap_expire.seconds == 0 → returns "0"
+        assert_eq!(get_system_variable(&sys, "expire").unwrap(), "0");
+        // When set, returns the raw seconds value (ts_to_ntp adds NTP offset)
+        sys.leap_expire = crate::ntp_fp::ts_to_ntp(3954678400, 0);
+        // 3954678400 + 2208988800 = 6163667200
+        assert_eq!(get_system_variable(&sys, "expire").unwrap(), "6163667200");
+    }
+
+    #[test]
+    fn test_system_variable_uptime() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.uptime_secs = 3600;
+        assert_eq!(get_system_variable(&sys, "uptime").unwrap(), "3600");
+    }
+
+    #[test]
+    fn test_system_variable_tai() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.tai_offset = 37;
+        assert_eq!(get_system_variable(&sys, "tai").unwrap(), "37");
+        assert_eq!(get_system_variable(&sys, "tai_offset").unwrap(), "37");
+    }
+
+    #[test]
+    fn test_system_variable_mintc() {
+        let sys = crate::ntp_proto::SystemState::new();
+        assert_eq!(get_system_variable(&sys, "mintc").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_system_variable_selvars() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.sel_broken = 5;
+        sys.sys_peer_associd = 12345;
+        sys.sys_rootdist = 0.015;
+        assert_eq!(get_system_variable(&sys, "selbroken").unwrap(), "5");
+        assert_eq!(get_system_variable(&sys, "selpeer").unwrap(), "12345");
+        assert!(
+            !get_system_variable(&sys, "seldisp").unwrap().is_empty(),
+            "seldisp should not be empty"
+        );
+    }
+
+    #[test]
+    fn test_system_variable_leap_fields() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.leap_second_status = 1;
+        sys.leap_alert = 1;
+        sys.leap_before = 86400;
+        sys.leap_after = 0;
+        assert_eq!(get_system_variable(&sys, "leapsec").unwrap(), "1");
+        assert_eq!(get_system_variable(&sys, "leap_alert").unwrap(), "1");
+        assert_eq!(get_system_variable(&sys, "leap_before").unwrap(), "86400");
+        assert_eq!(get_system_variable(&sys, "leap_after").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_system_variable_ss_uptime() {
+        let mut sys = crate::ntp_proto::SystemState::new();
+        sys.uptime_secs = 7200;
+        assert_eq!(get_system_variable(&sys, "ss_uptime").unwrap(), "7200");
+    }
+
+    #[test]
+    fn test_system_variable_auth_counters_default_zero() {
+        let sys = crate::ntp_proto::SystemState::new();
+        // All auth counters should default to "0"
+        for name in &[
+            "auth_badauth",
+            "auth_badkey",
+            "auth_decrypts",
+            "auth_encrypts",
+            "auth_foundkey",
+            "auth_notfound",
+            "auth_reset",
+        ] {
+            assert_eq!(
+                get_system_variable(&sys, name).unwrap(),
+                "0",
+                "{} should default to 0",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_variable_server_counters_default_zero() {
+        let sys = crate::ntp_proto::SystemState::new();
+        for name in &[
+            "ss_badauth",
+            "ss_badlength",
+            "ss_declined",
+            "ss_delayed",
+            "ss_kodsent",
+            "ss_limited",
+            "ss_oldver",
+            "ss_received",
+            "ss_rejected",
+            "ss_restricted",
+            "ss_thisver",
+        ] {
+            assert_eq!(
+                get_system_variable(&sys, name).unwrap(),
+                "0",
+                "{} should default to 0",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_hostname() {
+        let host = super::get_hostname();
+        assert!(!host.is_empty(), "hostname should not be empty");
+        // Should at least contain some standard localhost name
+        // In test environments, it might be "localhost" or actual hostname
+        assert!(host.len() <= 255, "hostname too long: {}", host.len());
     }
 }

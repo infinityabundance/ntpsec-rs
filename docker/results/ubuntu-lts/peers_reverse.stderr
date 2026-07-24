@@ -1,2 +1,24 @@
-***Request timed out
-
+Traceback (most recent call last):
+  File "/usr/bin/ntpq", line 1888, in <module>
+    interpreter.onecmd(interpreter.precmd(command))
+  File "/usr/lib/python3.12/cmd.py", line 217, in onecmd
+    return func(arg)
+           ^^^^^^^^^
+  File "/usr/bin/ntpq", line 1200, in do_peers
+    self.__dopeers(showall=True, mode="peers")
+  File "/usr/bin/ntpq", line 263, in __dopeers
+    self.say(report.summary(self.session.rstatus,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/ntp/util.py", line 1067, in summary
+    last_sync = int(now - ntp.ntpc.lfptofloat(reftime))
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/ntp/ntpc.py", line 121, in lfptofloat
+    return _lfp_wrap(_lfptofloat, in_string)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/ntp/ntpc.py", line 99, in _lfp_wrap
+    mid_bytes = ntp.poly.polybytes(in_string)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/ntp/poly.py", line 69, in polybytes
+    return bytes(s)
+           ^^^^^^^^
+TypeError: cannot convert 'float' object to bytes

@@ -1283,6 +1283,9 @@ impl DaemonEngine {
             .add(TimerEntry::new(TimerEvent::Housekeeping, 64, 64));
         self.timers
             .add(TimerEntry::new(TimerEvent::Reachability, 64, 64));
+        // Schedule stats write timer (every 10 iterations ≈ 10 seconds)
+        self.timers
+            .add(TimerEntry::new(TimerEvent::StatsWrite, 10, 10));
     }
 
     /// Handle a single event. Returns actions for the shell to execute.
@@ -1401,9 +1404,9 @@ impl DaemonEngine {
             }
         }
 
-        // ── Periodic stats writes (every 100 iterations) ──────────────
+        // ── Periodic stats writes (every 10 iterations) ───────────────
         self.stats_write_counter += 1;
-        if self.stats_write_counter % 100 == 0 {
+        if self.stats_write_counter % 10 == 0 {
             if let Some(ref stats_dir) = self.stats_dir {
                 let path = std::path::Path::new(stats_dir);
                 // Write loopstats
@@ -1477,9 +1480,13 @@ impl DaemonEngine {
         if sys_peer_idx < self.peers.len() {
             self.system_peer_id = Some(sys_peer_idx);
             self.system_peer_associd = self.peers.get(sys_peer_idx).map(|p| p.associd);
+            self.system.sys_peer_associd = self.system_peer_associd.unwrap_or(0);
         } else {
             self.system_peer_id = None;
             self.system_peer_associd = None;
+            self.system.sys_peer_associd = 0;
+            // No survivor found — count as a broken selection attempt
+            self.system.sel_broken = self.system.sel_broken.saturating_add(1);
         }
 
         // Write updated peer state back
@@ -1520,6 +1527,9 @@ impl DaemonEngine {
             let adj = self.loop_filter.local_clock(sys_offset, now);
             actions.push(DaemonAction::AdjustClock(adj));
 
+            // Propagate loop filter wander to system state
+            self.system.sys_wander = self.loop_filter.wander;
+
             // Persist drift periodically
             if self.loop_filter.update_count % 100 == 0 {
                 actions.push(DaemonAction::PersistDrift(self.loop_filter.frequency_ppm()));
@@ -1538,7 +1548,46 @@ impl DaemonEngine {
             }
         }
 
+        // ── Update uptime ─────────────────────────────────────────────────
+        if self.system.start_time.seconds > 0 {
+            let elapsed = now.seconds - self.system.start_time.seconds;
+            self.system.uptime_secs = if elapsed > 0 { elapsed as u64 } else { 0 };
+        }
+
+        // ── Update system status word ─────────────────────────────────────
+        self.system.sys_status = self.compute_system_status();
+
+        // ── Update system flash bits (aggregate from peers) ──────────────
+        let mut agg_flash = 0u32;
+        for i in 0..self.peers.len() {
+            if let Some(peer) = self.peers.get(i) {
+                agg_flash |= peer.flash;
+            }
+        }
+        self.system.sys_flash = agg_flash;
+
         actions
+    }
+
+    /// Compute the system status word (matching ntpsec format).
+    /// High byte: LI(2) | clock_source(3) | unused(3)
+    /// Low byte:  count(8)
+    /// See ntp_control.h sys_status() macro.
+    fn compute_system_status(&self) -> u16 {
+        let li = match self.system.leap {
+            LeapIndicator::NoWarning => 0,
+            LeapIndicator::AddLeapSecond => 1,
+            LeapIndicator::RemoveLeapSecond => 2,
+            LeapIndicator::Alarm => 3,
+        };
+        // Clock source: 0=unsync, 6=ordinary reference, 4=PPS, etc.
+        let clock_source = if self.system.stratum < crate::ntp_proto::NTP_MAXSTRAT {
+            6
+        } else {
+            0
+        };
+        let count = self.system.peer_count.min(0xFF) as u16;
+        ((li as u16) << 14) | ((clock_source as u16) << 11) | count
     }
 
     /// Handle a received NTP packet.
@@ -1564,10 +1613,25 @@ impl DaemonEngine {
             return self.handle_control(&dgram.bytes, dgram.source);
         }
 
+        // ── Version tracking for NTP time packets ─────────────────────────
+        // Version is in bits 3-5 of byte 0; mode is in bits 0-2.
+        let pkt_version = NtpVersion::from_bits((dgram.bytes[0] >> 3) & 0x07);
+        if pkt_version == NtpVersion::V4 || pkt_version == NtpVersion::V3 {
+            self.system.server_counters.thisver =
+                self.system.server_counters.thisver.saturating_add(1);
+        } else {
+            self.system.server_counters.oldver =
+                self.system.server_counters.oldver.saturating_add(1);
+        }
+
         // 1. Decode 48-byte NTP header for time protocol packets
         let pkt = match NtpPacket::decode_header(&dgram.bytes) {
             Ok(p) => p,
-            Err(e) => return vec![DaemonAction::Log(format!("bad packet header: {e}"))],
+            Err(e) => {
+                self.system.server_counters.rejected =
+                    self.system.server_counters.rejected.saturating_add(1);
+                return vec![DaemonAction::Log(format!("bad packet header: {e}"))];
+            }
         };
 
         // 1a. Loopcast detection: check if we received our own NTP packet.
@@ -1577,6 +1641,8 @@ impl DaemonEngine {
         //     use 127.0.0.1:123.  We detect it by comparing the source and
         //     destination NetAddr fields.
         if dgram.source == dgram.destination && !dgram.source.is_ipv4_loopback() {
+            self.system.server_counters.rejected =
+                self.system.server_counters.rejected.saturating_add(1);
             // Only warn if not a loopback test scenario
             return vec![DaemonAction::Log(format!(
                 "loopcast detected: src={} == dst={}",
@@ -1593,8 +1659,16 @@ impl DaemonEngine {
 
         match restrict_action {
             RestrictAction::Accept => {} // Continue processing
-            RestrictAction::Ignore | RestrictAction::Discard => return vec![],
+            RestrictAction::Ignore | RestrictAction::Discard => {
+                self.system.server_counters.restricted =
+                    self.system.server_counters.restricted.saturating_add(1);
+                return vec![];
+            }
             RestrictAction::SendKod => {
+                self.system.server_counters.restricted =
+                    self.system.server_counters.restricted.saturating_add(1);
+                self.system.server_counters.kodsent =
+                    self.system.server_counters.kodsent.saturating_add(1);
                 let kod_pkt =
                     build_kod_packet(&pkt, &self.system, dgram.rx_timestamp, self.precision);
                 return vec![DaemonAction::Send {
@@ -1608,12 +1682,16 @@ impl DaemonEngine {
         if mode == NtpMode::Client || mode == NtpMode::SymActive {
             let (rate_limited, _) = self.monitor.is_rate_limited(&dgram.source);
             if rate_limited {
+                self.system.server_counters.limited =
+                    self.system.server_counters.limited.saturating_add(1);
                 return vec![];
             }
         }
 
         // 4. Basic size validation
         if dgram.bytes.len() < NTP_HEADER_SIZE {
+            self.system.server_counters.badlength =
+                self.system.server_counters.badlength.saturating_add(1);
             return vec![DaemonAction::Log("packet too short".to_string())];
         }
 
@@ -1622,8 +1700,12 @@ impl DaemonEngine {
             // ─── Client request → respond as server ────────────────────────
             NtpMode::Client | NtpMode::SymActive => {
                 if self.system.stratum >= NTP_MAXSTRAT {
+                    self.system.server_counters.declined =
+                        self.system.server_counters.declined.saturating_add(1);
                     return vec![]; // Not synchronized yet
                 }
+                self.system.server_counters.received =
+                    self.system.server_counters.received.saturating_add(1);
                 let resp =
                     build_response(&pkt, None, &self.system, dgram.rx_timestamp, self.precision);
                 return vec![DaemonAction::Send {
@@ -1634,11 +1716,15 @@ impl DaemonEngine {
 
             // ─── Server response → update matching peer ────────────────
             NtpMode::Server => {
+                self.system.server_counters.received =
+                    self.system.server_counters.received.saturating_add(1);
                 return self.handle_server_response(pkt, dgram);
             }
 
             // ─── Symmetric passive (Mode 2) — create ephemeral peer ─────
             NtpMode::SymPassive => {
+                self.system.server_counters.received =
+                    self.system.server_counters.received.saturating_add(1);
                 let mut actions: Vec<DaemonAction> = Vec::new();
                 // Check if we already have an association for this source
                 let src_sa = crate::ntp_monitor::netaddr_to_sockaddr(&dgram.source);
@@ -1693,6 +1779,8 @@ impl DaemonEngine {
 
             // ─── Broadcast (Mode 5) — handle with optional auth ─────────────
             NtpMode::Broadcast => {
+                self.system.server_counters.received =
+                    self.system.server_counters.received.saturating_add(1);
                 let mut actions: Vec<DaemonAction> = Vec::new();
                 // Check if we have a broadcast association for this source
                 let src_sa = crate::ntp_monitor::netaddr_to_sockaddr(&dgram.source);
@@ -1748,6 +1836,8 @@ impl DaemonEngine {
 
             // ─── Private/ntpdc (Mode 7) — deprecated ───────────────────────
             NtpMode::Private => {
+                self.system.server_counters.rejected =
+                    self.system.server_counters.rejected.saturating_add(1);
                 return vec![DaemonAction::Log(
                     "private mode packet (ntpdc) received — deprecated, dropped".to_string(),
                 )];
@@ -2399,6 +2489,25 @@ impl DaemonEngine {
         }
 
         actions
+    }
+
+    /// Flush all pending statistics (loopstats and peerstats) to disk.
+    /// Called on graceful shutdown (SIGTERM) to ensure stats are persisted
+    /// even when the periodic timer hasn't fired yet.
+    pub fn flush_stats(&mut self) {
+        if let Some(ref stats_dir) = self.stats_dir {
+            let path = std::path::Path::new(stats_dir);
+            let _ = self.filegen.write_loopstats(
+                &path.join("loopstats"),
+                &self.system,
+                self.loop_filter.frequency_ppm(),
+            );
+            for i in 0..self.peers.len() {
+                if let Some(peer) = self.peers.get(i) {
+                    let _ = self.filegen.write_peerstats(&path.join("peerstats"), peer);
+                }
+            }
+        }
     }
 }
 
