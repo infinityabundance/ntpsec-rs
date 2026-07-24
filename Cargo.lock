@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "ntpsec-rs-core",
  "ntpsec-rs-d",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aes",
  "aes-siv",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-d"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "libc",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-dig"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-frob"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "libc",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-io"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "libc",
  "ntpsec-rs-core",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-keygen"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "libc",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-leapfetch"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-loggps"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-logtemp"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-mon"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-query"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-snmpd"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-sweep"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-time"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "libc",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-trace"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-viz"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "ntpsec-rs-wait"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
@@ -1311,7 +1311,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
 ]
