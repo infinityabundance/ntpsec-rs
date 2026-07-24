@@ -1,20 +1,8 @@
 associd=0 status=0514 leap_none, sync_local, 1 reach_brd,
-version=ntpd ntpsec-1.2.2a
-processor=x86_64
-system=Linux/7.1.3-2-cachyos
-leap=00
-stratum=11
-precision=-24
-rootdelay=0.000
-rootdisp=7947.500
-refid=127.127.1.0
-reftime=ee0d46e4.7f375c62
-peer=37547
-tc=6
-offset=0.000000
-frequency=0.000000
-sys_jitter=0.000000
-clk_jitter=0.000056
-clock=ee0d46e5.7d2c44b2
-clk_wander=0.000000
-mintc=0
+version=ntpd ntpsec-1.2.2a, processor=x86_64,
+system=Linux/7.1.3-2-cachyos, leap=00, stratum=11,
+precision=-24, rootdelay=0.000, rootdisp=7947.500,
+refid=127.127.1.0, reftime=ee0d484b.3147a0c6, peer=37547,
+tc=6, offset=0.000000, frequency=0.000000,
+sys_jitter=0.000000, clk_jitter=0.000056,
+clock=ee0d484c.2f29ed7f, clk_wander=0.000000, mintc=0,
