@@ -665,6 +665,18 @@ pub fn accept_sample(peer: &mut Peer, offset: f64, delay: f64, dispersion: f64, 
 
 /// Determine the next poll time.  Matching ntpsec's `poll_update()`.
 pub fn poll_update(peer: &mut Peer, now: NtpTs64) {
+    // Burst/iburst mode (NTPsec behavior)
+    if peer.burst > 0 {
+        // Send multiple packets at short intervals
+        if peer.burst > 1 {
+            peer.hpoll = peer.minpoll.max(NTP_MINPOLL + 1);
+        }
+        peer.burst -= 1;
+        if peer.burst == 0 && peer.retry > 0 {
+            peer.retry = 0;
+        }
+    }
+
     // If peer is reachable and offset is small, increase poll interval
     // toward maxpoll.  If unreachable, decrease toward minpoll.
     if peer.reach.is_reachable() {

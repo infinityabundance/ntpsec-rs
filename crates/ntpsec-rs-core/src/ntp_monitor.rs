@@ -80,6 +80,11 @@ impl MonList {
         self.entries.is_empty()
     }
 
+    /// Check if the MRU monitor is enabled (i.e. has a non-zero max_entries).
+    pub fn is_enabled(&self) -> bool {
+        self.max_entries > 0
+    }
+
     /// Check if a source address is rate-limited (using NetAddr from daemon_engine).
     /// Returns (is_limited, packet_count).
     pub fn is_rate_limited(&self, addr: &NetAddr) -> (bool, u32) {

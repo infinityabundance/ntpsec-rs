@@ -99,6 +99,11 @@ pub struct LoopFilter {
     pub clock_set: bool,
     /// Whether we're in the initial slew-after-step period.
     pub initial_slew: bool,
+
+    /// Maximum clock error estimate (seconds), used for adjtimex MAXERROR.
+    pub max_error: f64,
+    /// Estimated clock error (seconds), used for adjtimex ESTERROR.
+    pub est_error: f64,
 }
 
 impl LoopFilter {
@@ -121,6 +126,8 @@ impl LoopFilter {
             panic_threshold: PANIC_TIME,
             clock_set: false,
             initial_slew: false,
+            max_error: 0.0,
+            est_error: 0.0,
         }
     }
 
@@ -211,8 +218,28 @@ impl LoopFilter {
                 (offset - self.phase) / tau_sec
             }
             DisciplineType::KernelPll => {
-                // Kernel PLL: adjust via adjtimex; we just do PLL here
-                offset / (tau_sec * 16.0)
+                // Kernel PLL: call adjtimex to let the kernel discipline the clock
+                let mut tmx: libc::timex = unsafe { std::mem::zeroed() };
+                tmx.modes = libc::MOD_OFFSET
+                    | libc::MOD_MAXERROR
+                    | libc::MOD_ESTERROR
+                    | libc::MOD_STATUS
+                    | libc::MOD_TIMECONST;
+                tmx.offset = (offset * 1_000_000_000.0) as i64; // seconds → nanoseconds
+                tmx.maxerror = (self.max_error * 1_000_000.0) as i64; // seconds → microseconds
+                tmx.esterror = (self.est_error * 1_000_000.0) as i64;
+                tmx.status = libc::STA_PLL;
+                tmx.constant = self.poll as i64;
+                let rc = unsafe { libc::adjtimex(&mut tmx) };
+                if rc < 0 {
+                    tracing::warn!("adjtimex failed: {}", std::io::Error::last_os_error());
+                }
+                // The kernel handles the phase/frequency adjustment; update bookkeeping and return.
+                self.last_update = now;
+                self.clock_set = true;
+                self.offset = 0.0;
+                self.phase = 0.0;
+                return Adjustment::Slew(0.0, self.frequency);
             }
         };
 

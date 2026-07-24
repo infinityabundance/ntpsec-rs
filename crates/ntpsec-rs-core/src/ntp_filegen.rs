@@ -97,6 +97,26 @@ impl FileGenRegistry {
     }
 }
 
+/// Maximum file size before rotation (10MB default).
+pub const FILEGEN_MAX_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Rotate a statistics file when it exceeds `FILEGEN_MAX_SIZE`.
+pub fn rotate_file(path: &Path) -> Result<(), String> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > FILEGEN_MAX_SIZE {
+            // Rotate: file -> file.0, file.0 -> file.1, etc.
+            for i in (1..=9).rev() {
+                let old = path.with_extension(format!("{}", i));
+                let new = path.with_extension(format!("{}", i + 1));
+                let _ = std::fs::rename(&old, &new);
+            }
+            let backup = path.with_extension("1");
+            let _ = std::fs::rename(path, &backup);
+        }
+    }
+    Ok(())
+}
+
 /// Open and write to a statistics file.
 pub fn write_stat_file(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -110,5 +130,7 @@ pub fn write_stat_file(path: &Path, content: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot open stats file '{}': {}", path.display(), e))?;
     writeln!(file, "{}", content)
         .map_err(|e| format!("cannot write to stats file '{}': {}", path.display(), e))?;
+    // Rotate if needed
+    let _ = rotate_file(path);
     Ok(())
 }

@@ -49,13 +49,15 @@ pub struct Peer {
 
     pub keyid: u32,
     pub flags: PeerFlags,
+    pub burst: u8, // remaining burst packets
+    pub retry: u8, // remaining retry attempts
     /// Stable association ID (1-based, immutable after creation).
     pub associd: u16,
 }
 
 bitflags::bitflags! {
     /// Peer flags matching ntpsec.
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct PeerFlags: u32 {
         const NONE      = 0;
         const AUTHENABLE = 1 << 0;  // can authenticate
@@ -120,6 +122,8 @@ impl Peer {
             },
             keyid: 0,
             flags: PeerFlags::NONE,
+            burst: 0,
+            retry: 0,
             associd: 0,
         }
     }
@@ -132,6 +136,19 @@ impl Peer {
     /// Has the peer synchronized?
     pub fn is_sync(&self) -> bool {
         self.stratum < 16 && self.is_reachable()
+    }
+
+    /// Create a minimal peer for testing with a given association ID.
+    pub fn with_associd(associd: u16) -> Self {
+        let mut p = Self::new(
+            unsafe { std::mem::zeroed() },
+            NtpMode::Client,
+            NtpVersion::V4,
+            4,
+            10,
+        );
+        p.associd = associd;
+        p
     }
 }
 
@@ -203,5 +220,69 @@ impl PeerTable {
                     _ => false,
                 }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_peer_new() {
+        let peer = Peer::with_associd(12345);
+        assert_eq!(peer.associd, 12345);
+        assert_eq!(peer.stratum, 16);
+        assert_eq!(peer.leap, LeapIndicator::Alarm);
+        assert!(!peer.reach.is_reachable());
+    }
+
+    #[test]
+    fn test_peer_reachability() {
+        let mut peer = Peer::with_associd(1);
+        assert!(!peer.reach.is_reachable());
+        peer.reach.record_success();
+        assert!(peer.reach.is_reachable());
+    }
+
+    #[test]
+    fn test_peer_default_params() {
+        let peer = Peer::with_associd(42);
+        assert_eq!(peer.minpoll, 4);
+        assert_eq!(peer.maxpoll, 10);
+        assert_eq!(peer.hpoll, 4);
+        assert!(peer.dstadr.is_none());
+        assert_eq!(peer.keyid, 0);
+        assert_eq!(peer.flags, PeerFlags::NONE);
+    }
+
+    #[test]
+    fn test_peer_table() {
+        let mut table = PeerTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+
+        let p = Peer::with_associd(1);
+        table.add(p);
+        assert!(!table.is_empty());
+        assert_eq!(table.len(), 1);
+
+        let p2 = Peer::with_associd(2);
+        table.add(p2);
+        assert_eq!(table.len(), 2);
+
+        table.remove(0);
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn test_peer_is_sync() {
+        let mut peer = Peer::with_associd(1);
+        assert!(!peer.is_sync()); // stratum 16, not reachable
+
+        peer.stratum = 4;
+        assert!(!peer.is_sync()); // not reachable
+
+        peer.reach.record_success();
+        assert!(peer.is_sync()); // stratum < 16 and reachable
     }
 }
