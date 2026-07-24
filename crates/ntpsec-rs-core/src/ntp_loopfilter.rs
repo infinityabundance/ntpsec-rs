@@ -361,6 +361,11 @@ impl LoopFilter {
     pub fn set_tc(&mut self, tc: u8) {
         self.tc = tc.clamp(MIN_TC, MAX_TC);
     }
+
+    /// Set the frequency (PPM) directly.
+    pub fn set_frequency(&mut self, freq: f64) {
+        self.frequency = freq;
+    }
 }
 
 /// Clock adjustment type returned by `local_clock()`.

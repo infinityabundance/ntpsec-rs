@@ -290,6 +290,25 @@ impl ControlMessage {
     }
 }
 
+/// Build a Mode 6 error response given a request header and error code.
+///
+/// Error codes (RFC 9327 §5.6):
+///   1 = Auth, 2 = Format, 3 = Opcode, 4 = NotFound,
+///   5 = NotKnown, 6 = BadValue, 7 = Admin
+pub fn build_error_response(req: &ControlMessage, err_code: u8) -> Vec<u8> {
+    let mut resp = ControlMessage {
+        li_vn_mode: req.li_vn_mode,
+        opcode: ControlOpcode::new(true, true, false, ControlOpcode::from_u8(req.opcode).op)
+            .to_u8(),
+        sequence: req.sequence,
+        status: (err_code as u16) << 8,
+        associd: req.associd,
+        offset: 0,
+        count: 0,
+    };
+    resp.encode().to_vec()
+}
+
 /// A parsed control request/response pair.
 #[derive(Debug, Clone)]
 pub struct ControlExchange {

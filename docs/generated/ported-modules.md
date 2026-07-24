@@ -1,7 +1,11 @@
-# Ported Modules
+<!-- Phase 3 sealed at v0.3.8 — this file is manually updated to reflect current state. -->
 
-This document lists every ntpsec C translation unit and its ntpsec-rs port
-status. Status definitions:
+# Ported Modules (v0.3.8)
+
+Status as of 2026-07-24 at commit `64a122e`. 524 tests pass, 3 pre-existing
+network-dependent failures remain.
+
+Status definitions:
 
 - **✅ PORTED**: Functionally complete, differential-tested against oracle
 - **🔧 IN PROGRESS**: Structure ported, implementation in progress

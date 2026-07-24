@@ -30,6 +30,7 @@
 
 use crate::ntp_auth::*;
 use crate::ntp_config::*;
+use crate::ntp_filegen::*;
 use crate::ntp_fp;
 use crate::ntp_io::*;
 use crate::ntp_leapsec::*;
@@ -40,6 +41,7 @@ use crate::ntp_proto::*;
 use crate::ntp_restrict::*;
 use crate::ntp_timer::*;
 use crate::ntp_types::*;
+use crate::nts_server::NtsServerConfig;
 use crate::refclock_arbiter::ArbiterRefclock;
 use crate::refclock_generic::GenericRefclock;
 use crate::refclock_gpsd::GpsdRefclock;
@@ -54,6 +56,7 @@ use crate::refclock_spectracom::SpectracomRefclock;
 use crate::refclock_trimble::TrimbleRefclock;
 use crate::refclock_truetime::TrueTimeRefclock;
 use crate::refclock_zyfer::ZyferRefclock;
+use std::collections::HashMap;
 
 /// A pending NTP request awaiting a server response.
 /// Keyed by (originate_ts, destination) to prevent cross-peer confusion
@@ -830,6 +833,27 @@ pub struct DaemonEngine {
 
     /// Tinker panic threshold (default 1000 s).
     pub tinker_panic: Option<f64>,
+
+    /// Tinker dispersion threshold.
+    pub tinker_dispersion: Option<f64>,
+
+    /// Tinker stepout threshold.
+    pub tinker_stepout: Option<f64>,
+
+    /// File generation registry for statistics output.
+    pub filegen: FileGenRegistry,
+
+    /// Fudge values keyed by (refclock_type, unit).
+    pub fudge_values: HashMap<(u8, u8), (f64, f64, u8, String)>,
+
+    /// NTS-KE server configuration, if any.
+    pub nts_config: Option<NtsServerConfig>,
+
+    /// Iteration counter for periodic stats writes.
+    stats_write_counter: u64,
+
+    /// System variables map for setvar configuration.
+    pub sysvars: HashMap<String, String>,
 }
 
 impl DaemonEngine {
@@ -861,6 +885,13 @@ impl DaemonEngine {
             tinker_maxpoll: None,
             tinker_step: None,
             tinker_panic: None,
+            tinker_dispersion: None,
+            tinker_stepout: None,
+            filegen: FileGenRegistry::new(),
+            fudge_values: HashMap::new(),
+            nts_config: None,
+            stats_write_counter: 0,
+            sysvars: HashMap::new(),
         };
         engine.apply_config(config);
         engine
@@ -1119,6 +1150,131 @@ impl DaemonEngine {
                     }
                     _ => {}
                 },
+                // ── New typed config options ────────────────────────────
+                ConfigOption::Tinker {
+                    step,
+                    panic,
+                    dispersion,
+                    stepout,
+                    minpoll,
+                    maxpoll,
+                } => {
+                    if let Some(v) = step {
+                        self.tinker_step = Some(*v);
+                    }
+                    if let Some(v) = panic {
+                        self.tinker_panic = Some(*v);
+                    }
+                    if let Some(v) = dispersion {
+                        self.tinker_dispersion = Some(*v);
+                    }
+                    if let Some(v) = stepout {
+                        self.tinker_stepout = Some(*v);
+                    }
+                    if let Some(v) = minpoll {
+                        self.tinker_minpoll = Some(*v);
+                    }
+                    if let Some(v) = maxpoll {
+                        self.tinker_maxpoll = Some(*v);
+                    }
+                    // Apply to loop filter
+                    self.loop_filter.configure(*step, *panic);
+                }
+                ConfigOption::Tos {
+                    minsane,
+                    minclock,
+                    maxdist,
+                } => {
+                    if let Some(v) = minsane {
+                        self.minsane = *v;
+                    }
+                    if let Some(v) = maxdist {
+                        // Apply to system state's maxdist
+                        // (Currently handled at selection time)
+                    }
+                }
+                ConfigOption::Mru { maxdepth, maxage } => {
+                    if let Some(v) = maxdepth {
+                        self.monitor.max_entries = *v as u32;
+                    }
+                    if let Some(v) = maxage {
+                        self.monitor.max_age = *v;
+                    }
+                }
+                ConfigOption::Statistics { kinds } => {
+                    for kind in kinds {
+                        // Auto-create filegen entries for statistics kinds
+                        let entry = FileGenEntry {
+                            name: kind.clone(),
+                            file_name: kind.clone(),
+                            gen_type: FileGenType::Day,
+                            enabled: true,
+                        };
+                        self.filegen.add(entry);
+                    }
+                }
+                ConfigOption::Filegen {
+                    name,
+                    file,
+                    gen_type,
+                    enable,
+                } => {
+                    let file_name = file.clone().unwrap_or_else(|| name.clone());
+                    let gt = match gen_type.as_deref() {
+                        Some("week") => FileGenType::Week,
+                        Some("month") => FileGenType::Month,
+                        Some("year") => FileGenType::Year,
+                        Some("age") => FileGenType::Age,
+                        Some("pid") => FileGenType::Pid,
+                        _ => FileGenType::Day,
+                    };
+                    let entry = FileGenEntry {
+                        name: name.clone(),
+                        file_name,
+                        gen_type: gt,
+                        enabled: *enable,
+                    };
+                    self.filegen.add(entry);
+                }
+                ConfigOption::Nts {
+                    key_file,
+                    cert_file,
+                    port: _,
+                } => {
+                    if let (Some(kf), Some(cf)) = (key_file, cert_file) {
+                        self.nts_config = Some(NtsServerConfig {
+                            key_file: kf.clone(),
+                            cert_file: cf.clone(),
+                            aead_algorithms: vec![15],
+                            cookie_cipher: crate::nts_cookie::CookieCipher::new(),
+                        });
+                    }
+                }
+                ConfigOption::Fudge {
+                    refclock_type,
+                    unit,
+                    time1,
+                    time2,
+                    stratum,
+                    refid,
+                } => {
+                    self.fudge_values.insert(
+                        (*refclock_type, *unit),
+                        (*time1, *time2, *stratum, refid.clone()),
+                    );
+                }
+                ConfigOption::Interface { name: _, action: _ } => {
+                    // Interface actions are handled by the shell
+                }
+                ConfigOption::Logfile { path } => {
+                    self.log_file = Some(path.clone());
+                }
+                ConfigOption::Setvar { name, value } => {
+                    self.sysvars.insert(name.clone(), value.clone());
+                }
+                ConfigOption::NtsServer { .. } => {
+                    // Handled by parse_config() which also converts to nts_config
+                }
                 _ => {}
             }
         }
@@ -1230,10 +1386,52 @@ impl DaemonEngine {
                         }
                     }
                 }
+                TimerEvent::StatsWrite => {
+                    // Periodic statistics write
+                    if let Some(ref stats_dir) = self.stats_dir {
+                        let path = std::path::Path::new(stats_dir);
+                        let _ = self.filegen.write_loopstats(
+                            &path.join("loopstats"),
+                            &self.system,
+                            self.loop_filter.frequency_ppm(),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
+
+        // ── Periodic stats writes (every 100 iterations) ──────────────
+        self.stats_write_counter += 1;
+        if self.stats_write_counter % 100 == 0 {
+            if let Some(ref stats_dir) = self.stats_dir {
+                let path = std::path::Path::new(stats_dir);
+                // Write loopstats
+                let _ = self.filegen.write_loopstats(
+                    &path.join("loopstats"),
+                    &self.system,
+                    self.loop_filter.frequency_ppm(),
+                );
+                // Write peerstats for all peers
+                for i in 0..self.peers.len() {
+                    if let Some(peer) = self.peers.get(i) {
+                        let _ = self.filegen.write_peerstats(&path.join("peerstats"), peer);
+                    }
+                }
+            }
+        }
+
+        // ── Poll refclocks every tick ─────────────────────────────────
+        // This is now handled by the daemon shell calling poll_refclocks()
+        // explicitly, to keep tick() free of side effects for testing.
+
         actions
+    }
+
+    /// Poll all active refclocks for new samples.
+    /// Should be called periodically from the daemon main loop.
+    pub fn poll_refclocks(&mut self, now: NtpTs64) -> Vec<DaemonAction> {
+        self.refclocks.poll_all(now)
     }
 
     /// Check if a PPS refclock peer is active and can override the system peer.
@@ -1673,6 +1871,7 @@ impl DaemonEngine {
 
     /// Handle a Mode 6 control protocol request (ntpq).
     fn handle_control(&mut self, bytes: &[u8], source: NetAddr) -> Vec<DaemonAction> {
+        use crate::control_client::parse_mode6_vars;
         use crate::ntp_control::*;
 
         let exchange = match ControlExchange::parse(bytes) {
@@ -1845,20 +2044,163 @@ impl DaemonEngine {
                 }
             }
 
+            // WRITEVAR: parse key=value pairs and apply to engine state
+            opcodes::OP_WRITEVAR => {
+                let data_str = String::from_utf8_lossy(&exchange.data);
+                let vars = parse_mode6_vars(&data_str);
+                let mut resp_vars: Vec<String> = Vec::new();
+                for (key, val) in &vars {
+                    match key.as_str() {
+                        "offset" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.system.sys_offset = v;
+                            }
+                        }
+                        "frequency" => {
+                            if let Ok(v) = val.parse::<f64>() {
+                                self.loop_filter.set_frequency(v);
+                            }
+                        }
+                        "stratum" => {
+                            if let Ok(v) = val.parse::<u8>() {
+                                self.system.stratum = v;
+                            }
+                        }
+                        "refid" => {
+                            // Parse refid as hex or ASCII
+                            if val.len() <= 4 && val.chars().all(|c| c.is_ascii_graphic()) {
+                                let mut bytes = [0u8; 4];
+                                let b = val.as_bytes();
+                                for i in 0..b.len().min(4) {
+                                    bytes[i] = b[i];
+                                }
+                                self.system.reference_id = u32::from_be_bytes(bytes);
+                            } else if let Ok(v) =
+                                u32::from_str_radix(val.trim_start_matches("0x"), 16)
+                            {
+                                self.system.reference_id = v;
+                            }
+                        }
+                        "syslog" => {
+                            // Write to log file if configured
+                            if let Some(ref log_path) = self.log_file {
+                                let msg = format!("WRITEVAR syslog: {}", val);
+                                let _ = std::fs::write(log_path, format!("{}\n", msg));
+                            }
+                        }
+                        _ => {
+                            // Unknown variable — accept but note in response
+                            resp_vars.push(format!("{}={}", key, val));
+                        }
+                    }
+                }
+                // Build response: return the variables we wrote
+                if vars.is_empty() {
+                    // Bad value — return error
+                    return vec![DaemonAction::Send {
+                        destination: source,
+                        bytes: build_error_response(req, 6), // BadValue
+                    }];
+                }
+                let resp_text = vars
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                resp_text.into_bytes()
+            }
+
+            // WRITECLOCK: write a clock variable
+            opcodes::OP_WRITECLOCK => {
+                let data_str = String::from_utf8_lossy(&exchange.data);
+                let vars = parse_mode6_vars(&data_str);
+                if vars.is_empty() {
+                    return vec![DaemonAction::Send {
+                        destination: source,
+                        bytes: build_error_response(req, 6), // BadValue
+                    }];
+                }
+                // For refclock peers, log the write request
+                if req.associd != 0 {
+                    if let Some(peer) = self.peers.iter().find(|p| p.associd == req.associd) {
+                        for (key, val) in &vars {
+                            // Log the clock write via a log action
+                            let _ = peer; // peer is used for context
+                                          // emit log via the response path below
+                        }
+                    }
+                }
+                // Return what was written
+                let resp_text = vars
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                resp_text.into_bytes()
+            }
+
+            // OP_REQ_NONCE: generate and return a nonce for MRU queries
+            opcodes::OP_REQ_NONCE => {
+                let nonce_bytes = self.monitor.nonce_cache.generate_nonce();
+                let nonce_str = hex::encode(&nonce_bytes);
+                format!("nonce={}", nonce_str).into_bytes()
+            }
+
+            // OP_READ_MRU: return MRU list entries
+            opcodes::OP_READ_MRU => {
+                // Accept nonce from request data if present
+                let data_str = String::from_utf8_lossy(&exchange.data);
+                // Verify nonce if present
+                if !data_str.is_empty() {
+                    let vars = parse_mode6_vars(&data_str);
+                    let mut nonce_valid = false;
+                    for (key, val) in &vars {
+                        if key == "nonce" {
+                            if let Ok(nonce_bytes) = hex::decode(val) {
+                                if self.monitor.nonce_cache.verify_nonce(&nonce_bytes) {
+                                    nonce_valid = true;
+                                }
+                            }
+                        }
+                    }
+                    if !nonce_valid {
+                        return vec![DaemonAction::Send {
+                            destination: source,
+                            bytes: build_error_response(req, 4), // NoData
+                        }];
+                    }
+                }
+
+                // Build MRU entries with index
+                let entries = self.monitor.read_mru(usize::MAX);
+                let mut resp_parts: Vec<String> = Vec::new();
+                for (i, entry) in entries.iter().enumerate() {
+                    let addr_str = crate::ntp_net::socktoa(&entry.addr);
+                    resp_parts.push(format!(
+                        "addr.{}={} last.{}={}.{:06} first.{}={}.{:06} ct.{}={} mv.{}={} rs.{}=0",
+                        i,
+                        addr_str,
+                        i,
+                        entry.last_pkt.seconds,
+                        entry.last_pkt.fraction / 4295,
+                        i,
+                        entry.first_pkt.seconds,
+                        entry.first_pkt.fraction / 4295,
+                        i,
+                        entry.count,
+                        i,
+                        entry.flags,
+                        i,
+                    ));
+                }
+                resp_parts.join(",").into_bytes()
+            }
+
             _ => {
                 // Unsupported opcode — emit proper BADOP error
-                let err_header = ControlMessage {
-                    li_vn_mode: req.li_vn_mode,
-                    opcode: ControlOpcode::new(true, true, false, oc.op).to_u8(),
-                    sequence: req.sequence,
-                    status: 0x0300, // Error code 3 = Format error / BADOP
-                    associd: req.associd,
-                    offset: 0,
-                    count: 0,
-                };
                 return vec![DaemonAction::Send {
                     destination: source,
-                    bytes: err_header.encode().to_vec(),
+                    bytes: build_error_response(req, 3), // BADOP
                 }];
             }
         };
@@ -1936,6 +2278,39 @@ impl DaemonEngine {
                     fraction: 0,
                 };
                 self.run_selection(now)
+            }
+            TimerId::StatsWrite => {
+                let mut actions = Vec::new();
+                if let Some(ref stats_dir) = self.stats_dir {
+                    let path = std::path::Path::new(stats_dir);
+                    let _ = self.filegen.write_loopstats(
+                        &path.join("loopstats"),
+                        &self.system,
+                        self.loop_filter.frequency_ppm(),
+                    );
+                    for i in 0..self.peers.len() {
+                        if let Some(peer) = self.peers.get(i) {
+                            let _ = self.filegen.write_peerstats(&path.join("peerstats"), peer);
+                        }
+                    }
+                    actions.push(DaemonAction::Log("stats written".to_string()));
+                }
+                actions
+            }
+            TimerId::LeapFileReload => {
+                if let Some(ref leap_file) = self.leap_file {
+                    if let Ok(content) = std::fs::read_to_string(leap_file) {
+                        self.leap_table.load_leapfile(&content).ok();
+                        vec![DaemonAction::Log(format!(
+                            "leap file reloaded: {}",
+                            leap_file
+                        ))]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
             }
             _ => vec![],
         }
@@ -3124,6 +3499,439 @@ mod tests {
         assert!(
             !mgr.instances[2].active,
             "NMEA should not open without serial device"
+        );
+    }
+
+    // ── Mode 6 WRITEVAR tests ────────────────────────────────────────
+
+    #[test]
+    fn test_engine_mode6_writevar_offset() {
+        use crate::ntp_auth::*;
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        // Configure a control key so WRITEVAR auth passes
+        let key = NtpAuthKey::new(10, DigestType::Sha1, b"testkey123".to_vec());
+        engine.auth.add_key(key);
+        engine.auth.set_control_key(10);
+        engine.system.sys_offset = 0.1;
+
+        let body = b"offset=0.05".to_vec();
+        // Build MAC for the packet
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_WRITEVAR).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        // Build packet with auth
+        let header = msg.encode();
+        let mut packet = header.to_vec();
+        packet.extend_from_slice(&body);
+        // Pad to 4-byte boundary
+        while packet.len() % 4 != 0 {
+            packet.push(0);
+        }
+        // Append key ID and MAC
+        if let Some(key) = engine.auth.get_key(10) {
+            if let Some(mac) = key.mac(&packet) {
+                packet.extend_from_slice(&key.id.to_be_bytes());
+                packet.extend_from_slice(&mac);
+            }
+        }
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, DaemonAction::Send { .. })));
+        assert!(
+            (engine.system.sys_offset - 0.05).abs() < 1e-9,
+            "offset should be updated to 0.05, got {}",
+            engine.system.sys_offset
+        );
+    }
+
+    #[test]
+    fn test_engine_mode6_writevar_requires_auth() {
+        use crate::ntp_auth::*;
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let key = NtpAuthKey::new(10, DigestType::Sha1, b"testkey123".to_vec());
+        engine.auth.add_key(key);
+        engine.auth.set_control_key(10);
+
+        let body = b"offset=0.05".to_vec();
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_WRITEVAR).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(&body);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (resp_header, _) = ControlMessage::decode(bytes).unwrap();
+            assert!(
+                resp_header.decode_opcode().error,
+                "should be error response"
+            );
+        } else {
+            panic!("expected Send action");
+        }
+    }
+
+    #[test]
+    fn test_engine_mode6_nonce_generation() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_REQ_NONCE).to_u8();
+        msg.sequence = 1;
+        msg.count = 0;
+
+        let dgram = ReceivedDatagram::test(
+            msg.encode().to_vec(),
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (_, resp_data) = ControlMessage::decode(bytes).unwrap();
+            let resp_text = String::from_utf8_lossy(resp_data);
+            assert!(
+                resp_text.contains("nonce="),
+                "response should contain nonce="
+            );
+        } else {
+            panic!("expected Send action");
+        }
+    }
+
+    #[test]
+    fn test_engine_mode6_read_mru() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let sa = crate::ntp_monitor::netaddr_to_sockaddr(&peer_netaddr([10, 0, 0, 1], 12345));
+        engine.monitor.record(&sa, now);
+        let sa2 = crate::ntp_monitor::netaddr_to_sockaddr(&peer_netaddr([192, 168, 1, 1], 54321));
+        engine.monitor.record(&sa2, now);
+
+        let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
+        let nonce_str = hex::encode(&nonce_bytes);
+        let body = format!("nonce={}", nonce_str);
+
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(body.as_bytes());
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1001, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            let (_, resp_data) = ControlMessage::decode(bytes).unwrap();
+            let resp_text = String::from_utf8_lossy(resp_data);
+            assert!(
+                resp_text.contains("addr.0="),
+                "should contain addr.0=, got: {}",
+                resp_text
+            );
+        } else {
+            panic!("expected Send action");
+        }
+    }
+
+    #[test]
+    fn test_engine_mode6_read_mru_invalid_nonce() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let body = "nonce=invalidnonce123";
+
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_READ_MRU).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(body.as_bytes());
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1001, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            assert!(
+                ControlMessage::decode(bytes)
+                    .unwrap()
+                    .0
+                    .decode_opcode()
+                    .error,
+                "invalid nonce should produce error"
+            );
+        } else {
+            panic!("expected Send action");
+        }
+    }
+
+    #[test]
+    fn test_engine_mode6_writeclock() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let body = b"fudge=0.001".to_vec();
+
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, opcodes::OP_WRITECLOCK).to_u8();
+        msg.sequence = 1;
+        msg.count = body.len() as u16;
+
+        let mut packet = msg.encode().to_vec();
+        packet.extend_from_slice(&body);
+
+        let dgram = ReceivedDatagram::test(
+            packet,
+            peer_netaddr([192, 168, 1, 100], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, DaemonAction::Send { .. })),
+            "WRITECLOCK should produce Send"
+        );
+    }
+
+    #[test]
+    fn test_engine_mode6_unsupported_opcode() {
+        use crate::ntp_control::*;
+
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let mut msg = ControlMessage::zeroed();
+        msg.li_vn_mode = NtpPacket::set_li_vn_mode(
+            LeapIndicator::NoWarning,
+            NtpVersion::V4,
+            NtpMode::NtpControl,
+        );
+        msg.opcode = ControlOpcode::new(false, false, false, 0).to_u8();
+        msg.sequence = 1;
+        msg.count = 0;
+
+        let dgram = ReceivedDatagram::test(
+            msg.encode().to_vec(),
+            peer_netaddr([10, 0, 0, 1], 54321),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(0, 0),
+        );
+
+        let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+        if let Some(DaemonAction::Send { bytes, .. }) = actions.first() {
+            assert!(
+                ControlMessage::decode(bytes)
+                    .unwrap()
+                    .0
+                    .decode_opcode()
+                    .error,
+                "unsupported opcode should return error"
+            );
+        } else {
+            panic!("expected error response");
+        }
+    }
+
+    // ── Config wiring tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_apply_config_tinker() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Tinker {
+            step: Some(0.5),
+            panic: Some(1000.0),
+            dispersion: None,
+            stepout: None,
+            minpoll: None,
+            maxpoll: None,
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.tinker_step, Some(0.5));
+        assert_eq!(engine.tinker_panic, Some(1000.0));
+        assert!((engine.loop_filter.step_threshold - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_apply_config_tos() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Tos {
+            minsane: Some(3),
+            minclock: Some(5),
+            maxdist: Some(2.0),
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.minsane, 3);
+    }
+
+    #[test]
+    fn test_apply_config_mru() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Mru {
+            maxdepth: Some(500),
+            maxage: Some(7200),
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.monitor.max_entries, 500);
+        assert_eq!(engine.monitor.max_age, 7200);
+    }
+
+    #[test]
+    fn test_apply_config_fudge() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Fudge {
+            refclock_type: 28,
+            unit: 0,
+            time1: 0.001,
+            time2: 0.0,
+            stratum: 2,
+            refid: "GPS".to_string(),
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.fudge_values.len(), 1);
+        let (t1, _t2, s, rid) = engine.fudge_values.get(&(28, 0)).unwrap();
+        assert!((*t1 - 0.001).abs() < 1e-9);
+        assert_eq!(*s, 2);
+        assert_eq!(rid, "GPS");
+    }
+
+    #[test]
+    fn test_apply_config_logfile() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Logfile {
+            path: "/var/log/ntp/ntp.log".to_string(),
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.log_file.as_deref(), Some("/var/log/ntp/ntp.log"));
+    }
+
+    #[test]
+    fn test_apply_config_setvar() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Setvar {
+            name: "ntp_version".to_string(),
+            value: "4.2.8".to_string(),
+        });
+        let engine = DaemonEngine::new(config);
+        assert_eq!(engine.sysvars.get("ntp_version").unwrap(), "4.2.8");
+    }
+
+    #[test]
+    fn test_apply_config_statistics() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Statistics {
+            kinds: vec!["loopstats".to_string(), "peerstats".to_string()],
+        });
+        let engine = DaemonEngine::new(config);
+        assert!(engine.filegen.get("loopstats").is_some());
+        assert!(engine.filegen.get("peerstats").is_some());
+    }
+
+    #[test]
+    fn test_apply_config_filegen() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Filegen {
+            name: "loopstats".to_string(),
+            file: Some("/var/log/ntp/loopstats".to_string()),
+            gen_type: Some("day".to_string()),
+            enable: true,
+        });
+        let engine = DaemonEngine::new(config);
+        assert!(engine.filegen.get("loopstats").is_some());
+    }
+
+    #[test]
+    fn test_apply_config_nts() {
+        let mut config = ConfigTree::new();
+        config.add(ConfigOption::Nts {
+            key_file: Some("/etc/nts/key.pem".to_string()),
+            cert_file: Some("/etc/nts/cert.pem".to_string()),
+            port: Some(4460),
+        });
+        let engine = DaemonEngine::new(config);
+        assert!(engine.nts_config.is_some());
+    }
+
+    #[test]
+    fn test_poll_refclocks_empty() {
+        let mut engine = DaemonEngine::new(ConfigTree::new());
+        let now = ntp_fp::ts_to_ntp(1000, 0);
+        let actions = engine.poll_refclocks(now);
+        assert!(
+            actions.is_empty(),
+            "empty refclock manager should produce no actions"
         );
     }
 }

@@ -7,6 +7,7 @@
 
 use clap::Parser;
 use ntpsec_rs_core::control_client::*;
+use std::process;
 
 /// NTP query tool — forensic Rust reconstruction of ntpq.
 #[derive(Parser, Debug)]
@@ -17,12 +18,16 @@ struct Cli {
     host: String,
 
     /// Port number (default: 123 for NTP mode 6)
-    #[arg(short = 'p', long, default_value = "123")]
+    #[arg(short = 'P', long, default_value = "123")]
     port: u16,
 
     /// Execute a command
     #[arg(short = 'c', long)]
     command: Vec<String>,
+
+    /// Print list of known peers (shorthand for -c peers)
+    #[arg(short = 'p')]
+    peers: bool,
 
     /// Verbose output
     #[arg(short = 'v', long)]
@@ -56,6 +61,7 @@ enum CliCommand {
     MruList,
     Monitor,
     Trace,
+    SysInfo,
 }
 
 fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
@@ -90,20 +96,75 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
         "mrulist" => Ok(CliCommand::MruList),
         "monitor" | "ntpmon" => Ok(CliCommand::Monitor),
         "trace" | "ntptrace" => Ok(CliCommand::Trace),
+        "sysinfo" => Ok(CliCommand::SysInfo),
         _ => Err(format!("unknown command: {command}")),
     }
+}
+
+fn format_sysinfo(sys: &SystemVariables) -> String {
+    let mut out = String::new();
+    out.push_str("=== System Information ===\n");
+
+    // Key system variables with formatted display
+    let fields = [
+        ("associd", "Association ID"),
+        ("status", "Status"),
+        ("stratum", "Stratum"),
+        ("refid", "Reference ID"),
+        ("reftime", "Reference Time"),
+        ("offset", "Clock Offset"),
+        ("delay", "Root Delay"),
+        ("dispersion", "Root Dispersion"),
+        ("frequency", "Frequency (ppm)"),
+        ("leap", "Leap Indicator"),
+        ("precision", "Precision"),
+        ("rootdelay", "Root Delay"),
+        ("rootdisp", "Root Dispersion"),
+        ("peer", "System Peer"),
+        ("syspeer", "System Peer ID"),
+        ("version", "NTP Version"),
+        ("processor", "Processor"),
+        ("system", "OS"),
+        ("uptime", "Uptime (seconds)"),
+    ];
+
+    for (key, label) in &fields {
+        if let Some(val) = sys.get(key) {
+            out.push_str(&format!("  {:<20} = {}\n", label, val));
+        }
+    }
+
+    let stratum = sys.stratum();
+    let leap = sys.leap_str();
+    out.push_str(&format!("─────────────────────────────────\n"));
+    out.push_str(&format!("  stratum={} leap={}\n", stratum, leap));
+
+    out
 }
 
 fn main() {
     let cli = Cli::parse();
 
-    let mut client = ControlClient::new(cli.timeout, 1);
+    // Determine commands to run: -c flags and -p shorthand
+    let mut commands: Vec<String> = cli.command.clone();
+    if cli.peers {
+        commands.push("peers".to_string());
+    }
 
-    for cmd in &cli.command {
+    if commands.is_empty() {
+        // Default behavior: print system variables (like real ntpq with no args)
+        commands.push("rv".to_string());
+    }
+
+    let mut client = ControlClient::new(cli.timeout, 1);
+    let mut had_error = false;
+
+    for cmd in &commands {
         let result: Result<String, String> = match parse_cli_command(cmd) {
             Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
+                eprintln!("ntpq-rs: {e}");
+                had_error = true;
+                continue;
             }
             Ok(CliCommand::ReadVar { associd }) => {
                 if associd == 0 {
@@ -200,11 +261,22 @@ fn main() {
                     Err(e) => Err(format!("{e}")),
                 }
             }
+            Ok(CliCommand::SysInfo) => client
+                .read_system_vars(&cli.host, cli.port)
+                .map(|sys| format_sysinfo(&sys))
+                .map_err(|e| format!("{e}")),
         };
 
         match result {
             Ok(output) => print!("{}", output),
-            Err(e) => eprintln!("ERROR: {}", e),
+            Err(e) => {
+                eprintln!("ntpq-rs: {e}");
+                had_error = true;
+            }
         }
+    }
+
+    if had_error {
+        process::exit(1);
     }
 }
