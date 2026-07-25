@@ -938,8 +938,10 @@ pub struct DaemonEngine {
     stats_write_counter: u64,
 
     /// Queue of NTS-KE handshakes to perform for NTS-enabled peers.
-    /// The shell pops one per cycle to avoid blocking the event loop.
     pub nts_ke_pending: std::collections::VecDeque<(u16, String, u16)>,
+    /// Currently running NTS-KE handshakes (persistent outstanding jobs).
+    /// The shell polls these for completion each cycle without blocking.
+    pub nts_ke_inflight: Vec<(u16, std::thread::JoinHandle<Result<NtsAssociation, String>>)>,
 
     /// System variables map for setvar configuration.
     pub sysvars: HashMap<String, String>,
@@ -1045,6 +1047,7 @@ impl DaemonEngine {
             nts_associations: HashMap::new(),
             pool_resolver: HashMap::new(),
             nts_ke_pending: std::collections::VecDeque::new(),
+            nts_ke_inflight: Vec::new(),
             stats_write_counter: 0,
             sysvars: HashMap::new(),
             stats_enabled: true,
@@ -1388,10 +1391,13 @@ impl DaemonEngine {
                 } => {
                     if let Some(v) = minsane {
                         self.minsane = *v;
+                        self.selection_policy.minsane = *v;
+                    }
+                    if let Some(v) = minclock {
+                        self.selection_policy.minclock = *v;
                     }
                     if let Some(v) = maxdist {
-                        // Apply to system state's maxdist
-                        // (Currently handled at selection time)
+                        self.selection_policy.maxdist = *v;
                     }
                 }
                 ConfigOption::Mru { maxdepth, maxage } => {
@@ -1656,8 +1662,15 @@ impl DaemonEngine {
                                 Some(&self.auth),
                             )
                             .0;
-                            let bytes = crate::nts_client::build_nts_request(&pkt, nts);
-                            (pkt, bytes)
+                            match crate::nts_client::build_nts_request(&pkt, nts) {
+                                Ok(bytes) => (pkt, bytes),
+                                Err(e) => {
+                                    // NTS request construction failed — skip this poll.
+                                    // The daemon shell layer should log this event
+                                    // from the DaemonAction::Log variant.
+                                    continue;
+                                }
+                            }
                         } else {
                             let (pkt, mac) = build_request(
                                 peer,
@@ -1760,9 +1773,37 @@ impl DaemonEngine {
 
     /// Pop the next pending NTS-KE handshake from the queue.
     /// Returns None when the queue is empty.
-    /// The shell processes one per cycle to avoid blocking the event loop.
     pub fn pop_nts_ke(&mut self) -> Option<(u16, String, u16)> {
         self.nts_ke_pending.pop_front()
+    }
+
+    /// Track a new in-flight NTS-KE handshake.
+    /// The shell calls this after spawning a worker thread.
+    pub fn add_inflight_nts_ke(
+        &mut self,
+        associd: u16,
+        handle: std::thread::JoinHandle<Result<NtsAssociation, String>>,
+    ) {
+        self.nts_ke_inflight.push((associd, handle));
+    }
+
+    /// Poll all in-flight NTS-KE handshakes for completion.
+    /// Returns completed associations. Unfinished workers remain in the list.
+    pub fn try_recv_nts_ke(&mut self) -> Vec<(u16, Result<NtsAssociation, String>)> {
+        let mut done = Vec::new();
+        let mut alive = Vec::new();
+        for (associd, handle) in self.nts_ke_inflight.drain(..) {
+            if handle.is_finished() {
+                match handle.join() {
+                    Ok(result) => done.push((associd, result)),
+                    Err(_) => done.push((associd, Err("NTS-KE thread panicked".to_string()))),
+                }
+            } else {
+                alive.push((associd, handle));
+            }
+        }
+        self.nts_ke_inflight = alive;
+        done
     }
 
     /// Add an NTS association result from a completed NTS-KE handshake.
@@ -2490,7 +2531,8 @@ impl DaemonEngine {
         if peer.flags.contains(PeerFlags::NTS) && nts_assocs.contains_key(&peer.associd) {
             let nts_ok = nts_assocs
                 .get(&peer.associd)
-                .and_then(|nts| crate::nts_client::verify_nts_response(dgram_bytes, nts).ok())
+                .map(|nts| crate::nts_client::verify_nts_response(dgram_bytes, nts))
+                .and_then(|r| r.ok())
                 .is_some();
             if nts_ok {
                 return ResponseAuthResult::Authenticated;
@@ -5190,6 +5232,18 @@ mod tests {
         });
         let engine = DaemonEngine::new(config);
         assert_eq!(engine.minsane, 3);
+        assert_eq!(
+            engine.selection_policy.minsane, 3,
+            "selection_policy.minsane should be set from tos minsane"
+        );
+        assert_eq!(
+            engine.selection_policy.minclock, 5,
+            "selection_policy.minclock should be set from tos minclock"
+        );
+        assert_eq!(
+            engine.selection_policy.maxdist, 2.0,
+            "selection_policy.maxdist should be set from tos maxdist"
+        );
     }
 
     #[test]

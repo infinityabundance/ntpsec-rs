@@ -538,17 +538,20 @@ fn perform_nts_ke_with_config(
 ///   3. NTS Authenticator — AEAD over the NTP header + preceding extension fields
 ///
 /// Returns the full wire-format packet (header + extensions).
-pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<u8> {
+pub fn build_nts_request(
+    packet: &NtpPacket,
+    assoc: &mut NtsAssociation,
+) -> Result<Vec<u8>, String> {
     let mut result = packet.encode_header().to_vec();
 
     // ── 1. NTS Unique Identifier extension field (RFC 8915 §5.1) ──────────
     // The UIK must be unpredictable and at least 32 bytes (RFC 8915 §5.1).
     // Use getrandom to fill a CSPRNG buffer; the server echoes this back
     // and the client MUST verify the echo on the response path.
+    // Failure to obtain randomness MUST abort request construction (fail closed).
     let mut uik_payload = vec![0u8; 32];
-    getrandom::getrandom(&mut uik_payload).unwrap_or_else(|_| {
-        // Fallback: zeroed UI is detectable and harmless
-    });
+    getrandom::getrandom(&mut uik_payload)
+        .map_err(|e| format!("NTS: failed to generate Unique Identifier: {e}"))?;
     let uik_ext = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, uik_payload.clone());
     result.extend_from_slice(&uik_ext.encode());
 
@@ -597,7 +600,7 @@ pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<
     // ── 5. Increment sequence ────────────────────────────────────────────
     assoc.sequence = assoc.sequence.wrapping_add(1);
 
-    result
+    Ok(result)
 }
 
 // ──── Verify NTS-protected NTP response (Gate 8.1) ──────────────────────────
@@ -605,13 +608,14 @@ pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<
 /// Verify the NTS authenticator on an NTP response packet (Gate 8.1).
 ///
 /// The response packet is expected to contain:
-///   1. NTS Unique Identifier (optional, can be skipped)
-///   2. NTS Cookie (fresh cookie from server)
-///   3. NTS Authenticator (AEAD using S2C key)
+///   1. NTS Unique Identifier — MUST match the association's last request UI
+///   2. NTS Authenticator (AEAD using S2C key) — decrypted plaintext contains
+///      zero or more NTS Cookie extension fields (RFC 8915 §5.4)
 ///
-/// Returns `Ok(())` if the authenticator validates, or `Err(String)` with
-/// a description of the failure.
-pub fn verify_nts_response(packet: &[u8], assoc: &NtsAssociation) -> Result<(), String> {
+/// Returns `Ok(cookies)` where `cookies` is the list of fresh cookies
+/// extracted from the authenticator plaintext (to replenish the client's pool).
+/// Returns `Err(String)` with a description of any verification failure.
+pub fn verify_nts_response(packet: &[u8], assoc: &NtsAssociation) -> Result<Vec<Vec<u8>>, String> {
     if packet.len() < NTP_HEADER_SIZE {
         return Err("packet too short for NTP header".to_string());
     }
@@ -620,7 +624,35 @@ pub fn verify_nts_response(packet: &[u8], assoc: &NtsAssociation) -> Result<(), 
     let ext_data = &packet[NTP_HEADER_SIZE..];
     let extensions = ExtensionField::decode_all(ext_data);
 
-    // Locate the NTS Authenticator extension field.
+    // ── 1. Verify Unique Identifier (RFC 8915 §5.1.1.3) ─────────────────
+    // The response MUST echo the Unique Identifier from the request.
+    // Extract the UI from public extensions before the authenticator.
+    let response_uik = extensions
+        .iter()
+        .find(|ef| ef.field_type == EXTENSION_FIELD_UNIQUE_IDENTIFIER)
+        .map(|ef| ef.payload.as_slice());
+
+    match response_uik {
+        Some(uik) if uik == assoc.last_uik.as_slice() => {
+            // UI matches — continue verification
+        }
+        Some(_) => {
+            return Err(format!(
+                "NTS response Unique Identifier mismatch: expected {} bytes, got different value",
+                assoc.last_uik.len()
+            ));
+        }
+        None if !assoc.last_uik.is_empty() => {
+            return Err("NTS response missing Unique Identifier extension field".to_string());
+        }
+        None => {
+            // No UI expected (e.g., first response before any request was sent)
+            // This should not happen in normal operation, but be permissive
+            // for testing scenarios.
+        }
+    }
+
+    // ── 2. Locate the NTS Authenticator extension field ─────────────────
     let auth_ext = extensions
         .iter()
         .find(|ef| ef.field_type == EXTENSION_FIELD_NTS_AUTHENTICATOR)
@@ -643,36 +675,60 @@ pub fn verify_nts_response(packet: &[u8], assoc: &NtsAssociation) -> Result<(), 
         combined
     };
 
-    // AEAD verification using S2C key.
+    // ── 3. AEAD verification using S2C key ─────────────────────────────
     let key = Key::<Aes128Siv>::from_slice(&assoc.s2c_key);
     let nonce = &authenticator.nonce;
     let headers: [&[u8]; 2] = [&aad, nonce];
 
     let mut siv = Aes128Siv::new(key);
-    siv.decrypt(headers, &authenticator.ciphertext)
+    let decrypted_plaintext = siv
+        .decrypt(headers, &authenticator.ciphertext)
         .map_err(|e| format!("NTS response AEAD authentication failed: {e}"))?;
 
-    // Extract the fresh cookie from the response for future use.
-    // The response includes a new cookie that the server wants us to use next time.
-    // We don't store it here since the association is borrowed, but callers
-    // should extract it via [`extract_response_cookie`].
+    // ── 4. Extract cookies from the decrypted authenticator plaintext ───
+    // RFC 8915 §5.4: The response authenticator plaintext contains zero or
+    // more NTS Cookie extension fields, additional extension fields, and
+    // an End-of-Message marker.
+    let inner_extensions = ExtensionField::decode_all(&decrypted_plaintext);
+    let cookies: Vec<Vec<u8>> = inner_extensions
+        .iter()
+        .filter(|ef| ef.field_type == EXTENSION_FIELD_NTS_COOKIE)
+        .map(|ef| ef.payload.clone())
+        .collect();
 
-    Ok(())
+    Ok(cookies)
 }
 
-/// Extract the NTS cookie from a server response (for replenishment).
+/// Extract the NTS cookie from a server response, checking both public
+/// extension fields and (if present) inside the authenticator plaintext.
 ///
-/// Returns the cookie blob if found.
-pub fn extract_response_cookie(packet: &[u8]) -> Option<Vec<u8>> {
+/// This is a convenience wrapper that first tries public extensions,
+/// then falls back to decrypting the authenticator if no public cookie
+/// is found.  Prefer using [`verify_nts_response`] which properly
+/// verifies the authenticator and extracts cookies from the plaintext.
+pub fn extract_response_cookie(packet: &[u8], assoc: &NtsAssociation) -> Option<Vec<u8>> {
     if packet.len() < NTP_HEADER_SIZE {
         return None;
     }
     let ext_data = &packet[NTP_HEADER_SIZE..];
     let extensions = ExtensionField::decode_all(ext_data);
-    extensions
+
+    // First, check public extension fields for a cookie.
+    if let Some(cookie) = extensions
         .iter()
         .find(|ef| ef.field_type == EXTENSION_FIELD_NTS_COOKIE)
         .map(|ef| ef.payload.clone())
+    {
+        return Some(cookie);
+    }
+
+    // Fall back to decrypting the authenticator and checking inside.
+    // This matches the server-recommended approach (RFC 8915 §5.2.1).
+    if let Ok(cookies) = verify_nts_response(packet, assoc) {
+        return cookies.into_iter().next();
+    }
+
+    None
 }
 
 /// Extract the NTS Unique Identifier from a packet.
@@ -852,7 +908,7 @@ mod tests {
         );
 
         let packet = NtpPacket::zeroed();
-        let result = build_nts_request(&packet, &mut assoc);
+        let result = build_nts_request(&packet, &mut assoc).unwrap();
 
         // Should be longer than a bare header
         assert!(result.len() > NTP_HEADER_SIZE);
@@ -903,7 +959,7 @@ mod tests {
 
         assert_eq!(assoc.cookie_count(), 1);
         let packet = NtpPacket::zeroed();
-        let _ = build_nts_request(&packet, &mut assoc);
+        let _ = build_nts_request(&packet, &mut assoc).unwrap();
         // Cookie should be consumed
         assert_eq!(assoc.cookie_count(), 0);
     }
@@ -935,41 +991,60 @@ mod tests {
     }
 
     /// Build a valid NTS response and verify it round-trips.
+    /// The response follows RFC 8915 §5.4: cookies are encrypted inside the
+    /// NTS Authenticator plaintext.
     #[test]
     fn test_verify_nts_response_roundtrip() {
         let c2s = [0x11u8; 32];
         let s2c = [0x22u8; 32];
 
-        // Build a fake server response with S2C authenticator
         let header = NtpPacket::zeroed().encode_header();
         let mut response = header.to_vec();
 
-        // Add a cookie extension (as server would)
-        let cookie_ext = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE, vec![0xCA; 32]);
-        response.extend_from_slice(&cookie_ext.encode());
+        // Add a Unique Identifier extension (matches what assoc will expect)
+        let uik = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
+        let uik_ext = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, uik.clone());
+        response.extend_from_slice(&uik_ext.encode());
 
-        // Build authenticator with S2C key
+        // Build the authenticator plaintext: a cookie inside (RFC 8915 §5.4)
+        // The plaintext is a sequence of extension fields.
+        let cookie_data = vec![0xCA; 32];
+        let inner_cookie_ext = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE, cookie_data.clone());
+        let authenticator_plaintext = inner_cookie_ext.encode();
+
+        // The AAD for the authenticator is: NTP header + all extensions before it
         let aad = {
             let mut combined = Vec::new();
             combined.extend_from_slice(&header);
-            combined.extend_from_slice(&cookie_ext.encode());
+            combined.extend_from_slice(&uik_ext.encode());
             combined
         };
+
         let key = Key::<Aes128Siv>::from_slice(&s2c);
         let nonce = vec![0u8; 8];
         let headers: [&[u8]; 2] = [&aad, &nonce];
         let mut siv = Aes128Siv::new(key);
-        let ciphertext = siv.encrypt(headers, &[]).unwrap();
+        let ciphertext = siv.encrypt(headers, &authenticator_plaintext).unwrap();
         let authenticator = NtsAuthenticator::new(nonce, ciphertext);
         let auth_ext =
             ExtensionField::new(EXTENSION_FIELD_NTS_AUTHENTICATOR, authenticator.encode());
         response.extend_from_slice(&auth_ext.encode());
 
-        // Now verify with the right S2C key
-        let assoc = NtsAssociation::new(c2s, s2c, vec![], 15, "server".to_string(), 4460, 0);
+        // Create association with matching last_uik
+        let mut assoc = NtsAssociation::new(c2s, s2c, vec![], 15, "server".to_string(), 4460, 0);
+        assoc.last_uik = uik;
 
         let result = verify_nts_response(&response, &assoc);
         assert!(result.is_ok(), "verification should succeed: {:?}", result);
+
+        // The cookies from the authenticator plaintext should match
+        let cookies = result.unwrap();
+        assert_eq!(
+            cookies.len(),
+            1,
+            "should extract 1 cookie from authenticator plaintext"
+        );
+        assert_eq!(cookies[0], cookie_data, "extracted cookie should match");
     }
 
     /// Verify that wrong key fails.
@@ -982,28 +1057,34 @@ mod tests {
         let header = NtpPacket::zeroed().encode_header();
         let mut response = header.to_vec();
 
-        let cookie_ext = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE, vec![0xCA; 32]);
-        response.extend_from_slice(&cookie_ext.encode());
+        let uik = vec![0xDE, 0xAD];
+        let uik_ext = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, uik.clone());
+        response.extend_from_slice(&uik_ext.encode());
 
-        // Build authenticator with REAL S2C key
+        // Build authenticator with REAL S2C key, plaintext contains cookie
+        let inner_cookie = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE, vec![0xCA; 32]);
+        let authenticator_plaintext = inner_cookie.encode();
+
         let aad = {
             let mut combined = Vec::new();
             combined.extend_from_slice(&header);
-            combined.extend_from_slice(&cookie_ext.encode());
+            combined.extend_from_slice(&uik_ext.encode());
             combined
         };
         let key = Key::<Aes128Siv>::from_slice(&s2c_real);
         let nonce = vec![0u8; 8];
         let headers: [&[u8]; 2] = [&aad, &nonce];
         let mut siv = Aes128Siv::new(key);
-        let ciphertext = siv.encrypt(headers, &[]).unwrap();
+        let ciphertext = siv.encrypt(headers, &authenticator_plaintext).unwrap();
         let authenticator = NtsAuthenticator::new(nonce, ciphertext);
         let auth_ext =
             ExtensionField::new(EXTENSION_FIELD_NTS_AUTHENTICATOR, authenticator.encode());
         response.extend_from_slice(&auth_ext.encode());
 
         // Verify with WRONG S2C key
-        let assoc = NtsAssociation::new(c2s, s2c_wrong, vec![], 15, "server".to_string(), 4460, 0);
+        let mut assoc =
+            NtsAssociation::new(c2s, s2c_wrong, vec![], 15, "server".to_string(), 4460, 0);
+        assoc.last_uik = uik;
 
         let result = verify_nts_response(&response, &assoc);
         assert!(result.is_err());
@@ -1014,19 +1095,27 @@ mod tests {
 
     #[test]
     fn test_extract_response_cookie_found() {
+        let c2s = [0x11u8; 32];
+        let s2c = [0x22u8; 32];
+
         let header = NtpPacket::zeroed().encode_header();
         let mut packet = header.to_vec();
         let cookie_ext = ExtensionField::new(EXTENSION_FIELD_NTS_COOKIE, vec![0xCA, 0xFE]);
         packet.extend_from_slice(&cookie_ext.encode());
 
-        let cookie = extract_response_cookie(&packet);
+        let assoc = NtsAssociation::new(c2s, s2c, vec![], 15, "host".to_string(), 4460, 0);
+        let cookie = extract_response_cookie(&packet, &assoc);
         assert_eq!(cookie, Some(vec![0xCA, 0xFE]));
     }
 
     #[test]
     fn test_extract_response_cookie_not_found() {
+        let c2s = [0x11u8; 32];
+        let s2c = [0x22u8; 32];
+
         let packet = NtpPacket::zeroed().encode_header();
-        assert_eq!(extract_response_cookie(&packet), None);
+        let assoc = NtsAssociation::new(c2s, s2c, vec![], 15, "host".to_string(), 4460, 0);
+        assert_eq!(extract_response_cookie(&packet, &assoc), None);
     }
 
     #[test]
@@ -1377,11 +1466,11 @@ mod tests {
         let packet = NtpPacket::zeroed();
 
         // First request -> sequence 0
-        let req1 = build_nts_request(&packet, &mut assoc);
+        let req1 = build_nts_request(&packet, &mut assoc).unwrap();
         assert_eq!(assoc.sequence, 1);
 
         // Second request -> sequence 1 (different nonce in authenticator)
-        let req2 = build_nts_request(&packet, &mut assoc);
+        let req2 = build_nts_request(&packet, &mut assoc).unwrap();
         assert_eq!(assoc.sequence, 2);
 
         // The two requests should have different authenticator payloads
@@ -1429,7 +1518,7 @@ mod tests {
         assoc.sequence = u64::MAX;
 
         let packet = NtpPacket::zeroed();
-        let _ = build_nts_request(&packet, &mut assoc);
+        let _ = build_nts_request(&packet, &mut assoc).unwrap();
 
         // After wrapping, sequence should be 0
         assert_eq!(assoc.sequence, 0, "sequence should wrap to 0");

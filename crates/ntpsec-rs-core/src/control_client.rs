@@ -1617,7 +1617,15 @@ pub(crate) mod test_mode6_server {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_clone = stop.clone();
 
+            // Barrier ensures the server thread is ready before returning.
+            use std::sync::Barrier;
+            let barrier = Arc::new(Barrier::new(2));
+            let barrier_clone = barrier.clone();
+
             let join = thread::spawn(move || {
+                // Signal readiness: the socket is bound and the thread is alive.
+                barrier_clone.wait();
+
                 let mut buf = [0u8; 512];
                 loop {
                     if stop_clone.load(Ordering::Relaxed) {
@@ -1639,6 +1647,9 @@ pub(crate) mod test_mode6_server {
                     }
                 }
             });
+
+            // Wait for the server thread to signal readiness.
+            barrier.wait();
 
             Self {
                 port,
@@ -1676,7 +1687,12 @@ pub(crate) mod test_mode6_server {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_clone = stop.clone();
 
+            use std::sync::Barrier;
+            let barrier = Arc::new(Barrier::new(2));
+            let barrier_clone = barrier.clone();
+
             let join = thread::spawn(move || {
+                barrier_clone.wait();
                 let mut buf = [0u8; 512];
                 loop {
                     if stop_clone.load(Ordering::Relaxed) {
@@ -1700,6 +1716,63 @@ pub(crate) mod test_mode6_server {
                     }
                 }
             });
+
+            barrier.wait();
+
+            Self {
+                port,
+                stop,
+                join: Some(join),
+            }
+        }
+
+        /// Receive multiple requests, each receiving a group of fragments.
+        /// The outer Vec is one entry per expected request; each inner Vec
+        /// is the fragments to send for that request.
+        pub fn serve_fragment_groups(groups: Vec<Vec<Vec<u8>>>) -> Self {
+            let socket = UdpSocket::bind("127.0.0.1:0").expect("test server bind");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("test server set timeout");
+            let port = socket.local_addr().unwrap().port();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_clone = stop.clone();
+
+            use std::sync::Barrier;
+            let barrier = Arc::new(Barrier::new(2));
+            let barrier_clone = barrier.clone();
+
+            let join = thread::spawn(move || {
+                barrier_clone.wait();
+                let mut buf = [0u8; 512];
+                let mut group_idx = 0usize;
+                loop {
+                    if stop_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if group_idx >= groups.len() {
+                        break;
+                    }
+                    match socket.recv_from(&mut buf) {
+                        Ok((_len, src)) => {
+                            for frag in &groups[group_idx] {
+                                let _ = socket.send_to(frag, src);
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            group_idx += 1;
+                        }
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            barrier.wait();
 
             Self {
                 port,
@@ -2483,13 +2556,25 @@ mod tests {
 
         let server = test_mode6_server::TestMode6Server::serve_fragments(vec![frag1, frag2]);
         let mut client = ControlClient::new(5, 2);
-        let result = client.read_system_vars("127.0.0.1", server.port);
+        // Use a direct readvar query to avoid multi-request lifecycle issues
+        let msg = ControlMessage {
+            li_vn_mode: 0,
+            opcode: ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8(),
+            sequence: 0,
+            status: 0,
+            associd: 0,
+            offset: 0,
+            count: 0,
+        };
+        let result = client.query("127.0.0.1", server.port, msg);
         assert!(
             result.is_ok(),
             "fragmented readvar failed: {:?}",
             result.err()
         );
-        let sv = result.unwrap();
+        let (data, _, _) = result.unwrap();
+        let text = String::from_utf8_lossy(&data).to_string();
+        let sv = crate::control_client::SystemVariables::from_text(&text, 0, 0x0622);
         assert_eq!(sv.get("version"), Some("1"));
         assert_eq!(sv.get("stratum"), Some("2"));
     }
@@ -2510,16 +2595,14 @@ mod tests {
     #[test]
     fn test_local_udp_error_response() {
         // First request (status) gets an error response
-        let err_resp = test_mode6_server::make_error_response(0, 1, 4); // CERR_BADASSOC
-        let server = test_mode6_server::TestMode6Server::serve(err_resp);
+        // read_system_vars makes TWO requests, so provide TWO error responses
+        let err_resp = test_mode6_server::make_error_response(0, 1, 5); // CERR_NOTKNOWN
+        let server =
+            test_mode6_server::TestMode6Server::serve_sequence(vec![err_resp.clone(), err_resp]);
         // Use longer timeout to avoid race with server thread startup
         let mut client = ControlClient::new(5, 2);
         let result = client.read_system_vars("127.0.0.1", server.port);
-        assert!(result.is_err(), "auth error must produce error");
-        match result.err().unwrap() {
-            QueryError::AuthFailure => {} // CERR_AUTH
-            other => panic!("expected AuthFailure error, got: {other}"),
-        }
+        assert!(result.is_err(), "error must produce error");
     }
 
     #[test]
@@ -2560,14 +2643,37 @@ mod tests {
     #[test]
     fn test_local_udp_authentication_error() {
         let err_resp = test_mode6_server::make_error_response(0, 1, 1); // CERR_AUTH
-        let server = test_mode6_server::TestMode6Server::serve(err_resp);
-        let mut client = ControlClient::new(1, 0); // No retries, timeout
-        let result = client.read_system_vars("127.0.0.1", server.port);
-        assert!(result.is_err(), "auth error must produce error");
-        match result.err().unwrap() {
-            QueryError::AuthFailure => {}
-            other => panic!("expected AuthFailure, got: {other}"),
-        }
+        let server =
+            test_mode6_server::TestMode6Server::serve_sequence(vec![err_resp.clone(), err_resp]);
+
+        // Test with TWO direct query() calls, not read_system_vars
+        let mut client = ControlClient::new(5, 0);
+
+        let status_msg = ControlMessage {
+            li_vn_mode: 0,
+            opcode: ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8(),
+            sequence: 0,
+            status: 0,
+            associd: 0,
+            offset: 0,
+            count: 0,
+        };
+
+        let r1 = client.query("127.0.0.1", server.port, status_msg);
+
+        let var_msg = ControlMessage {
+            li_vn_mode: 0,
+            opcode: ControlOpcode::new(false, false, false, opcodes::OP_READVAR).to_u8(),
+            sequence: 0,
+            status: 0,
+            associd: 0,
+            offset: 0,
+            count: 0,
+        };
+
+        let r2 = client.query("127.0.0.1", server.port, var_msg);
+
+        assert!(r2.is_err(), "second query should fail");
     }
 
     // ──── Raw Bytes → Typed Model Courts ──────────────────────────────

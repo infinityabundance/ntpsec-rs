@@ -672,29 +672,30 @@ fn main() {
         let timer_actions = engine.tick(now);
         execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
 
-        // ── 2b. Process one NTS-KE handshake per cycle ──────────────────
-        // Popping one at a time prevents remaining entries from being
-        // dropped and prevents blocking the event loop for multiple
-        // sequential handshake attempts.
+        // ── 2b. Non-blocking NTS-KE handshake processing ───────────────
+        // Start ONE new handshake per cycle (if any are pending).
         if let Some((associd, host, port)) = engine.pop_nts_ke() {
-            tracing::info!("NTS-KE for associd {} at {}:{}", associd, host, port);
-            // Spawn a worker thread so the blocking TLS handshake
-            // does not hold the event loop.  The result is fed back
-            // synchronously on completion (thread join).
+            tracing::info!(
+                "Spawning NTS-KE for associd {} at {}:{}",
+                associd,
+                host,
+                port
+            );
             let host_c = host.clone();
             let handle = std::thread::spawn(move || {
                 ntpsec_rs_core::nts_client::perform_nts_ke(&host_c, port)
             });
-            match handle.join() {
-                Ok(Ok(nts_assoc)) => {
+            engine.add_inflight_nts_ke(associd, handle);
+        }
+        // Poll previously-spawned workers for completion (non-blocking).
+        for (associd, result) in engine.try_recv_nts_ke() {
+            match result {
+                Ok(nts_assoc) => {
                     engine.add_nts_association(associd, nts_assoc);
                     tracing::info!("NTS-KE completed for associd {}", associd);
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     tracing::warn!("NTS-KE for associd {} failed: {}", associd, e);
-                }
-                Err(_) => {
-                    tracing::warn!("NTS-KE thread for associd {} panicked", associd);
                 }
             }
         }
