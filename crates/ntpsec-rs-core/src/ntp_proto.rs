@@ -36,8 +36,6 @@ use crate::ntp_peer::*;
 use crate::ntp_recvbuff::*;
 use crate::ntp_restrict::*;
 use crate::ntp_types::*;
-use crate::nts::*;
-use crate::nts_extens::*;
 
 // ──── Constants ─────────────────────────────────────────────────────────
 
@@ -886,6 +884,59 @@ pub fn poll_update(peer: &mut Peer, now: NtpTs64) {
 
 // ──── Transmit ─────────────────────────────────────────────────────────
 
+/// Extension field parsed from a packet tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionField {
+    pub field_type: u16,
+    pub payload: Vec<u8>,
+}
+
+/// Parse the tail of an NTP packet: extension fields + optional MAC.
+pub fn split_packet_tail(
+    packet: &[u8],
+) -> Result<(Vec<ExtensionField>, Option<(u32, &[u8])>), String> {
+    if packet.len() < 48 {
+        return Err("packet too short".to_string());
+    }
+    let mut offset = 48;
+    let mut extensions = Vec::new();
+    while offset + 4 <= packet.len() {
+        let field_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+        let length = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
+        if field_type == 0 {
+            if length == 0 {
+                offset += 4;
+            }
+            break;
+        }
+        if length < 4 || (length as usize) % 4 != 0 {
+            break;
+        }
+        if offset + length as usize > packet.len() {
+            return Err("extension field exceeds packet".to_string());
+        }
+        let payload = packet[offset + 4..offset + length as usize].to_vec();
+        extensions.push(ExtensionField {
+            field_type,
+            payload,
+        });
+        offset += length as usize;
+    }
+    let remaining = packet.len() - offset;
+    if remaining >= 8 {
+        let key_id_bytes: [u8; 4] = packet[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "invalid key_id bytes".to_string())?;
+        let key_id = u32::from_be_bytes(key_id_bytes);
+        let mac = &packet[offset + 4..];
+        Ok((extensions, Some((key_id, mac))))
+    } else if remaining == 0 {
+        Ok((extensions, None))
+    } else {
+        Err("partial MAC tail".to_string())
+    }
+}
+
 /// Build an NTP server response packet.  Matching ntpsec's `transmit()`.
 pub fn build_response(
     request: &NtpPacket,
@@ -893,7 +944,8 @@ pub fn build_response(
     system: &SystemState,
     now: NtpTs64,
     precision: i8,
-) -> NtpPacket {
+    auth_store: Option<(&AuthKeyStore, u32)>,
+) -> (NtpPacket, Option<Vec<u8>>) {
     let mut resp = NtpPacket::zeroed();
 
     // LI, VN, Mode
@@ -933,11 +985,36 @@ pub fn build_response(
     // Transmit = current time (will be read by client)
     resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(now);
 
-    resp
+    let mac = if let Some((store, keyid)) = auth_store {
+        if keyid != 0 {
+            if let Some(key) = store.get_key(keyid) {
+                let header = resp.encode_header();
+                key.mac(&header).map(|digest| {
+                    let mut mac_bytes = Vec::with_capacity(8 + digest.len());
+                    mac_bytes.extend_from_slice(&keyid.to_be_bytes());
+                    mac_bytes.extend_from_slice(&digest);
+                    mac_bytes
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (resp, mac)
 }
 
 /// Build an NTP client request packet.  Matching ntpsec's `transmit()` for client mode.
-pub fn build_request(peer: &Peer, system: &SystemState, now: NtpTs64, precision: i8) -> NtpPacket {
+pub fn build_request(
+    peer: &Peer,
+    system: &SystemState,
+    now: NtpTs64,
+    precision: i8,
+    auth_store: Option<&AuthKeyStore>,
+) -> (NtpPacket, Option<Vec<u8>>) {
     let mut pkt = NtpPacket::zeroed();
     pkt.li_vn_mode = NtpPacket::set_li_vn_mode(
         system.leap,
@@ -954,7 +1031,26 @@ pub fn build_request(peer: &Peer, system: &SystemState, now: NtpTs64, precision:
     // The transmit timestamp is the only one we set; the rest are zero
     // (which tells the server this is a request, not a response).
     pkt.transmit_ts = ntp_fp::ntp_ts64_to_wire(now);
-    pkt
+    let mac = if let Some(store) = auth_store {
+        if peer.keyid != 0 {
+            if let Some(key) = store.get_key(peer.keyid) {
+                let header = pkt.encode_header();
+                key.mac(&header).map(|digest| {
+                    let mut mac_bytes = Vec::with_capacity(8 + digest.len());
+                    mac_bytes.extend_from_slice(&peer.keyid.to_be_bytes());
+                    mac_bytes.extend_from_slice(&digest);
+                    mac_bytes
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (pkt, mac)
 }
 
 /// Build a Kiss-o'-Death packet (RFC 5905 §7.4, §13).
@@ -1572,10 +1668,11 @@ mod tests {
         let request = NtpPacket::zeroed();
         let system = SystemState::new();
         let now = ntp_fp::ts_to_ntp(1000, 0);
-        let resp = build_response(&request, None, &system, now, -20);
+        let (resp, mac) = build_response(&request, None, &system, now, -20, None);
         assert_eq!(resp.mode(), NtpMode::Server);
         assert_eq!(resp.version(), NtpVersion::V4);
         assert_eq!(resp.stratum, NTP_MAXSTRAT);
+        assert!(mac.is_none(), "no MAC when no auth provided");
     }
 
     #[test]
@@ -2077,5 +2174,99 @@ mod tests {
              of 0.010",
             combined_jitter
         );
+    }
+
+    // ──── split_packet_tail tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_split_tail_header_only() {
+        let pkt = [0u8; 48];
+        let (ext, mac) = split_packet_tail(&pkt).unwrap();
+        assert!(ext.is_empty());
+        assert!(mac.is_none());
+    }
+
+    #[test]
+    fn test_split_tail_header_too_short() {
+        let pkt = [0u8; 47];
+        assert!(split_packet_tail(&pkt).is_err());
+    }
+
+    #[test]
+    fn test_split_tail_with_mac() {
+        let mut pkt = vec![0u8; 48];
+        pkt.extend_from_slice(&10u32.to_be_bytes());
+        pkt.extend_from_slice(&[0xAB; 16]);
+        let (ext, mac) = split_packet_tail(&pkt).unwrap();
+        assert!(ext.is_empty());
+        let (key_id, digest) = mac.unwrap();
+        assert_eq!(key_id, 10);
+        assert_eq!(digest, &[0xAB; 16]);
+    }
+
+    #[test]
+    fn test_split_tail_with_extension_fields() {
+        let mut pkt = vec![0u8; 48];
+        pkt.extend_from_slice(&1u16.to_be_bytes());
+        pkt.extend_from_slice(&8u16.to_be_bytes());
+        pkt.extend_from_slice(b"data");
+        let (ext, mac) = split_packet_tail(&pkt).unwrap();
+        assert_eq!(ext.len(), 1);
+        assert_eq!(ext[0].field_type, 1);
+        assert_eq!(ext[0].payload, b"data");
+        assert!(mac.is_none());
+    }
+
+    #[test]
+    fn test_split_tail_extension_with_mac() {
+        let mut pkt = vec![0u8; 48];
+        pkt.extend_from_slice(&2u16.to_be_bytes());
+        pkt.extend_from_slice(&12u16.to_be_bytes());
+        pkt.extend_from_slice(b"extradat");
+        pkt.extend_from_slice(&42u32.to_be_bytes());
+        pkt.extend_from_slice(&[0xCD; 20]);
+        let (ext, mac) = split_packet_tail(&pkt).unwrap();
+        assert_eq!(ext.len(), 1);
+        assert_eq!(ext[0].field_type, 2);
+        let (key_id, digest) = mac.unwrap();
+        assert_eq!(key_id, 42);
+        assert_eq!(digest, &[0xCD; 20]);
+    }
+
+    #[test]
+    fn test_split_tail_partial_mac() {
+        let mut pkt = vec![0u8; 48];
+        pkt.extend_from_slice(&10u32.to_be_bytes());
+        pkt.push(0x01);
+        assert_eq!(split_packet_tail(&pkt).unwrap_err(), "partial MAC tail");
+    }
+
+    #[test]
+    fn test_split_tail_zero_terminator() {
+        let mut pkt = vec![0u8; 48];
+        pkt.extend_from_slice(&1u16.to_be_bytes());
+        pkt.extend_from_slice(&8u16.to_be_bytes());
+        pkt.extend_from_slice(b"data");
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        pkt.extend_from_slice(&99u32.to_be_bytes());
+        pkt.extend_from_slice(&[0xEF; 16]);
+        let (ext, mac) = split_packet_tail(&pkt).unwrap();
+        assert_eq!(ext.len(), 1);
+        let (key_id, digest) = mac.unwrap();
+        assert_eq!(key_id, 99);
+        assert_eq!(digest, &[0xEF; 16]);
+    }
+
+    #[test]
+    fn test_split_tail_invalid_extension_length_treated_as_mac() {
+        let mut pkt = vec![0u8; 48];
+        pkt.extend_from_slice(&0x0104u16.to_be_bytes());
+        pkt.extend_from_slice(&5u16.to_be_bytes());
+        pkt.extend_from_slice(&99u32.to_be_bytes());
+        pkt.extend_from_slice(&[0xEF; 16]);
+        let (ext, mac) = split_packet_tail(&pkt).unwrap();
+        assert!(ext.is_empty(), "no extensions should be parsed");
+        assert!(mac.is_some(), "should have MAC data");
     }
 }

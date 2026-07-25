@@ -261,6 +261,18 @@ pub enum DaemonAction {
         packet: NtpPacket,
         rx_time: NtpTs64,
     },
+    /// Mode 6 multi-datagram fragmented response.
+    /// Sends multiple response datagrams for one request.
+    /// All datagrams share the same sequence number; each has a proper
+    /// offset and the M bit set on all but the last.
+    SendControlFragments {
+        destination: NetAddr,
+        sequence: u16,
+        opcode: u8,
+        status: u16,
+        associd: u16,
+        fragments: Vec<Vec<u8>>,
+    },
 }
 
 // Re-export Adjustment from loopfilter for the DaemonAction type.

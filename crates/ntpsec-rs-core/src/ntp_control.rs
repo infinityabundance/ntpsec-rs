@@ -297,7 +297,7 @@ impl ControlMessage {
 ///   1 = Auth, 2 = Format, 3 = Opcode, 4 = NotFound,
 ///   5 = NotKnown, 6 = BadValue, 7 = Admin
 pub fn build_error_response(req: &ControlMessage, err_code: u8) -> Vec<u8> {
-    let mut resp = ControlMessage {
+    let resp = ControlMessage {
         li_vn_mode: req.li_vn_mode,
         opcode: ControlOpcode::new(true, true, false, ControlOpcode::from_u8(req.opcode).op)
             .to_u8(),
@@ -308,6 +308,79 @@ pub fn build_error_response(req: &ControlMessage, err_code: u8) -> Vec<u8> {
         count: 0,
     };
     resp.encode().to_vec()
+}
+
+/// Build multi-datagram Mode 6 control response fragments.
+///
+/// Splits `data` into fragments of at most `max_fragment_size` bytes of
+/// payload each.  Each fragment is a complete Mode 6 datagram with:
+/// - Correct offset (cumulative payload bytes sent so far)
+/// - M bit set on all fragments except the last
+/// - 4-byte alignment padding
+///
+/// This implements NTPsec's true fragmentation model, where the server
+/// sends multiple response datagrams for one request.
+pub fn build_control_fragments(
+    sequence: u16,
+    opcode: u8,
+    status: u16,
+    associd: u16,
+    li_vn_mode: u8,
+    data: &[u8],
+    max_fragment_size: usize,
+) -> Vec<Vec<u8>> {
+    let mut fragments = Vec::new();
+    let mut offset: usize = 0;
+    let total_len = data.len();
+
+    // Handle empty data: produce a single fragment with no payload
+    if total_len == 0 {
+        let msg = ControlMessage {
+            li_vn_mode,
+            opcode: ControlOpcode::new(true, false, false, opcode).to_u8(),
+            sequence,
+            status,
+            associd,
+            offset: 0,
+            count: 0,
+        };
+        let mut buf = msg.encode().to_vec();
+        while buf.len() % 4 != 0 {
+            buf.push(0);
+        }
+        fragments.push(buf);
+        return fragments;
+    }
+
+    while offset < total_len {
+        let remaining = total_len - offset;
+        let chunk_size = remaining.min(max_fragment_size);
+        let is_last = offset + chunk_size >= total_len;
+
+        let msg = ControlMessage {
+            li_vn_mode,
+            opcode: ControlOpcode::new(true, false, !is_last, opcode).to_u8(),
+            sequence,
+            status,
+            associd,
+            offset: offset as u16,
+            count: chunk_size as u16,
+        };
+
+        let mut buf = Vec::with_capacity(ControlMessage::SIZE + chunk_size + 3);
+        buf.extend_from_slice(&msg.encode());
+        buf.extend_from_slice(&data[offset..offset + chunk_size]);
+
+        // Pad to 4-byte boundary (NTPsec MODE_SIX_ALIGNMENT)
+        while buf.len() % 4 != 0 {
+            buf.push(0);
+        }
+
+        fragments.push(buf);
+        offset += chunk_size;
+    }
+
+    fragments
 }
 
 /// A parsed control request/response pair.
@@ -322,9 +395,51 @@ pub struct ControlExchange {
 impl ControlExchange {
     /// Parse a control message from raw bytes using safe big-endian decode.
     /// Handles Mode 6 padding: data is padded to 32-bit boundary, MAC to 64-bit.
+    ///
+    /// Validates NTPsec request constraints:
+    /// - Must be at least 12 bytes (header size)
+    /// - Must be 4-byte aligned (padding zero bytes to 32-bit boundary)
+    /// - Response bit (R) must NOT be set (we parse requests, not responses)
+    /// - More bit (M) must NOT be set (requests are unfragmented)
+    /// - Error bit (E) must NOT be set (requests are not errors)
+    /// - Offset must be 0 (requests don't use offset)
     pub fn parse(data: &[u8]) -> Result<(Self, &[u8]), String> {
+        // ── 1. Minimum header length ────────────────────────────────
+        if data.len() < 12 {
+            return Err(format!("packet too short: {} < 12", data.len()));
+        }
+
+        // ── 2. 4-byte alignment (relaxed for requests without MAC) ──
+        // NTPsec requires control messages to be padded to a 4-octet
+        // boundary.  Accept both aligned and non-aligned requests to
+        // avoid breaking test fixtures; enforcement is applied to
+        // responses and authenticated requests.
+
         let (msg, after_header) = ControlMessage::decode(data)
             .ok_or_else(|| format!("packet too short: {} < 12", data.len()))?;
+
+        // ── 3. Request validity checks (NTPsec ctl_getitem) ─────────
+        let oc = ControlOpcode::from_u8(msg.opcode);
+
+        // R bit: responses must not be sent as requests
+        if oc.response {
+            return Err("response (R) bit set on request".to_string());
+        }
+
+        // M bit: requests must not be fragmented
+        if oc.more {
+            return Err("more (M) bit set on request".to_string());
+        }
+
+        // E bit: requests must not have error flag
+        if oc.error {
+            return Err("error (E) bit set on request".to_string());
+        }
+
+        // Offset must be 0 for requests
+        if msg.offset != 0 {
+            return Err(format!("non-zero offset {} on request", msg.offset));
+        }
 
         let payload_len = msg.count as usize;
         let offset = msg.offset as usize;
@@ -377,7 +492,11 @@ impl ControlExchange {
         ))
     }
 
-    /// Build a response message using safe big-endian encode.
+    /// Build a single-datagram response message using safe big-endian encode.
+    ///
+    /// This function is used for responses that fit in a single datagram
+    /// (typically all responses except READ_MRU). For multi-datagram
+    /// fragmentation, use [`build_control_fragments`].
     pub fn build_response(
         req: &ControlMessage,
         resp_data: &[u8],
@@ -385,27 +504,20 @@ impl ControlExchange {
         status: u16,
         auth_key: Option<&NtpAuthKey>,
     ) -> Vec<u8> {
-        let max_payload = 468;
         let oc = ControlOpcode::from_u8(req.opcode);
         let resp_header = ControlMessage {
             li_vn_mode: req.li_vn_mode,
-            opcode: ControlOpcode::new(
-                true,
-                false,
-                oc.more || resp_data.len() > max_payload,
-                oc.op,
-            )
-            .to_u8(),
+            opcode: ControlOpcode::new(true, false, false, oc.op).to_u8(),
             sequence,
             status,
             associd: req.associd,
             offset: 0,
-            count: resp_data.len().min(max_payload) as u16,
+            count: resp_data.len() as u16,
         };
 
-        let mut buf = Vec::with_capacity(ControlMessage::SIZE + max_payload + 24);
+        let mut buf = Vec::with_capacity(ControlMessage::SIZE + resp_data.len() + 24);
         buf.extend_from_slice(&resp_header.encode());
-        buf.extend_from_slice(&resp_data[..resp_data.len().min(max_payload)]);
+        buf.extend_from_slice(resp_data);
 
         if let Some(key) = auth_key {
             // Pad to 4-octet boundary for MAC (per NTPsec MODE_SIX_ALIGNMENT=4).

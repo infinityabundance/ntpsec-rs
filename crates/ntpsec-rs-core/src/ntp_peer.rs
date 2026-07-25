@@ -34,6 +34,11 @@ pub struct Peer {
     pub dispersion: f64,
     pub jitter: f64,
 
+    /// Selection jitter (φ_λ) — computed during clock clustering.
+    /// This is the RMS residual of this peer's offset relative to all other
+    /// survivors.  Used for both clustering elimination and combined jitter.
+    pub selection_jitter: f64,
+
     pub hpoll: u8,  // current poll exponent
     pub ppoll: u8,  // peer's poll exponent
     pub flash: u32, // flash bits
@@ -69,6 +74,9 @@ bitflags::bitflags! {
         const NOSYNC     = 1 << 6;  // not synchronized
         const PROBE      = 1 << 7;  // probe (manycast)
         const CONFIGURED  = 1 << 8;  // configured via config file, not ephemeral
+        /// TRUE — peer is a truechimer (passed TEST5 / intersection).
+        /// Set during clock selection, cleared when falseticker.
+        const TRUE      = 1 << 9;
     }
 }
 
@@ -96,6 +104,7 @@ impl Peer {
             delay: 0.0,
             dispersion: 0.0,
             jitter: 0.0,
+            selection_jitter: 0.0,
             hpoll: minpoll,
             ppoll: 0,
             flash: 0,

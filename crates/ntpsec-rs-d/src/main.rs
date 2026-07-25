@@ -830,6 +830,17 @@ fn execute_actions<C: SystemClock, N: NetworkIo, S: StateStore>(
                     tracing::warn!("Failed to write to {stream}: {e}");
                 }
             }
+            DaemonAction::SendControlFragments {
+                destination,
+                fragments,
+                ..
+            } => {
+                for bytes in fragments {
+                    if let Err(e) = network.send(bytes, destination) {
+                        tracing::warn!("SendControlFragment failed: {e}");
+                    }
+                }
+            }
             DaemonAction::RefclockSample { .. } => {
                 // RefclockSample actions are handled in the main loop
                 // before reaching execute_actions.  If one arrives here
