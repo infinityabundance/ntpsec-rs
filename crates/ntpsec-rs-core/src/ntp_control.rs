@@ -848,31 +848,35 @@ impl PeerEventCode {
     }
 }
 
-/// System event codes matching ntpsec's sys_event_codes enum.
+/// System event codes matching ntpsec's sys_event_codes enum (Gate 10 exact semantics).
+///
+/// Reference: ntp_control.h sys_event_codes:
+///   0=unspec, 1=no_reply, 2=no_reach, 3=fault, 4=freq_mode,
+///   5=xleave, 6=xtime, 7=sys_peer, 8=sys_clk, 9=leap_sec, 10=clock_code
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemEventCode {
     /// No event.
     Unspec = 0,
-    /// System synchronized.
-    SyncChg = 1,
+    /// No reply from system peer.
+    NoReply = 1,
+    /// No reachable peers.
+    NoReach = 2,
+    /// A fault occurred.
+    Fault = 3,
+    /// Frequency mode change.
+    FreqMode = 4,
+    /// Interleaved mode (xleave).
+    XLeave = 5,
     /// Clock stepped.
-    SetTime = 2,
-    /// Frequency adjustment.
-    SetFreq = 3,
-    /// Peer became the system peer.
-    PeerSyncChg = 4,
-    /// Clock was stepped.
-    StepDone = 5,
-    /// Panic occurred.
-    PanicStop = 6,
-    /// System event code 7.
-    SystemBadTime = 7,
-    /// Clock sync changed.
-    ClockCode = 8,
-    /// PPS signal detected.
-    PpsSignal = 9,
-    /// Leap second announced.
-    LeapSecond = 10,
+    XTime = 6,
+    /// System peer change.
+    SysPeer = 7,
+    /// Clock synchronization changed.
+    SysClk = 8,
+    /// Leap second event.
+    LeapSec = 9,
+    /// Clock code event.
+    ClockCode = 10,
 }
 
 impl SystemEventCode {
@@ -883,16 +887,16 @@ impl SystemEventCode {
     pub fn name(&self) -> &'static str {
         match self {
             SystemEventCode::Unspec => "unspec",
-            SystemEventCode::SyncChg => "sync_chg",
-            SystemEventCode::SetTime => "set_time",
-            SystemEventCode::SetFreq => "set_freq",
-            SystemEventCode::PeerSyncChg => "peer_sync_chg",
-            SystemEventCode::StepDone => "step_done",
-            SystemEventCode::PanicStop => "panic_stop",
-            SystemEventCode::SystemBadTime => "sys_bad_time",
+            SystemEventCode::NoReply => "no_reply",
+            SystemEventCode::NoReach => "no_reach",
+            SystemEventCode::Fault => "fault",
+            SystemEventCode::FreqMode => "freq_mode",
+            SystemEventCode::XLeave => "xleave",
+            SystemEventCode::XTime => "xtime",
+            SystemEventCode::SysPeer => "sys_peer",
+            SystemEventCode::SysClk => "sys_clk",
+            SystemEventCode::LeapSec => "leap_sec",
             SystemEventCode::ClockCode => "clock_code",
-            SystemEventCode::PpsSignal => "pps_signal",
-            SystemEventCode::LeapSecond => "leap_sec",
         }
     }
 }

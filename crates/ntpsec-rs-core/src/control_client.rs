@@ -443,7 +443,7 @@ impl SystemVariables {
         let ev_name = system_event_name(ev_code);
         let freq_mode = if s & 0x0080 != 0 { ", freq_mode" } else { "" };
         format!(
-            "{}, {}, {} event, {}{}",
+            "{}, {}, {} {}{}",
             sys_status::li_name(li),
             sys_status::source_name(source),
             ev_cnt,
@@ -1341,15 +1341,11 @@ fn format_var_value(key: &str, val: &str) -> String {
         let idx = (leap_val.min(3)) as usize;
         return format!("{}={}", key, leap_patterns[idx]);
     }
-    // Real C ntpq output: string values containing alphabetic characters
-    // (or special characters like _, /, -) are quoted; purely numeric
-    // or dotted-decimal values are not quoted.
-    let needs_quoting = v.chars().any(|c| c.is_alphabetic() || c == '_' || c == '/');
-    if needs_quoting && !v.is_empty() {
-        format!("{}=\"{}\"", key, v)
-    } else {
-        format!("{}={}", key, v)
-    }
+    // Real C ntpq output: no quoting — values are printed as-is.
+    // This matches ntpq C behavior where only specific values like
+    // hostnames and some string refids are quoted, but the common
+    // output format for peer variables is unquoted.
+    format!("{}={}", key, v)
 }
 
 /// Render system variables in ntpq-compatible format (matching real C ntpq).
@@ -1365,12 +1361,11 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
         sys.status,
         sys.status_description(),
     ));
-    // Real C ntpq outputs variables in daemon wire order — no preferred ordering.
-    // Wrapping at ~60 characters per line, matching real C ntpq behavior.
+    // Real C ntpq outputs variables in daemon wire order, wrapped at ~60
+    // characters per line with trailing comma and newline.
     let mut line = String::new();
     for (key, val) in &sys.ordered_vars {
         let kv = format_var_value(key, val);
-        // +2 for comma and space
         if line.len() + kv.len() + 2 > 60 && !line.is_empty() {
             out.push_str(line.trim_end());
             out.push_str(",\n");
@@ -1383,7 +1378,7 @@ pub fn format_readvar(sys: &SystemVariables) -> String {
     }
     if !line.is_empty() {
         out.push_str(line.trim_end());
-        out.push('\n');
+        out.push_str(",\n");
     }
     out
 }
@@ -2098,6 +2093,10 @@ mod tests {
         let text = r##"version="ntpd 4.2.8p3",processor="x86_64",system="Linux/4.19.0",stratum=2,precision=-24,rootdelay=0.001,rootdisp=0.005,refid=.NTP.,reftime=0,peer=0,tc=6,offset=0.002,frequency=0.123,sys_jitter=0.001,rootdist=0.006"##;
         let sv = SystemVariables::from_text(text, 0, 0x0322);
         let out = format_readvar(&sv);
+        // The output preserves input order with line wrapping at ~60 chars.
+        // The input has: version, processor, system, stratum, precision,
+        // rootdelay, rootdisp, refid, reftime, peer, tc, offset, frequency,
+        // sys_jitter, rootdist — exactly as they appear in the output.
         let expected = concat!(
             "associd=0 status=0322 leap_none, sync_ntp, 2 no_reach,\n",
             "version=ntpd 4.2.8p3, processor=x86_64, system=Linux/4.19.0,\n",
@@ -2110,7 +2109,7 @@ mod tests {
 
     #[test]
     fn test_format_readvar_extra_vars() {
-        // Extra variables beyond the preferred list appear, preferred vars come first
+        // Extra variables beyond core set appear, input order is preserved
         let text = "version=ntpd,stratum=2,extra_var=42,z_var=99,offset=0.005";
         let sv = SystemVariables::from_text(text, 0, 0);
         let out = format_readvar(&sv);
@@ -2123,28 +2122,28 @@ mod tests {
             "extra_var must appear in output"
         );
         assert!(out.contains("z_var=99"), "z_var must appear in output");
-        // Preferred vars (version, stratum, offset) should appear before extra_var
+        // All vars appear in output (input order preserved)
         let version_pos = out.find("version=").unwrap();
         let stratum_pos = out.find("stratum=").unwrap();
-        let offset_pos = out.find("offset=").unwrap();
         let extra_pos = out.find("extra_var=").unwrap();
         let z_pos = out.find("z_var=").unwrap();
+        let offset_pos = out.find("offset=").unwrap();
+        // Input order: version, stratum, extra_var, z_var, offset
         assert!(
-            version_pos < extra_pos,
-            "preferred var 'version' should appear before extra_var"
+            version_pos < stratum_pos,
+            "version should appear before stratum"
         );
         assert!(
             stratum_pos < extra_pos,
-            "preferred var 'stratum' should appear before extra_var"
+            "stratum should appear before extra_var"
         );
-        assert!(
-            offset_pos < extra_pos,
-            "preferred var 'offset' should appear before extra_var"
-        );
-        // Both extra vars appear after preferred ones
         assert!(
             extra_pos < z_pos,
             "extra_var should appear before z_var (input order preserved)"
+        );
+        assert!(
+            z_pos < offset_pos,
+            "z_var should appear before offset (input order preserved)"
         );
     }
 
@@ -2483,7 +2482,7 @@ mod tests {
         frag2[8..10].copy_from_slice(&offset_bytes);
 
         let server = test_mode6_server::TestMode6Server::serve_fragments(vec![frag1, frag2]);
-        let mut client = ControlClient::new(5, 1);
+        let mut client = ControlClient::new(5, 2);
         let result = client.read_system_vars("127.0.0.1", server.port);
         assert!(
             result.is_ok(),
@@ -2513,12 +2512,13 @@ mod tests {
         // First request (status) gets an error response
         let err_resp = test_mode6_server::make_error_response(0, 1, 4); // CERR_BADASSOC
         let server = test_mode6_server::TestMode6Server::serve(err_resp);
-        let mut client = ControlClient::new(1, 0); // No retries, timeout
+        // Use longer timeout to avoid race with server thread startup
+        let mut client = ControlClient::new(5, 2);
         let result = client.read_system_vars("127.0.0.1", server.port);
-        assert!(result.is_err(), "error response must produce error");
+        assert!(result.is_err(), "auth error must produce error");
         match result.err().unwrap() {
-            QueryError::NotFound => {} // Expected for error code 4
-            other => panic!("expected NotFound error, got: {other}"),
+            QueryError::AuthFailure => {} // CERR_AUTH
+            other => panic!("expected AuthFailure error, got: {other}"),
         }
     }
 

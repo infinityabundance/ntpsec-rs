@@ -785,6 +785,8 @@ pub fn parse_config(input: &str) -> ConfigTree {
                 cert_file: cf.clone(),
                 aead_algorithms: vec![15], // AES_SIV_CMAC_256 (RFC 5297)
                 cookie_cipher: crate::nts_cookie::CookieCipher::new(),
+                port: 4460,
+                max_connections: 0,
             })
         } else {
             None
@@ -799,6 +801,8 @@ pub fn parse_config(input: &str) -> ConfigTree {
             cert_file: cert_file.clone(),
             aead_algorithms: vec![15],
             cookie_cipher: crate::nts_cookie::CookieCipher::new(),
+            port: 4460,
+            max_connections: 0,
         })
     } else {
         None

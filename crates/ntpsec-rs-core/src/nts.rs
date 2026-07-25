@@ -707,6 +707,61 @@ impl NtsUniqueKey {
     }
 }
 
+/// NTS failure reason — distinguishes failure modes for diagnostics (Gate 8.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NtsFailureReason {
+    /// No failure; NTS is operational.
+    None,
+    /// TLS connection failed (TCP/TLS handshake).
+    TlsConnectionFailure,
+    /// Certificate validation failed (chain, expiry, hostname mismatch).
+    CertificateFailure,
+    /// ALPN negotiation failed — server did not negotiate ntske/1.
+    AlpnFailure,
+    /// Cookie exchange failed (zero cookies, invalid cookie format).
+    CookieFailure,
+    /// AEAD algorithm negotiation failure (unsupported or mismatched).
+    AeadFailure,
+    /// Packet authentication failure (AEAD verification failed).
+    PacketAuthFailure,
+    /// NTS-KE protocol error (malformed records, unexpected messages).
+    ProtocolError,
+    /// Server identity changed between handshakes.
+    ServerIdentityChanged,
+    /// Key rotation required — re-handshake needed.
+    KeyRotation,
+    /// Connection limit reached or timeout exceeded.
+    ConnectionTimeout,
+}
+
+impl NtsFailureReason {
+    pub fn description(&self) -> &'static str {
+        match self {
+            NtsFailureReason::None => "NTS operational",
+            NtsFailureReason::TlsConnectionFailure => "TLS connection failure",
+            NtsFailureReason::CertificateFailure => {
+                "certificate validation failure (chain, expiry, or hostname)"
+            }
+            NtsFailureReason::AlpnFailure => {
+                "ALPN negotiation failed — server did not negotiate ntske/1"
+            }
+            NtsFailureReason::CookieFailure => {
+                "cookie exchange failed (zero cookies or invalid format)"
+            }
+            NtsFailureReason::AeadFailure => {
+                "AEAD algorithm negotiation failure (unsupported or mismatched)"
+            }
+            NtsFailureReason::PacketAuthFailure => {
+                "packet authentication failed (AEAD verification)"
+            }
+            NtsFailureReason::ProtocolError => "NTS-KE protocol error",
+            NtsFailureReason::ServerIdentityChanged => "server identity changed",
+            NtsFailureReason::KeyRotation => "key rotation required",
+            NtsFailureReason::ConnectionTimeout => "connection timeout or rate-limited",
+        }
+    }
+}
+
 /// NTS state for a single association.
 #[derive(Debug, Clone)]
 pub struct NtsState {
@@ -730,6 +785,13 @@ pub struct NtsState {
     pub ke_hostname: Option<String>,
     /// NTS-KE port.
     pub ke_port: u16,
+    /// Current NTS failure reason (Gate 8.3 — no silent downgrade).
+    pub failure_reason: NtsFailureReason,
+    /// Whether to force NTS-KE re-handshake (Gate 8.6).
+    pub needs_rehandshake: bool,
+    /// Cookie replenish threshold: when cookie_count() drops below this,
+    /// a new NTS-KE handshake should be triggered (Gate 8.6).
+    pub cookie_replenish_threshold: usize,
 }
 
 impl Default for NtsState {
@@ -751,6 +813,9 @@ impl NtsState {
             ntspe_port: 0,
             ke_hostname: None,
             ke_port: NTS_KE_PORT,
+            failure_reason: NtsFailureReason::None,
+            needs_rehandshake: false,
+            cookie_replenish_threshold: NTS_MAX_COOKIES / 2,
         }
     }
 
@@ -778,6 +843,37 @@ impl NtsState {
     /// Whether we have keys for NTS.
     pub fn is_nts_ready(&self) -> bool {
         self.nts_ke_done && self.c2s_key.is_some() && self.s2c_key.is_some()
+    }
+
+    /// Whether cookie replenishment is needed (Gate 8.6).
+    pub fn needs_cookie_replenish(&self) -> bool {
+        self.cookies.len() <= self.cookie_replenish_threshold
+    }
+
+    /// Set the failure reason and mark that NTS is not operational (Gate 8.3).
+    pub fn set_failure(&mut self, reason: NtsFailureReason) {
+        self.failure_reason = reason;
+        self.nts_ke_done = false;
+    }
+
+    /// Clear the failure state.
+    pub fn clear_failure(&mut self) {
+        self.failure_reason = NtsFailureReason::None;
+    }
+
+    /// Get the failure description for Mode 6 variable reporting.
+    pub fn failure_description(&self) -> String {
+        if self.failure_reason == NtsFailureReason::None {
+            "OK".to_string()
+        } else {
+            format!(
+                "NTS_{}",
+                self.failure_reason
+                    .description()
+                    .to_uppercase()
+                    .replace(' ', "_")
+            )
+        }
     }
 }
 
@@ -818,6 +914,9 @@ mod tests {
         assert_eq!(state.cookie_count(), 0);
         assert_eq!(state.nts_version, NTS_VERSION);
         assert_eq!(state.ke_port, NTS_KE_PORT);
+        assert_eq!(state.failure_reason, NtsFailureReason::None);
+        assert!(!state.needs_rehandshake);
+        assert_eq!(state.cookie_replenish_threshold, NTS_MAX_COOKIES / 2);
     }
 
     #[test]
@@ -838,6 +937,52 @@ mod tests {
             state.add_cookie(vec![i as u8]);
         }
         assert_eq!(state.cookie_count(), NTS_MAX_COOKIES);
+    }
+
+    #[test]
+    fn test_nts_state_failure_tracking() {
+        let mut state = NtsState::new();
+        assert_eq!(state.failure_reason, NtsFailureReason::None);
+        assert_eq!(state.failure_description(), "OK");
+
+        state.set_failure(NtsFailureReason::CertificateFailure);
+        assert_eq!(state.failure_reason, NtsFailureReason::CertificateFailure);
+        assert!(!state.nts_ke_done);
+        assert!(state.failure_description().contains("NTS_"));
+
+        state.clear_failure();
+        assert_eq!(state.failure_reason, NtsFailureReason::None);
+    }
+
+    #[test]
+    fn test_nts_state_cookie_replenish() {
+        let mut state = NtsState::new();
+        state.cookie_replenish_threshold = 4;
+        // With 0 cookies, needs replenish
+        assert!(state.needs_cookie_replenish());
+        // Add 3 cookies, still below threshold 4
+        for i in 0..3 {
+            state.add_cookie(vec![i]);
+        }
+        assert!(state.needs_cookie_replenish());
+        // Add one more = 4, threshold is 4, so needs_replenish (<= threshold)
+        state.add_cookie(vec![4]);
+        assert!(state.needs_cookie_replenish());
+        // Add one more = 5, above threshold 4
+        state.add_cookie(vec![5]);
+        assert!(!state.needs_cookie_replenish());
+    }
+
+    #[test]
+    fn test_nts_failure_reason_descriptions() {
+        assert_eq!(NtsFailureReason::None.description(), "NTS operational");
+        assert!(NtsFailureReason::CertificateFailure
+            .description()
+            .contains("certificate"));
+        assert!(NtsFailureReason::AlpnFailure.description().contains("ALPN"));
+        assert!(NtsFailureReason::PacketAuthFailure
+            .description()
+            .contains("authentication"));
     }
 
     #[test]

@@ -198,7 +198,8 @@ pub fn netaddr_to_sockaddr(addr: &NetAddr) -> SockAddr {
             sin.sin_port = addr.port.to_be();
             let octets = [addr.addr[0], addr.addr[1], addr.addr[2], addr.addr[3]];
             sin.sin_addr = libc::in_addr {
-                s_addr: u32::from_ne_bytes(octets),
+                // s_addr must be in network byte order (big-endian).
+                s_addr: u32::from_be_bytes(octets),
             };
         }
         6 => {

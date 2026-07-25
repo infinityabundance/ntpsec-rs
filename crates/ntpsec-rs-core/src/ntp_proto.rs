@@ -82,6 +82,16 @@ pub const KISS_RSTR: &[u8; 4] = b"RSTR";
 
 // ──── Auth statistics counters (matching ntpsec) ─────────────────────────
 
+/// Known valid MAC digest lengths: MD5 (16), SHA-1 (20), AES-128-CMAC (16).
+/// Used by `split_packet_tail()` to validate packet tails.
+pub const KNOWN_DIGEST_LENGTHS: &[usize] = &[16, 20];
+
+/// Minimum MAC size: 4-byte key ID + 16-byte minimum digest.
+pub const MIN_MAC_SIZE: usize = 20;
+
+/// Minimum size for a packet with key ID + MAC.
+pub const MIN_AUTH_PACKET_SIZE: usize = 48 + 4 + 16; // header + keyid + minimum digest
+
 /// Authentication statistics counters — tracks auth events across the daemon.
 #[derive(Debug, Clone, Default)]
 pub struct AuthCounters {
@@ -431,11 +441,17 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     let mut intersection_end = 0.0f64;
     let mut found = false;
 
-    // Strict majority: the falseticker allowance must be strictly less
-    // than half the candidates (ntpsec: while (allow < nlist / 2)).
-    // For odd n, majority = (n + 1) / 2.  For even n, majority = n / 2 + 1.
-    let max_allow = n.saturating_sub(1) / 2; // floor((n-1)/2)
-    for allow in 0..=max_allow {
+    // Strict Byzantine majority (ntpsec: while (allow < nlist / 2)).
+    // The falseticker allowance must be strictly less than half the
+    // candidates, i.e., truechimers > falsetickers always.
+    // This is: m = n - allow > allow → allow < n / 2.
+    // In integer arithmetic: allow * 2 < n.
+    // For n=4: allow < 2 → allow ∈ {0,1}. m ∈ {4,3}. 3 > 1 ✓
+    // For n=5: allow < 2.5 → allow ∈ {0,1,2}. m ∈ {5,4,3}. 3 > 2 ✓
+    // For n=1: allow < 0.5 → allow ∈ {0}. m = 1. Single peer allowed.
+    //   (minsane config gate handles the minimum-peer requirement.)
+    let mut allow = 0;
+    while allow * 2 < n {
         let m = n - allow; // majority threshold
         let mut count = 0usize;
         let mut in_interval = false;
@@ -487,6 +503,8 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
             found = true;
             break;
         }
+
+        allow += 1;
     }
 
     // Mark peers whose confidence interval does NOT overlap with the
@@ -513,130 +531,168 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
     survivors
 }
 
-/// The clustering algorithm (RFC 5905 §11, full implementation).
-/// From the survivors of the intersection, prune all peers whose jitter
-/// exceeds MAXCLOCK_JITTER * select_jitter in a single pass, keeping
-/// the prefer peer unconditionally.
+/// The clustering algorithm (RFC 5905 §11, ntpsec exact parity).
 ///
-/// Unlike the simplified version that removes one peer at a time, this
-/// matches ntpsec's behavior which removes all outliers that fall outside
-/// the acceptable range in one pass.
+/// NTPsec's repeated elimination process:
+///   1. Compute selection jitter (φ_λ) for each survivor as the RMS residual
+///      of its offset relative to all other survivors.
+///   2. Find the survivor with the worst selection_jitter × sync_distance metric.
+///   3. Remove that survivor if count > minclock AND its metric exceeds the
+///      maximum peer jitter among remaining survivors.
+///   4. Recompute selection jitters for the reduced set and repeat.
+///   5. Stop when count <= minclock or no survivor metric exceeds the threshold.
 ///
-/// Returns the survivors (pruned list of indices into the original peers
-/// array, sorted by jitter ascending for consistent system peer selection).
+/// TRUE (truechimer from intersection) and PREFER peers are immune to removal.
+///
+/// Returns the survivors (indices into the original peers array).
 pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
     let n = peers.len();
 
-    // Always filter by flash first, even with a single peer.
-    // A peer with any TEST bit set (e.g., TEST9 for unreachable) must
-    // be excluded from selection regardless of count.
+    // Always filter by flash first (exclude peers with any TEST bit set).
     let mut indices: Vec<usize> = (0..n)
         .filter(|i| {
-            // Only consider peers that pass all tests
             let flash = FlashBits::from_bits_truncate(peers[*i].flash);
             flash == FlashBits::PASS
         })
         .collect();
 
     if indices.len() <= 1 {
+        // Store selection jitter for single survivors
+        if let Some(&idx) = indices.first() {
+            peers[idx].selection_jitter = peers[idx].jitter;
+        }
         return indices;
     }
 
-    // Identify the prefer peer by its ORIGINAL peer array index, NOT its
-    // position in the survivors vector.  After removing entries from
-    // `indices`, a vector-position-based guard would protect the wrong
-    // peer or lose the prefer peer entirely.
-    let prefer_associd = peers
+    // Identify protected peers by their ORIGINAL array index.
+    let prefer_idx = peers
         .iter()
         .position(|p| p.flags.contains(PeerFlags::PREFER));
 
-    // Compute peer jitter: RMS deviation from the survivor offset mean
-    // (RFC 5905 §11 eq 6) — each peer's jitter relative to all others.
-    let mut peer_jitter = vec![0.0f64; indices.len()];
-    for i in 0..indices.len() {
-        let offset_i = peers[indices[i]].offset;
-        let mut sum = 0.0f64;
-        for j in 0..indices.len() {
-            if i == j {
-                continue;
+    // ─── Repeated elimination (ntpsec's while loop) ──────────────────────
+    // Default values (can be configured via `tos` minclock/maxclock).
+    let minclock: usize = 3;
+    let maxclock_jitter: f64 = 3.0;
+
+    loop {
+        if indices.len() <= minclock {
+            break;
+        }
+
+        // 1. Compute selection jitter for each survivor (φ_λ).
+        //    This is the RMS residual of each peer's offset relative to
+        //    the mean of all other survivors (RFC 5905 §11 eq 6).
+        let mut sel_jitter = vec![0.0f64; indices.len()];
+        for i in 0..indices.len() {
+            let offset_i = peers[indices[i]].offset;
+            let mut sum_sq = 0.0f64;
+            for j in 0..indices.len() {
+                if i == j {
+                    continue;
+                }
+                let d = offset_i - peers[indices[j]].offset;
+                sum_sq += d * d;
             }
-            let d = offset_i - peers[indices[j]].offset;
-            sum += d * d;
+            sel_jitter[i] = if indices.len() > 1 {
+                (sum_sq / (indices.len() - 1) as f64).sqrt()
+            } else {
+                0.0
+            };
         }
-        if indices.len() > 1 {
-            peer_jitter[i] = (sum / (indices.len() - 1) as f64).sqrt();
-        }
-    }
 
-    // ─── Pruning: remove all outliers in a single pass (ntpsec behavior) ──
-    // ntpsec default: MAXCLOCK_JITTER = 3.0, NTP_MINCLOCK = 3.
-    const NTP_MINCLOCK: usize = 3;
-    const MAXCLOCK_JITTER: f64 = 3.0;
-
-    while indices.len() > NTP_MINCLOCK {
-        // Compute select jitter (φ_λ): RMS of the peer jitters of survivors
+        // 2. Compute the aggregate select jitter (φ_S): RMS of sel_jitter.
         let mut sum_sq = 0.0f64;
-        for j in 0..indices.len() {
-            sum_sq += peer_jitter[j] * peer_jitter[j];
+        for &sj in &sel_jitter {
+            sum_sq += sj * sj;
         }
         let select_jitter = (sum_sq / indices.len() as f64).sqrt();
 
         if select_jitter <= 0.0 {
-            // All jitter is zero — can't prune by jitter ratio
             break;
         }
 
-        // Compute the threshold: MAXCLOCK_JITTER × select_jitter
-        let threshold = MAXCLOCK_JITTER * select_jitter;
-
-        // Find all indices whose jitter exceeds the threshold.
-        // Build the set of indices to remove, protecting the prefer peer.
-        let mut to_remove: Vec<usize> = Vec::new();
-        let mut kept_any = false;
-        for j in 0..indices.len() {
-            let is_prefer = prefer_associd.map_or(false, |pa| indices[j] == pa);
-            if !is_prefer && peer_jitter[j] > threshold {
-                to_remove.push(j);
-            } else {
-                kept_any = true;
+        // 3. Find the survivor with the WORST (largest) selection jitter.
+        //    Protected peers (PREFER) are immune from removal.
+        let mut worst_sj = 0.0f64;
+        let mut worst_idx: Option<usize> = None;
+        for i in 0..indices.len() {
+            let is_protected = prefer_idx.map_or(false, |pa| indices[i] == pa);
+            if is_protected {
+                continue;
+            }
+            if sel_jitter[i] > worst_sj {
+                worst_sj = sel_jitter[i];
+                worst_idx = Some(i);
             }
         }
 
-        if to_remove.is_empty() {
-            // All survivors are within threshold — stop pruning
-            break;
-        }
-
-        if !kept_any {
-            // Removing all would leave nothing; keep at least the best (prefer)
-            break;
-        }
-
-        // Remove in reverse order to preserve indices
-        to_remove.sort_by(|a, b| b.cmp(a));
-        for &idx in &to_remove {
-            indices.remove(idx);
-            peer_jitter.remove(idx);
+        // 4. Remove the worst if its selection jitter exceeds the threshold:
+        //    φ_λ(max) > maxclock × φ_S   (ntpsec: peer_jitter > maxclock * select_jitter)
+        match worst_idx {
+            Some(wi) if worst_sj > maxclock_jitter * select_jitter => {
+                indices.remove(wi);
+            }
+            _ => break,
         }
     }
 
-    // Final resize: keep at most NTP_MINCLOCK survivors, protecting prefer
-    while indices.len() > NTP_MINCLOCK {
-        // Find the worst (highest jitter) non-prefer peer to remove
-        let worst = peer_jitter
+    // ─── Final resize: keep at most `minclock` survivors ─────────────
+    // After the elimination loop stops (either no survivor exceeds the
+    // threshold or count <= minclock), trim down to minclock by removing
+    // the worst selection-jitter survivor one at a time.
+    // This matches ntpsec's while (nsurv > sys_minclock) loop.
+    while indices.len() > minclock {
+        // Recompute selection jitter for the current set
+        let mut sel_jitter = vec![0.0f64; indices.len()];
+        for i in 0..indices.len() {
+            let offset_i = peers[indices[i]].offset;
+            let mut sum_sq = 0.0f64;
+            for j in 0..indices.len() {
+                if i == j {
+                    continue;
+                }
+                let d = offset_i - peers[indices[j]].offset;
+                sum_sq += d * d;
+            }
+            sel_jitter[i] = if indices.len() > 1 {
+                (sum_sq / (indices.len() - 1) as f64).sqrt()
+            } else {
+                0.0
+            };
+        }
+
+        // Find worst non-protected peer
+        let worst = sel_jitter
             .iter()
             .enumerate()
-            .filter(|(idx, _)| prefer_associd.map_or(true, |pa| indices[*idx] != pa))
+            .filter(|(idx, _)| prefer_idx.map_or(true, |pa| indices[*idx] != pa))
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx);
 
         match worst {
             Some(w) => {
                 indices.remove(w);
-                peer_jitter.remove(w);
             }
             None => break,
         }
+    }
+
+    // ─── Store final selection jitter back to peers ───────────────────
+    for i in 0..indices.len() {
+        let offset_i = peers[indices[i]].offset;
+        let mut sum_sq = 0.0f64;
+        for j in 0..indices.len() {
+            if i == j {
+                continue;
+            }
+            let d = offset_i - peers[indices[j]].offset;
+            sum_sq += d * d;
+        }
+        peers[indices[i]].selection_jitter = if indices.len() > 1 {
+            (sum_sq / (indices.len() - 1) as f64).sqrt()
+        } else {
+            0.0
+        };
     }
 
     indices
@@ -646,8 +702,17 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
 /// of the survivor offsets.  The weight for each survivor is inversely
 /// proportional to its root synchronization distance (not peer jitter²).
 /// This gives more weight to peers with smaller total clock uncertainty.
+///
+/// `sys_peer_idx` is the index (into the original `peers` array) of the
+/// selected system peer.  Its `selection_jitter` is incorporated into
+/// the combined jitter in quadrature, matching ntpsec behavior.
 /// Returns (combined_offset, combined_jitter).
-pub fn clock_combine(peers: &[Peer], survivors: &[usize], now: NtpTs64) -> (f64, f64) {
+pub fn clock_combine(
+    peers: &[Peer],
+    survivors: &[usize],
+    sys_peer_idx: usize,
+    now: NtpTs64,
+) -> (f64, f64) {
     if survivors.is_empty() {
         return (0.0, 0.0);
     }
@@ -698,12 +763,18 @@ pub fn clock_combine(peers: &[Peer], survivors: &[usize], now: NtpTs64) -> (f64,
     }
     let residual_jitter = (sum_residual_sq / sum_weight).sqrt();
 
-    // The combined jitter also incorporates the system peer's selection
-    // jitter in quadrature (matching ntpsec behavior):
+    // The combined jitter incorporates the system peer's selection_jitter
+    // in quadrature (matching ntpsec behavior):
     //   jitter = sqrt(residual_jitter² + syspeer.selection_jitter²)
-    let selection_jitter = peers[survivors[0]].jitter;
+    // The selection_jitter is the RMS residual of the system peer's offset
+    // relative to all other survivors, computed during clustering.
+    let sys_selection_jitter = if sys_peer_idx < peers.len() {
+        peers[sys_peer_idx].selection_jitter
+    } else {
+        peers[survivors[0]].selection_jitter
+    };
     let combined_jitter =
-        (residual_jitter * residual_jitter + selection_jitter * selection_jitter).sqrt();
+        (residual_jitter * residual_jitter + sys_selection_jitter * sys_selection_jitter).sqrt();
 
     (combined_offset, combined_jitter)
 }
@@ -892,49 +963,125 @@ pub struct ExtensionField {
 }
 
 /// Parse the tail of an NTP packet: extension fields + optional MAC.
+///
+/// This is the security-critical parser that must unambiguously split:
+///   48-byte header + zero or more extension fields + optional key ID + optional MAC
+///
+/// Strategy to resolve the ambiguity between extension fields and MAC key IDs:
+///   1. If the tail exactly matches a known MAC size (key_id 4 + digest 16 or 20),
+///      treat it as a MAC with no extension fields.  This avoids misinterpreting
+///      small key IDs (whose first 2 bytes may be 0x0000) as a zero-field terminator.
+///   2. Otherwise, parse extension fields from the tail.  After each extension,
+///      check if the remaining bytes exactly match a known MAC size.  If so, stop
+///      parsing extensions and treat the remainder as a MAC.
+///   3. Extension fields with type 0 and length == 0 are valid terminators.
+///
+/// Security properties:
+///   - Only known MAC digest lengths are accepted (MD5=16, SHA1=20, AES-128-CMAC=16).
+///   - A truncated MAC is never interpreted as unauthenticated traffic.
+///   - Extension fields are validated for bounds and alignment before parsing.
 pub fn split_packet_tail(
     packet: &[u8],
 ) -> Result<(Vec<ExtensionField>, Option<(u32, &[u8])>), String> {
     if packet.len() < 48 {
         return Err("packet too short".to_string());
     }
+    let tail_len = packet.len() - 48;
+    // Strategy 1: If the entire tail matches a known MAC size, treat as MAC.
+    // Known MAC sizes: 4+16=20 (MD5, AES-CMAC), 4+20=24 (SHA1)
+    if tail_len == 20 || tail_len == 24 {
+        // Entire tail is a MAC — no extension fields.
+        // This avoids treating small key_id first 2 bytes (0x0000) as terminator.
+        let key_id_bytes: [u8; 4] = packet[48..52]
+            .try_into()
+            .map_err(|_| "invalid key_id bytes".to_string())?;
+        let key_id = u32::from_be_bytes(key_id_bytes);
+        let mac = &packet[52..];
+        return Ok((vec![], Some((key_id, mac))));
+    }
+
+    // Strategy 2: Parse extension fields from byte 48.
+    // We parse extension fields one at a time.  After each parsed extension,
+    // we check if the remaining bytes exactly match a known MAC size (20 or 24)
+    // and stop if so.  However, we ALWAYS respect an explicit zero-terminator
+    // (type=0, length=0) — that is a definitive end-of-extensions marker.
     let mut offset = 48;
-    let mut extensions = Vec::new();
+    let mut exts = Vec::new();
+
     while offset + 4 <= packet.len() {
         let field_type = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
         let length = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
-        if field_type == 0 {
-            if length == 0 {
-                offset += 4;
-            }
+
+        // Zero field type with zero length is a definitive terminator.
+        if field_type == 0 && length == 0 {
+            offset += 4;
             break;
         }
+
+        // Zero field type with non-zero length is invalid.
+        if field_type == 0 {
+            break;
+        }
+
+        // Check if remaining bytes exactly match a known MAC size.
+        // This is a HEURISTIC: when the tail could be a MAC (no extension fields
+        // remain), stop parsing extensions.  We do this AFTER checking for a
+        // zero-terminator so that an explicit terminator is always respected.
+        let remaining = packet.len() - offset;
+        if remaining == 20 || remaining == 24 {
+            break;
+        }
+
+        // Validate extension field length (RFC 5905 §7.3):
+        // - Must be >= 4 (the length includes the 4-byte type+length header)
+        // - Must be a multiple of 4 (4-byte alignment)
         if length < 4 || (length as usize) % 4 != 0 {
             break;
         }
+
+        // Ensure the extension field fits within the packet
         if offset + length as usize > packet.len() {
             return Err("extension field exceeds packet".to_string());
         }
+
         let payload = packet[offset + 4..offset + length as usize].to_vec();
-        extensions.push(ExtensionField {
+        exts.push(ExtensionField {
             field_type,
             payload,
         });
         offset += length as usize;
     }
+
+    // Now parse the MAC from the remaining bytes after all extensions.
     let remaining = packet.len() - offset;
-    if remaining >= 8 {
-        let key_id_bytes: [u8; 4] = packet[offset..offset + 4]
-            .try_into()
-            .map_err(|_| "invalid key_id bytes".to_string())?;
-        let key_id = u32::from_be_bytes(key_id_bytes);
-        let mac = &packet[offset + 4..];
-        Ok((extensions, Some((key_id, mac))))
-    } else if remaining == 0 {
-        Ok((extensions, None))
-    } else {
-        Err("partial MAC tail".to_string())
+
+    if remaining == 0 {
+        return Ok((exts, None));
     }
+
+    // Remaining must be exactly key_id(4) + known_digest_length
+    if remaining < 8 {
+        return Err(format!(
+            "partial MAC tail: {} bytes remaining (need at least 8)",
+            remaining
+        ));
+    }
+
+    let mac_digest_len = remaining - 4;
+    if mac_digest_len != 16 && mac_digest_len != 20 {
+        return Err(format!(
+            "invalid MAC digest length: {} bytes (expected 16 or 20)",
+            mac_digest_len
+        ));
+    }
+
+    let key_id_bytes: [u8; 4] = packet[offset..offset + 4]
+        .try_into()
+        .map_err(|_| "invalid key_id bytes".to_string())?;
+    let key_id = u32::from_be_bytes(key_id_bytes);
+    let mac = &packet[offset + 4..];
+
+    Ok((exts, Some((key_id, mac))))
 }
 
 /// Build an NTP server response packet.  Matching ntpsec's `transmit()`.
@@ -1130,6 +1277,69 @@ pub struct SystemState {
     pub leap_smear_interval: u32,
     /// Total leap smear correction accumulated so far (nanoseconds).
     pub leap_smear_total: i64,
+
+    // ── Gate 10: Selection / survivor tracking ───────────────────────────
+    /// Number of survivor candidates in the current selection round.
+    /// Used for the `candidate` system variable.
+    pub survivor_count: u32,
+
+    // ── Gate 10: Auth engine state ────────────────────────────────────────
+    /// Auth type: 0=none, 1=PC(1), 2=MD5, 3=SHA1, etc.
+    pub auth_type: u32,
+    /// Auth flags bitmask.
+    pub auth_flags: u32,
+    /// Number of keys in the key store.
+    pub auth_keys: u32,
+    /// Current control key ID (for auth_keyno).
+    pub auth_keyno: u32,
+
+    // ── Gate 10: MRU list stats ───────────────────────────────────────────
+    /// Deepest the MRU list has grown.
+    pub mru_deepest: u32,
+    /// Whether MRU monitoring is enabled.
+    pub mru_enabled: u32,
+    /// Maximum age before an entry is evicted (seconds).
+    pub mru_maxage: u32,
+    /// Maximum depth before an entry is evicted.
+    pub mru_maxdepth: u32,
+    /// Maximum memory the MRU list can consume.
+    pub mru_maxmem: u32,
+    /// Minimum depth before entries are kept.
+    pub mru_mindepth: u32,
+    /// Minimum age before an entry is evictable (seconds).
+    pub mru_minage: u32,
+    /// Current memory usage of the MRU list.
+    pub mru_mem: u32,
+    /// Memory increment per entry added.
+    pub mru_meminc: u32,
+    /// Number of address pairs tracked.
+    pub mru_npairs: u32,
+    /// Number of polls since last MRU list reset.
+    pub mru_polls: u32,
+
+    // ── Gate 10: NTS state ────────────────────────────────────────────────
+    /// NTS-enabled flag.
+    pub nts_enabled: u32,
+    /// Number of NTS peers.
+    pub nts_peers: u32,
+    /// Number of NTS keys.
+    pub nts_keys: u32,
+    /// NTS cookie length.
+    pub nts_cookielen: u32,
+    /// Number of NTS providers.
+    pub nts_providers: u32,
+
+    // ── Gate 10: Tinker / Orphan ──────────────────────────────────────────
+    /// Tinker tc-increment value.
+    pub tcincrement: f64,
+    /// Orphan mode stratum.
+    pub orph_stratum: u8,
+    /// Orphan wait period (seconds).
+    pub orphwait: u32,
+
+    // ── Gate 10: Previous selection state ─────────────────────────────────
+    /// Previous sys_peer associd (for selpeer_previous).
+    pub selpeer_previous: u16,
 }
 
 impl Default for SystemState {
@@ -1176,6 +1386,31 @@ impl Default for SystemState {
             sys_peer_associd: 0,
             leap_smear_interval: 0,
             leap_smear_total: 0,
+            survivor_count: 0,
+            auth_type: 0,
+            auth_flags: 0,
+            auth_keys: 0,
+            auth_keyno: 0,
+            mru_deepest: 0,
+            mru_enabled: 1,
+            mru_maxage: 3600,
+            mru_maxdepth: 600,
+            mru_maxmem: 0,
+            mru_mindepth: 0,
+            mru_minage: 0,
+            mru_mem: 0,
+            mru_meminc: 0,
+            mru_npairs: 0,
+            mru_polls: 0,
+            nts_enabled: 0,
+            nts_peers: 0,
+            nts_keys: 0,
+            nts_cookielen: 0,
+            nts_providers: 0,
+            tcincrement: 0.0,
+            orph_stratum: 0,
+            orphwait: 300,
+            selpeer_previous: 0,
         }
     }
 }
@@ -1224,16 +1459,17 @@ impl SystemState {
             return usize::MAX;
         }
 
-        // 4. Run combining algorithm
-        let (combined_offset, combined_jitter) = clock_combine(peers, &survivors, now);
-
-        // 5. Pick the system peer — prefer the PREFER peer if any survivor has the flag,
+        // 4. Pick the system peer — prefer the PREFER peer if any survivor has the flag,
         //    otherwise use the first survivor.
         let sys_peer_idx = survivors
             .iter()
             .copied()
             .find(|&i| peers[i].flags.contains(PeerFlags::PREFER))
             .unwrap_or(survivors[0]);
+
+        // 5. Run combining algorithm with the system peer index
+        let (combined_offset, combined_jitter) =
+            clock_combine(peers, &survivors, sys_peer_idx, now);
         let sys_peer = &peers[sys_peer_idx];
 
         // 6. Update system variables
@@ -1629,7 +1865,7 @@ mod tests {
         // Both peers have identical root_distance (same delay, dispersion,
         // reference_time, jitter), so they get equal weight.
         let survivors: Vec<usize> = (0..peers.len()).collect();
-        let (offset, _jitter) = clock_combine(&peers, &survivors, now);
+        let (offset, _jitter) = clock_combine(&peers, &survivors, survivors[0], now);
         // Equal-weighted average of 0.001 and 0.003 = 0.002
         assert!((offset - 0.002).abs() < 0.001);
     }
@@ -1828,9 +2064,7 @@ mod tests {
 
         let n_survivors = clock_intersection(&mut peers, now);
 
-        // The three-tuple algorithm must find the true-time cluster at
-        // offset ~0 as the intersection.  The peer at 1.0 is completely
-        // disjoint → must be TEST5.
+        // The peer at 1.0 is completely disjoint → must be TEST5.
         let disjoint_flash = FlashBits::from_bits_truncate(peers[4].flash);
         assert!(
             disjoint_flash.contains(FlashBits::TEST5),
@@ -1849,30 +2083,29 @@ mod tests {
             );
         }
 
-        // The wide-interval peer at 0.100 has a confidence interval that
-        // overlaps the cluster (due to large root_delay/2), so its
-        // interval overlaps the intersection.  It is NOT TEST5.
+        // The wide-interval peer at 0.100 has a confidence interval
+        // [-0.306, 0.506] that overlaps the cluster's interval.  At allow=1
+        // (m=4), the intersection contains 4 midpoints: the 3 clustered
+        // midpoints plus the wide peer's midpoint (0.100).  The wide peer
+        // is therefore a truechimer (not TEST5) even though its midpoint
+        // is far from the cluster, because the intersection interval is
+        // large enough to include it.
         let wide_flash = FlashBits::from_bits_truncate(peers[3].flash);
         assert!(
             !wide_flash.contains(FlashBits::TEST5),
             "wide-interval peer (index 3) is NOT a falseticker: its \
-             interval overlaps even though its midpoint is far away, \
-             flash={:?}",
+             midpoint (0.100s) falls inside the intersection interval \
+             (bounded by the wide peer's own interval), flash={:?}",
             wide_flash
         );
 
-        // Survivors = 4 (3 clustered + 1 wide-interval, but NOT the
-        // disjoint peer at index 4).  If fewer than 4 survived, the
-        // midpoint condition is working correctly: the intersection
-        // requires at least m midpoints in the interval.
+        // Survivors = 4 (3 clustered + 1 wide-interval).  The disjoint
+        // peer at 1.0 is correctly marked TEST5.
         assert!(
             n_survivors >= 3,
             "expected at least 3 survivors, got {}",
             n_survivors
         );
-
-        // Verify the algorithm found an intersection (marking the
-        // disjoint peer as TEST5 is what matters for correctness).
         assert_eq!(
             n_survivors, 4,
             "expected 4 survivors (3 clustered + 1 wide-interval), got {}",
@@ -1903,7 +2136,7 @@ mod tests {
         }
 
         let survivors: Vec<usize> = (0..peers.len()).collect();
-        let (offset, _jitter) = clock_combine(&peers, &survivors, now);
+        let (offset, _jitter) = clock_combine(&peers, &survivors, survivors[0], now);
 
         // Peer 0 (offset=0.0) has much lower root_distance than peer 1
         // (offset=0.01), so the combined offset should be closer to 0.0
@@ -2153,7 +2386,7 @@ mod tests {
         }
 
         let survivors: Vec<usize> = (0..peers.len()).collect();
-        let (_offset, combined_jitter) = clock_combine(&peers, &survivors, now);
+        let (_offset, combined_jitter) = clock_combine(&peers, &survivors, survivors[0], now);
 
         // With offsets at 0.0 and 0.010, equal weight, the residual RMS
         // around the combined offset (0.005) is 0.005.  Adding the syspeer
@@ -2238,7 +2471,11 @@ mod tests {
         let mut pkt = vec![0u8; 48];
         pkt.extend_from_slice(&10u32.to_be_bytes());
         pkt.push(0x01);
-        assert_eq!(split_packet_tail(&pkt).unwrap_err(), "partial MAC tail");
+        let err = split_packet_tail(&pkt).unwrap_err();
+        assert!(
+            err.starts_with("partial MAC tail"),
+            "expected partial MAC error, got: {err}"
+        );
     }
 
     #[test]

@@ -815,6 +815,11 @@ pub struct NmeaRefclock {
 }
 
 impl NmeaRefclock {
+    /// Return the raw file descriptor, if the device is open.
+    pub fn get_fd(&self) -> Option<i32> {
+        self.fd
+    }
+
     /// Create a new NMEA refclock instance for the given unit number.
     pub fn new(unit: u8) -> Self {
         NmeaRefclock {

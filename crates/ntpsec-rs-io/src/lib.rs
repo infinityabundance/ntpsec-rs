@@ -113,12 +113,167 @@ use std::os::unix::io::AsRawFd;
 #[derive(Debug)]
 pub struct RealNetworkIo {
     sockets: Vec<Socket>,
+    /// epoll file descriptor (Linux only, -1 if not available).
+    epoll_fd: i32,
+    /// Mapping from socket index to raw file descriptor.
+    socket_fds: Vec<i32>,
 }
 
 impl RealNetworkIo {
     pub fn new() -> Self {
+        let epoll_fd = Self::create_epoll();
         Self {
             sockets: Vec::new(),
+            epoll_fd,
+            socket_fds: Vec::new(),
+        }
+    }
+
+    /// Create an epoll instance. Falls back to -1 (poll-based) if unavailable.
+    fn create_epoll() -> i32 {
+        #[cfg(target_os = "linux")]
+        {
+            match unsafe { libc::epoll_create1(0) } {
+                -1 => -1,
+                fd => fd,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            -1
+        }
+    }
+
+    /// Return raw file descriptors of all managed sockets.
+    pub fn get_poll_fds(&self) -> Vec<i32> {
+        let mut fds = self.socket_fds.clone();
+        if self.epoll_fd >= 0 {
+            fds.push(self.epoll_fd);
+        }
+        fds
+    }
+
+    /// Wait for readability on any socket, with a timeout in milliseconds.
+    /// Returns the index of a socket that has data ready.
+    /// timeout_ms: -1 = infinite, 0 = poll (non-blocking), >0 = milliseconds.
+    pub fn poll_readable(&mut self, timeout_ms: i32) -> Result<Option<usize>, IoError> {
+        if self.sockets.is_empty() {
+            return Ok(None);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if self.epoll_fd >= 0 {
+                return self.epoll_wait(timeout_ms);
+            }
+        }
+
+        // Fallback: poll(2)-based readiness detection
+        self.poll_fallback(timeout_ms)
+    }
+
+    /// epoll_wait implementation (Linux only).
+    #[cfg(target_os = "linux")]
+    fn epoll_wait(&mut self, timeout_ms: i32) -> Result<Option<usize>, IoError> {
+        let mut events: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
+        let nfds = unsafe {
+            libc::epoll_wait(
+                self.epoll_fd,
+                events.as_mut_ptr(),
+                events.len() as i32,
+                timeout_ms,
+            )
+        };
+        if nfds < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(None); // Signal interrupted — loop will re-evaluate
+            }
+            return Err(IoError::RecvFailed(format!("epoll_wait: {err}")));
+        }
+        if nfds == 0 {
+            return Ok(None); // Timeout — no ready sockets
+        }
+        // Find the socket index from the returned fd
+        for i in 0..nfds as usize {
+            let fd = events[i].u64 as i32;
+            if let Some(idx) = self.socket_fds.iter().position(|&f| f == fd) {
+                return Ok(Some(idx));
+            }
+        }
+        Ok(None)
+    }
+
+    /// poll(2) fallback for non-Linux or when epoll is unavailable.
+    fn poll_fallback(&mut self, timeout_ms: i32) -> Result<Option<usize>, IoError> {
+        let nfds = self.sockets.len();
+        let mut fds: Vec<libc::pollfd> = self
+            .socket_fds
+            .iter()
+            .map(|&fd| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), nfds as libc::nfds_t, timeout_ms) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(IoError::RecvFailed(format!("poll: {err}")));
+        }
+        if ret == 0 {
+            return Ok(None);
+        }
+        for (idx, pfd) in fds.iter().enumerate() {
+            if pfd.revents & libc::POLLIN != 0 {
+                return Ok(Some(idx));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Receive a datagram from a specific socket by index.
+    pub fn recv_from(&mut self, socket_index: usize) -> Result<ReceivedDatagram, IoError> {
+        if socket_index >= self.sockets.len() {
+            return Err(IoError::RecvFailed(
+                "socket index out of bounds".to_string(),
+            ));
+        }
+        let socket = &self.sockets[socket_index];
+        let mut buf = vec![0u8; 512];
+
+        match recvmsg_with_timestamp(socket, &mut buf) {
+            Ok(Some((n, src, kernel_ts, ts_source))) => {
+                let dest_addr = socket_getsockname(socket);
+                let source_netaddr = socketaddr_to_netaddr2(&src);
+                Ok(ReceivedDatagram {
+                    bytes: buf[..n].to_vec(),
+                    source: source_netaddr,
+                    destination: socketaddr_to_netaddr2(&dest_addr),
+                    rx_timestamp: kernel_ts,
+                    interface_index: None,
+                    timestamp_source: ts_source,
+                })
+            }
+            Ok(None) => Err(IoError::RecvFailed("timeout".to_string())),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Drop for RealNetworkIo {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.epoll_fd >= 0 {
+                unsafe {
+                    libc::close(self.epoll_fd);
+                }
+            }
         }
     }
 }
@@ -138,19 +293,34 @@ impl NetworkIo for RealNetworkIo {
             .map_err(|e| IoError::BindFailed(format!("socket: {e}")))?;
 
         // Enable software timestamps via SO_TIMESTAMPNS (widely supported).
-        // Nonblocking polling — timeout is managed by the daemon event loop.
         let _ = ntp_packetstamp::enable_software_timestamps(socket.as_raw_fd());
 
         // Enable hardware timestamps via SO_TIMESTAMPING (Linux NIC-dependent).
-        // This is best-effort; if the NIC or driver doesn't support it, the
-        // setsockopt succeeds but only software timestamps are returned.
         let _ = ntp_packetstamp::enable_hardware_timestamps(socket.as_raw_fd());
 
         socket
             .bind(&sockaddr.into())
             .map_err(|e| IoError::BindFailed(format!("bind: {e}")))?;
 
+        // Track the socket and register with epoll if available
+        let fd = socket.as_raw_fd();
         self.sockets.push(socket);
+        self.socket_fds.push(fd);
+
+        #[cfg(target_os = "linux")]
+        if self.epoll_fd >= 0 {
+            let mut event = libc::epoll_event {
+                events: (libc::EPOLLIN | libc::EPOLLET) as u32, // edge-triggered
+                u64: fd as u64,
+            };
+            let ret =
+                unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event) };
+            if ret != 0 {
+                // epoll_ctl failed — non-fatal; poll fallback will be used
+                let _ = std::io::Error::last_os_error();
+            }
+        }
+
         Ok(())
     }
 

@@ -120,6 +120,29 @@ impl TimerQueue {
         self.entries.is_empty()
     }
 
+    /// Get the next absolute deadline (in NTP seconds), or None if no timers.
+    pub fn next_deadline(&self) -> Option<i64> {
+        self.entries.iter().map(|e| e.due).min()
+    }
+
+    /// Get the deadline as a millisecond timeout suitable for poll/epoll.
+    /// Returns -1 (infinite) when there are no timers, or the timeout in ms
+    /// (capped at 0 minimum — never return a negative timeout for poll).
+    pub fn poll_timeout_ms(&self, now_seconds: i64) -> i32 {
+        match self.next_deadline() {
+            Some(t) => {
+                let secs = t - now_seconds;
+                if secs <= 0 {
+                    0 // Timer already due — poll returns immediately
+                } else {
+                    // Clamp to avoid overflow when converting to ms
+                    (secs.min(3600) as i32) * 1000
+                }
+            }
+            None => -1, // No timers — wait indefinitely
+        }
+    }
+
     /// Iterate over all entries.
     pub fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
         self.entries.iter()

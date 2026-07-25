@@ -38,22 +38,28 @@ use rustls::ServerConnection;
 
 // ──── Server entry point ─────────────────────────────────────────────────
 
-/// Start the NTS-KE server on the default port (4460).
+/// Start the NTS-KE server on the configured port (Gate 8.4).
+///
+/// Uses the configured port from `NtsServerConfig` if available, otherwise
+/// defaults to 4460. Supports IPv4 and IPv6 dual-stack binding.
 ///
 /// Spawns one thread per incoming connection.  Each connection runs the
 /// full NTS-KE handshake (RFC 8915 §4) before closing.
 pub fn start_nts_ke_server(config: NtsServerConfig) -> Result<(), String> {
     let tls_config = build_tls_server_config(&config)?;
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", NTS_KE_DEFAULT_PORT))
-        .map_err(|e| format!("NTS-KE bind failed: {e}"))?;
+    let port = config.port;
+    // Use IPv6 dual-stack socket (binds to :: and accepts both IPv4 and IPv6)
+    let listen_addr = format!("[::]:{}", port);
+    let listener = TcpListener::bind(&listen_addr)
+        .or_else(|_| TcpListener::bind(format!("0.0.0.0:{}", port)))
+        .map_err(|e| format!("NTS-KE bind on port {port} failed: {e}"))?;
 
-    tracing::info!("NTS-KE server listening on port {}", NTS_KE_DEFAULT_PORT);
+    tracing::info!("NTS-KE server listening on port {}", port);
 
     for stream in listener.incoming() {
         match stream {
             Ok(tcp_stream) => {
-                // Set socket timeouts for the connection (matching nts_server.c
-                // which uses SO_RCVTIMEO / SO_SNDTIMEO with NTS_KE_TIMEOUT).
+                // Set socket timeouts for the connection.
                 if let Err(e) = tcp_stream.set_read_timeout(Some(Duration::from_secs(15))) {
                     tracing::warn!("NTS-KE set_read_timeout failed: {e}");
                 }
@@ -70,7 +76,6 @@ pub fn start_nts_ke_server(config: NtsServerConfig) -> Result<(), String> {
                 });
             }
             Err(e) => {
-                // EINTR / transient errors: log and continue
                 tracing::error!("NTS-KE accept failed: {e}");
             }
         }
@@ -800,13 +805,17 @@ fn build_cookie_plaintext(aead_alg: u16, c2s_key: &[u8; 32], s2c_key: &[u8; 32])
 
 // ──── Configuration ────────────────────────────────────────────────────────
 
-/// Configuration for the NTS-KE server.
+/// Configuration for the NTS-KE server (Gate 8.4).
 #[derive(Debug, Clone)]
 pub struct NtsServerConfig {
     pub key_file: String,
     pub cert_file: String,
     pub aead_algorithms: Vec<u16>,
     pub cookie_cipher: crate::nts_cookie::CookieCipher,
+    /// Port to listen on (defaults to 4460 if not set).
+    pub port: u16,
+    /// Maximum concurrent connections (0 = unlimited).
+    pub max_connections: usize,
 }
 
 // ──── Tests ──────────────────────────────────────────────────────────────
@@ -1134,6 +1143,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![15, 16],
             cookie_cipher: cipher,
+            port: 4460,
+            max_connections: 0,
         };
 
         let request = make_valid_request(&[15, 18]);
@@ -1153,6 +1164,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![16],
             cookie_cipher: cipher,
+            port: 4460,
+            max_connections: 0,
         };
 
         let request = make_valid_request(&[15, 18]);
@@ -1174,6 +1187,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![15],
             cookie_cipher: cipher,
+            port: 4460,
+            max_connections: 0,
         };
 
         // Build a request with a different protocol ID (not NTPv4 = 0)
@@ -1210,6 +1225,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![15],
             cookie_cipher: cipher,
+            port: 4460,
+            max_connections: 0,
         };
 
         // Request without EOM
@@ -1242,6 +1259,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![15],
             cookie_cipher: cipher,
+            port: 4460,
+            max_connections: 0,
         };
 
         // Insert an unknown non-critical record before EOM
@@ -1280,6 +1299,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![15],
             cookie_cipher: cipher,
+            port: 4460,
+            max_connections: 0,
         };
 
         // Insert an unknown critical record
@@ -1398,6 +1419,8 @@ mod tests {
             cert_file: "".to_string(),
             aead_algorithms: vec![15, 16],
             cookie_cipher: cipher.clone(),
+            port: 4460,
+            max_connections: 0,
         };
 
         let request = make_valid_request(&[15, 18]);

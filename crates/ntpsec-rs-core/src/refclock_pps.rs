@@ -189,6 +189,11 @@ pub struct PpsRefclock {
 }
 
 impl PpsRefclock {
+    /// Return the raw file descriptor, if the device is open.
+    pub fn get_fd(&self) -> Option<i32> {
+        self.fd
+    }
+
     /// Create a new PPS refclock instance for the given unit number.
     ///
     /// The device is not opened until [`open()`](Self::open) is called.

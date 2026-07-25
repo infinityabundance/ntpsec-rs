@@ -47,8 +47,12 @@ fn sockaddr_to_ipaddr(sa: &SockAddr) -> Option<IpAddr> {
         match sa.ss_family as libc::c_int {
             libc::AF_INET => {
                 let sin = &*(sa as *const _ as *const libc::sockaddr_in);
-                let addr = u32::from_be(sin.sin_addr.s_addr);
-                Some(IpAddr::V4(Ipv4Addr::from_bits(addr)))
+                // s_addr is in network byte order (big-endian).
+                // Convert to host byte order and reconstruct octets correctly.
+                let octets = sin.sin_addr.s_addr.to_be_bytes();
+                Some(IpAddr::V4(Ipv4Addr::new(
+                    octets[0], octets[1], octets[2], octets[3],
+                )))
             }
             libc::AF_INET6 => {
                 let sin6 = &*(sa as *const _ as *const libc::sockaddr_in6);
@@ -68,7 +72,8 @@ fn sockaddr_from_socketaddr(sa: &SocketAddr) -> SockAddr {
             sin.sin_family = libc::AF_INET as libc::sa_family_t;
             sin.sin_port = v4.port().to_be();
             sin.sin_addr = libc::in_addr {
-                s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                // s_addr must be in network byte order (big-endian).
+                s_addr: u32::from_be_bytes(v4.ip().octets()),
             };
         }
         SocketAddr::V6(v6) => {

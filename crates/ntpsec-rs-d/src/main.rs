@@ -513,7 +513,7 @@ fn main() {
         }
     }
 
-    // ──── Main Event Loop ────────────────────────────────────────────
+    // ──── Main Event Loop (readiness-driven) ──────────────────────────
     tracing::info!("Entering main event loop with {} peers", engine.peers.len());
     let mut iteration: u64 = 0;
 
@@ -526,26 +526,19 @@ fn main() {
             match read_config_file(&cli.config) {
                 Ok(new_config) => {
                     if new_config.errors.is_empty() {
-                        // Build new engine state atomically before swap
                         let mut new_engine = DaemonEngine::new(new_config);
-                        // Inherit only portable discipline state — NOT system state
-                        // (peer_count, stratum, reference_id, etc. must be recomputed
-                        // from the new peer set after the next clock_update)
                         new_engine.loop_filter.frequency = engine.loop_filter.frequency;
                         new_engine.loop_filter.wander = engine.loop_filter.wander;
                         new_engine.loop_filter.jitter = engine.loop_filter.jitter;
                         new_engine.precision = engine.precision;
-                        // Preserve start time, uptime, and counters across reload
                         new_engine.system.start_time = engine.system.start_time;
                         new_engine.system.uptime_secs = engine.system.uptime_secs;
                         new_engine.system.auth_counters = engine.system.auth_counters.clone();
                         new_engine.system.server_counters = engine.system.server_counters.clone();
                         new_engine.system.sel_broken = engine.system.sel_broken;
-                        // Load key files for the new config — abort swap on failure
                         let new_key_paths = collect_key_paths(&new_engine.config);
                         match load_key_files(&mut new_engine.auth, &new_key_paths) {
                             Ok(()) => {
-                                // Re-apply CLI trusted keys and keyfile on reload
                                 for key_id in &cli.trustedkey {
                                     new_engine.auth.add_trusted_key(*key_id);
                                 }
@@ -554,15 +547,12 @@ fn main() {
                                         let _ = new_engine.auth.parse_keys_file(&content);
                                     }
                                 }
-                                // Transactional swap
                                 engine = new_engine;
                                 tracing::info!("Configuration reloaded (transactional)");
                             }
-                            Err(e) => {
-                                tracing::error!(
-                                    "SIGHUP key loading failed (keeping old config): {e}"
-                                );
-                            }
+                            Err(e) => tracing::error!(
+                                "SIGHUP key loading failed (keeping old config): {e}"
+                            ),
                         }
                     } else {
                         tracing::error!("SIGHUP config has errors — keeping old config");
@@ -571,34 +561,32 @@ fn main() {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::error!("SIGHUP config reload failed (keeping old config): {e}");
-                }
+                Err(e) => tracing::error!("SIGHUP config reload failed (keeping old config): {e}"),
             }
         }
 
-        // 1. Drain due timers
+        // ── Compute timer deadline for epoll/poll timeout ──────────────
         let now = clock.now();
-        let timer_actions = engine.tick(now);
-        execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
+        let timeout_ms = engine.timers.poll_timeout_ms(now.seconds);
 
-        // 2. Non-blocking receive
-        match network.recv() {
-            Ok(dgram) => {
-                let event = DaemonEvent::PacketReceived(dgram);
-                let actions = engine.handle(event);
-                execute_actions(&actions, &mut clock, &mut network, &mut store);
-            }
-            Err(IoError::RecvFailed(_)) => {}
-            Err(e) => {
-                if iteration % 100 == 0 {
-                    tracing::debug!("Recv error: {e}");
-                }
+        // ── 1a. Poll refclock file descriptors for readiness ───────────
+        // Collect refclock fds and check for readiness (non-blocking).
+        // We collect fds first to avoid holding a borrow across the mutable
+        // poll_all() call.
+        let refclock_fds: Vec<i32> = engine.refclocks.get_poll_fds();
+        let mut ready_refclock = false;
+        for fd in &refclock_fds {
+            let mut pfd = libc::pollfd {
+                fd: *fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+            if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+                ready_refclock = true;
             }
         }
-
-        // 3. Poll refclocks for samples (every 10 iterations)
-        if iteration % 10 == 0 {
+        if ready_refclock {
             let now = clock.now();
             let refclock_actions = engine.refclocks.poll_all(now);
             for action in refclock_actions {
@@ -623,7 +611,42 @@ fn main() {
             }
         }
 
-        // 4. Periodic status & statistics
+        // ── 1b. Wait for socket readiness with computed deadline ───────
+        match network.poll_readable(timeout_ms) {
+            Ok(Some(socket_idx)) => {
+                // Drain all available packets from the ready socket
+                let drain_budget: usize = 64; // max packets per wakeup
+                for _ in 0..drain_budget {
+                    match network.recv_from(socket_idx) {
+                        Ok(dgram) => {
+                            let event = DaemonEvent::PacketReceived(dgram);
+                            let actions = engine.handle(event);
+                            execute_actions(&actions, &mut clock, &mut network, &mut store);
+                        }
+                        Err(IoError::RecvFailed(_)) => break, // No more data
+                        Err(e) => {
+                            if iteration % 100 == 0 {
+                                tracing::debug!("Recv error: {e}");
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(None) => {} // Timeout or no ready sockets
+            Err(e) => {
+                if iteration % 100 == 0 {
+                    tracing::debug!("Poll error: {e}");
+                }
+            }
+        }
+
+        // ── 2. Drain due timers (woken by timer deadline or socket) ────
+        let now = clock.now();
+        let timer_actions = engine.tick(now);
+        execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
+
+        // ── 3. Periodic status & statistics (every ~10 sec real time) ──
         if iteration % 100 == 0 {
             tracing::info!(
                 "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm",
@@ -632,7 +655,6 @@ fn main() {
                 engine.system.sys_offset,
                 engine.loop_filter.frequency_ppm(),
             );
-            // Emit loopstats (one line per 100 iterations)
             let loopstats_line = format!(
                 "{} {:.6} {:.6} {:.3} {:.6} {:.6}",
                 iteration / 100,
@@ -651,7 +673,6 @@ fn main() {
                 &mut network,
                 &mut store,
             );
-            // Emit peerstats for each reachable peer
             for i in 0..engine.peers.len() {
                 if let Some(peer) = engine.peers.get(i) {
                     if peer.reach.is_reachable() {
@@ -679,7 +700,17 @@ fn main() {
             }
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // Rate-limit: if no timers are due and no socket data arrived,
+        // we still need a minimum wakeup to check signals and refclocks.
+        // Use a short sleep only when nothing is pending.
+        if engine
+            .timers
+            .next_deadline()
+            .map_or(true, |d| d > now.seconds + 60)
+        {
+            // No timers in the next 60s — brief sleep to avoid busy-wait
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     // ──── Graceful Shutdown ──────────────────────────────────────────
