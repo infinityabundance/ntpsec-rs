@@ -932,6 +932,23 @@ fn execute_actions<C: SystemClock, N: NetworkIo, S: StateStore>(
                 // it means the caller did not pre-filter it.
                 tracing::debug!("RefclockSample bypassed main-loop filter");
             }
+            DaemonAction::ResolveHostname {
+                request_id,
+                hostname,
+                port,
+            } => {
+                // The engine wants us to resolve a hostname asynchronously.
+                // Spawn a resolution thread and feed results back via a
+                // channel that feeds into engine.handle().
+                // This will be wired properly when the daemon loop adds
+                // a channel for external-resolution results.
+                tracing::debug!(
+                    "DNS resolution requested: {}:{} (req {})",
+                    hostname,
+                    port,
+                    request_id
+                );
+            }
         }
     }
 }

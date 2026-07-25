@@ -814,6 +814,23 @@ struct PoolState {
     associds: Vec<u16>,
 }
 
+/// A hostname-based association awaiting DNS resolution.
+/// Stored in the engine until the shell resolves the hostname
+/// and feeds back the result as DnsResolved/DnsFailed.
+#[derive(Debug, Clone)]
+struct PendingDns {
+    /// Unique request ID for matching the resolution result.
+    request_id: u64,
+    /// The hostname to resolve.
+    hostname: String,
+    /// Port for NTP.
+    port: u16,
+    /// Association options parsed from config.
+    opts: AssocOptions,
+    /// Whether this was a pool (multiple addresses) or server/peer (single).
+    is_pool: bool,
+}
+
 /// State for a fragmented MRU query response.
 /// The client requests subsequent fragments using the same nonce and an
 /// incremented offset value.
@@ -944,6 +961,12 @@ pub struct DaemonEngine {
     /// The shell polls these for completion each cycle without blocking.
     pub nts_ke_inflight: Vec<(u16, std::thread::JoinHandle<Result<NtsAssociation, String>>)>,
 
+    /// Pending DNS resolutions for hostname-based associations.
+    /// The shell processes these asynchronously and feeds results back.
+    pub pending_dns: std::collections::VecDeque<PendingDns>,
+    /// Auto-incrementing ID for matching DNS results to pending entries.
+    next_dns_id: u64,
+
     /// System variables map for setvar configuration.
     pub sysvars: HashMap<String, String>,
 
@@ -1059,6 +1082,8 @@ impl DaemonEngine {
             call_delay: 0,
             pending_mru_fragments: HashMap::new(),
             event_tracker: SystemEventTracker::new(&SystemState::new()),
+            pending_dns: std::collections::VecDeque::new(),
+            next_dns_id: 1,
         };
         engine.apply_config(config);
         engine
@@ -1104,119 +1129,32 @@ impl DaemonEngine {
                     };
                     let opts = parse_assoc_options(options);
 
-                    // Resolve address: IP literal → fast path, hostname → DNS
-                    let sockaddrs: Vec<std::net::SocketAddr> =
-                        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
-                            vec![std::net::SocketAddr::new(ip, 123)]
-                        } else {
-                            match crate::ntp_dns::resolve_hostname(addr, 123, 5) {
-                                Ok(addrs) => addrs,
-                                Err(_) => {
-                                    // DNS resolution failed — skip this hostname.
-                                    // The shell layer should report this via system
-                                    // events or logging.
-                                    continue;
-                                }
-                            }
-                        };
-
-                    for sockaddr in &sockaddrs {
-                        // Convert std::net::SocketAddr to libc::sockaddr_storage
-                        let sa = match *sockaddr {
-                            std::net::SocketAddr::V4(v4) => {
-                                let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-                                let sin =
-                                    unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in) };
-                                sin.sin_family = libc::AF_INET as libc::sa_family_t;
-                                sin.sin_port = v4.port().to_be();
-                                sin.sin_addr = libc::in_addr {
-                                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
-                                };
-                                sa
-                            }
-                            std::net::SocketAddr::V6(v6) => {
-                                let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-                                let sin6 =
-                                    unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in6) };
-                                sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                                sin6.sin6_port = v6.port().to_be();
-                                sin6.sin6_addr = libc::in6_addr {
-                                    s6_addr: v6.ip().octets(),
-                                };
-                                sa
-                            }
-                        };
-
-                        let mut peer = Peer::new(
+                    // Resolve address: IP literal → create peer immediately
+                    // Hostname → store as pending DNS resolution (shell resolves asynchronously)
+                    if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+                        // Fast path: IP literal — create peer directly
+                        let sa = ip_to_sockaddr_storage(ip);
+                        create_peer_from_template(
+                            &mut self.peers,
+                            &mut self.next_associd,
+                            &mut self.timers,
+                            &mut self.nts_ke_pending,
                             sa,
                             mode,
-                            NtpVersion::from_bits(opts.version),
-                            opts.minpoll,
-                            opts.maxpoll,
+                            &opts,
+                            addr,
                         );
-                        peer.flags |= PeerFlags::CONFIGURED;
-                        if opts.iburst {
-                            peer.flags |= PeerFlags::IBURST;
-                        }
-                        if opts.burst {
-                            peer.flags |= PeerFlags::BURST;
-                        }
-                        if opts.prefer {
-                            peer.flags |= PeerFlags::PREFER;
-                        }
-                        if opts.noselect {
-                            // noselect sets the NOSYNC flag to exclude from selection
-                            peer.flags |= PeerFlags::NOSYNC;
-                        }
-                        if opts.true_flag {
-                            // "true" flag — mark as TRUE (truechimer), not PREFER
-                            // These are separate concepts: TRUE means mandatory
-                            // inclusion in the survivor set; PREFER means priority
-                            // when selecting the system peer.
-                            peer.flags |= PeerFlags::TRUE;
-                        }
-                        if opts.keyid != 0 {
-                            peer.keyid = opts.keyid;
-                            peer.flags |= PeerFlags::AUTHENABLE;
-                        }
-                        if opts.xleave {
-                            peer.flags |= PeerFlags::XLEAVE;
-                        }
-                        if opts.nts {
-                            peer.flags |= PeerFlags::NTS;
-                        }
-                        // Assign a unique association ID (collision-free across wrap)
-                        let associd = Self::allocate_associd(&mut self.next_associd, &self.peers);
-                        let associd = match associd {
-                            Some(aid) => aid,
-                            None => continue, // ID space exhausted
-                        };
-                        peer.associd = associd;
-                        let peer_id = self.peers.len();
-                        let nts_pending = opts.nts;
-                        self.peers.add(peer);
-                        // Schedule initial poll as one-shot (re-armed on transmit)
-                        self.timers.schedule_poll(peer_id, 0, 0);
-                        // Queue NTS-KE handshake for this peer
-                        if nts_pending {
-                            self.nts_ke_pending.push_back((associd, addr.clone(), 4460));
-                        }
-
-                        // Register in pool_resolver for periodic DNS refresh
-                        // (hostname-based server/peer/pool all benefit from refresh)
-                        if sockaddrs.len() > 1 || addr.parse::<std::net::IpAddr>().is_err() {
-                            let pool_entry =
-                                self.pool_resolver.entry(addr.clone()).or_insert_with(|| {
-                                    PoolState {
-                                        hostname: addr.clone(),
-                                        port: 123,
-                                        last_refresh: 0,
-                                        refresh_interval: 3600,
-                                        associds: Vec::new(),
-                                    }
-                                });
-                            pool_entry.associds.push(associd);
-                        }
+                    } else {
+                        // Hostname: store as pending DNS resolution
+                        let request_id = self.next_dns_id;
+                        self.next_dns_id += 1;
+                        self.pending_dns.push_back(PendingDns {
+                            request_id,
+                            hostname: addr.clone(),
+                            port: 123,
+                            opts: opts.clone(),
+                            is_pool: matches!(opt, ConfigOption::Pool { .. }),
+                        });
                     }
                 }
                 ConfigOption::DriftFile(path) => {
@@ -1643,6 +1581,68 @@ impl DaemonEngine {
                 packet,
                 rx_time,
             } => self.handle_refclock_sample(associd, packet, rx_time),
+            DaemonEvent::DnsResolved {
+                request_id,
+                addresses,
+            } => {
+                // Find the pending DNS entry and create peers for resolved addresses
+                let pos = self
+                    .pending_dns
+                    .iter()
+                    .position(|pd| pd.request_id == request_id);
+                if let Some(idx) = pos {
+                    if let Some(pending) = self.pending_dns.remove(idx) {
+                        let mode = NtpMode::Client;
+                        for addr in &addresses {
+                            let sa = crate::ntp_monitor::netaddr_to_sockaddr(addr);
+                            create_peer_from_template(
+                                &mut self.peers,
+                                &mut self.next_associd,
+                                &mut self.timers,
+                                &mut self.nts_ke_pending,
+                                sa,
+                                mode,
+                                &pending.opts,
+                                &pending.hostname,
+                            );
+                            // Register in pool_resolver for periodic refresh
+                            if pending.is_pool || addresses.len() > 1 {
+                                let pool_entry = self
+                                    .pool_resolver
+                                    .entry(pending.hostname.clone())
+                                    .or_insert_with(|| PoolState {
+                                        hostname: pending.hostname.clone(),
+                                        port: pending.port,
+                                        last_refresh: 0,
+                                        refresh_interval: 3600,
+                                        associds: Vec::new(),
+                                    });
+                                // associds added by create_peer_from_template
+                            }
+                        }
+                    }
+                }
+                vec![]
+            }
+            DaemonEvent::DnsFailed { request_id, error } => {
+                // Remove the pending entry and log the failure
+                let pos = self
+                    .pending_dns
+                    .iter()
+                    .position(|pd| pd.request_id == request_id);
+                if let Some(idx) = pos {
+                    if let Some(pending) = self.pending_dns.remove(idx) {
+                        vec![DaemonAction::Log(format!(
+                            "DNS resolution failed for '{}': {}",
+                            pending.hostname, error
+                        ))]
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            }
         }
     }
 
@@ -1801,6 +1801,18 @@ impl DaemonEngine {
         // ── Poll refclocks every tick ─────────────────────────────────
         // This is now handled by the daemon shell calling poll_refclocks()
         // explicitly, to keep tick() free of side effects for testing.
+
+        // ── Drain pending DNS into ResolveHostname actions ────────────
+        // Hostname-based associations from config are stored as pending DNS
+        // entries. Each tick, we drain one entry into an action for the shell
+        // to resolve asynchronously. Results come back as DnsResolved/DnsFailed.
+        while let Some(pending) = self.pending_dns.pop_front() {
+            actions.push(DaemonAction::ResolveHostname {
+                request_id: pending.request_id,
+                hostname: pending.hostname,
+                port: pending.port,
+            });
+        }
 
         actions
     }
@@ -3687,8 +3699,96 @@ pub fn build_kod_packet(request: &NtpPacket, kiss_code: &[u8; 4]) -> NtpPacket {
     crate::ntp_proto::build_kod_packet(request, kiss_code)
 }
 
+/// Convert a std::net::IpAddr to a sockaddr_storage for use in peer addresses.
+fn ip_to_sockaddr_storage(ip: std::net::IpAddr) -> libc::sockaddr_storage {
+    let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let sin = unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in) };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = 123u16.to_be();
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from_ne_bytes(v4.octets()),
+            };
+        }
+        std::net::IpAddr::V6(v6) => {
+            let sin6 = unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in6) };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = 123u16.to_be();
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: v6.octets(),
+            };
+        }
+    }
+    sa
+}
+
+/// Create a peer from a resolved address and association options template.
+fn create_peer_from_template(
+    peers: &mut PeerTable,
+    next_associd: &mut u16,
+    timers: &mut TimerQueue,
+    nts_ke_pending: &mut std::collections::VecDeque<(u16, String, u16)>,
+    sa: libc::sockaddr_storage,
+    mode: NtpMode,
+    opts: &AssocOptions,
+    addr: &str,
+) {
+    let mut peer = Peer::new(
+        sa,
+        mode,
+        NtpVersion::from_bits(opts.version),
+        opts.minpoll,
+        opts.maxpoll,
+    );
+    peer.flags |= PeerFlags::CONFIGURED;
+    if opts.iburst {
+        peer.flags |= PeerFlags::IBURST;
+    }
+    if opts.burst {
+        peer.flags |= PeerFlags::BURST;
+    }
+    if opts.prefer {
+        peer.flags |= PeerFlags::PREFER;
+    }
+    if opts.noselect {
+        peer.flags |= PeerFlags::NOSYNC;
+    }
+    if opts.true_flag {
+        peer.flags |= PeerFlags::TRUE;
+    }
+    if opts.keyid != 0 {
+        peer.keyid = opts.keyid;
+        peer.flags |= PeerFlags::AUTHENABLE;
+    }
+    if opts.xleave {
+        peer.flags |= PeerFlags::XLEAVE;
+    }
+    if opts.nts {
+        peer.flags |= PeerFlags::NTS;
+    }
+    // Assign a unique association ID (collision-free across wrap)
+    let associd = DaemonEngine::allocate_associd_with(next_associd, |candidate| {
+        peers.iter().any(|p| p.associd == candidate)
+    });
+    let associd = match associd {
+        Some(aid) => aid,
+        None => return, // ID space exhausted
+    };
+    peer.associd = associd;
+    let peer_id = peers.len();
+    peers.add(peer);
+    // Schedule initial poll as one-shot (re-armed on transmit)
+    timers.schedule_poll(peer_id, 0, 0);
+    // Queue NTS-KE handshake for this peer
+    if opts.nts {
+        nts_ke_pending.push_back((associd, addr.to_string(), 4460));
+    }
+}
+
 /// Parse association options into structured form.
 /// Parsed association options from a server/peer/pool config line.
+#[derive(Debug, Clone)]
 struct AssocOptions {
     minpoll: u8,
     maxpoll: u8,

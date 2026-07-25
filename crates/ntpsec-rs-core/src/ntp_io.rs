@@ -228,6 +228,18 @@ pub enum DaemonEvent {
         packet: NtpPacket,
         rx_time: NtpTs64,
     },
+    /// DNS resolution result for a pending hostname.
+    /// The engine stores unresolved associations and creates peers
+    /// when results arrive through this event.
+    DnsResolved {
+        request_id: u64,
+        addresses: Vec<NetAddr>,
+    },
+    /// DNS resolution failure for a pending hostname.
+    DnsFailed {
+        request_id: u64,
+        error: String,
+    },
 }
 
 /// Timer identifiers for the event loop.
@@ -272,6 +284,13 @@ pub enum DaemonAction {
         status: u16,
         associd: u16,
         fragments: Vec<Vec<u8>>,
+    },
+    /// Request hostname resolution. The shell performs DNS asynchronously
+    /// and feeds results back as DaemonEvent::DnsResolved or ::DnsFailed.
+    ResolveHostname {
+        request_id: u64,
+        hostname: String,
+        port: u16,
     },
 }
 
