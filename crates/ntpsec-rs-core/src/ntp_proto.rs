@@ -697,17 +697,21 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, policy: &SelectionPolicy)
             sync_dist[i] = dist.max(NTP_MINDIST);
         }
 
-        // 4. Compute elimination metric: selection_jitter × sync_distance.
-        //    Find the worst unprotected survivor.
-        let mut worst_metric = 0.0f64;
+        // 4. Find the worst unprotected survivor by selection jitter.
+        //    Use sync_distance as a tiebreaker when jitter values are equal.
+        //    The elimination threshold is pure selection jitter (ntpsec):
+        //      φ_λ(max) > maxclock × φ_S
+        let mut worst_sj = 0.0f64;
+        let mut worst_sd = 0.0f64;
         let mut worst_idx: Option<usize> = None;
         for i in 0..indices.len() {
             if protected(indices[i]) {
                 continue;
             }
-            let metric = sel_jitter[i] * sync_dist[i];
-            if metric > worst_metric {
-                worst_metric = metric;
+            // Primary key: selection jitter; secondary: sync distance
+            if sel_jitter[i] > worst_sj || (sel_jitter[i] == worst_sj && sync_dist[i] > worst_sd) {
+                worst_sj = sel_jitter[i];
+                worst_sd = sync_dist[i];
                 worst_idx = Some(i);
             }
         }
@@ -715,7 +719,7 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, policy: &SelectionPolicy)
         // 5. Remove the worst if its selection jitter exceeds the threshold:
         //    φ_λ(max) > maxclock × φ_S   (ntpsec: peer_jitter > maxclock * select_jitter)
         match worst_idx {
-            Some(wi) if worst_metric > maxclock_jitter * select_jitter => {
+            Some(wi) if worst_sj > maxclock_jitter * select_jitter => {
                 indices.remove(wi);
             }
             _ => break,
