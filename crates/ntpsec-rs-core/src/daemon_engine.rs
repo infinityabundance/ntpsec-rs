@@ -1288,6 +1288,7 @@ impl DaemonEngine {
                             "kod" => RestrictFlags::KOD,
                             "noserve" => RestrictFlags::IGNORE,
                             "server" => RestrictFlags::SERVER,
+                            "version" => RestrictFlags::VERSION,
                             _ => RestrictFlags::NONE,
                         };
                     }
@@ -1362,6 +1363,22 @@ impl DaemonEngine {
                             self.tos_orphan = Some(val);
                         }
                     }
+                    "pidfile" => {
+                        // PID file path is handled by the shell.
+                    }
+                    "mintc" => {
+                        // mintc handled by shell
+                    }
+                    "mindist" => {
+                        if let Some(val) = args.first().and_then(|s| s.parse::<f64>().ok()) {
+                            self.selection_policy.mindist = val;
+                        }
+                    }
+                    "requestkey" => {
+                        if let Some(val) = args.first().and_then(|s| s.parse::<u32>().ok()) {
+                            self.auth.set_control_key(val);
+                        }
+                    }
                     "tinker" => {
                         let mut i = 0;
                         while i + 1 < args.len() {
@@ -1395,7 +1412,7 @@ impl DaemonEngine {
                     }
                     _ => {}
                 },
-                // ── New typed config options ────────────────────────────
+                // ── Other directives handled via Other catch-all ─────────
                 ConfigOption::Tinker {
                     step,
                     panic,
@@ -1890,6 +1907,51 @@ impl DaemonEngine {
                 hostname: pending.hostname,
                 port: pending.port,
             });
+        }
+
+        // ── Periodic pool DNS refresh ────────────────────────────────
+        // For hostname-based peers (pool, server, peer), check if DNS refresh
+        // is due and emit ResolveHostname actions. The refresh interval is
+        // configurable via the PoolState (default 3600s).
+        // This uses a separate request_id range (u64::MAX/2 + offset) to
+        // distinguish refresh requests from initial resolution requests.
+        let mut refresh_ids: Vec<(u64, String, u16)> = Vec::new();
+        for (hostname, pool) in &self.pool_resolver {
+            if now.seconds > pool.last_refresh + pool.refresh_interval as i64 {
+                let request_id = u64::MAX / 2 + refresh_ids.len() as u64;
+                refresh_ids.push((request_id, hostname.clone(), pool.port));
+            }
+        }
+        for (request_id, hostname, port) in refresh_ids {
+            if let Some(pool) = self.pool_resolver.get_mut(&hostname) {
+                pool.last_refresh = now.seconds;
+            }
+            actions.push(DaemonAction::ResolveHostname {
+                request_id,
+                hostname,
+                port,
+            });
+        }
+
+        // ── NTS-KE auto-replenishment for low-cookie associations ────
+        // When an NTS association has fewer than half its max cookies,
+        // automatically re-queue a handshake to replenish.
+        let associds: Vec<u16> = self.nts_associations.keys().copied().collect();
+        for associd in associds {
+            if let Some(assoc) = self.nts_associations.get(&associd) {
+                if assoc.needs_replenish() {
+                    let already_pending = self.nts_ke_pending.iter().any(|j| j.associd == associd);
+                    let already_inflight =
+                        self.nts_ke_inflight.iter().any(|j| j.associd == associd);
+                    if !already_pending && !already_inflight {
+                        self.nts_ke_pending.push_back(NtsKeJob::new(
+                            associd,
+                            assoc.ke_hostname.clone(),
+                            assoc.ke_port,
+                        ));
+                    }
+                }
+            }
         }
 
         actions
