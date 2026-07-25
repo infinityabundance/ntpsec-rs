@@ -1522,6 +1522,44 @@ impl Default for SystemState {
 }
 
 impl SystemState {
+    /// Compute leap consensus from survivors.
+    /// Majority vote: if >= half of survivors agree on a leap state, adopt it.
+    /// Otherwise, default to the system peer's value.
+    fn compute_leap_consensus(peers: &[Peer], survivors: &[usize]) -> LeapIndicator {
+        let n = survivors.len();
+        if n == 0 {
+            return LeapIndicator::Alarm;
+        }
+        let half = n / 2;
+        let mut votes = [0u32; 4]; // indices: NoWarning=0, Add=1, Remove=2, Alarm=3
+        for &idx in survivors {
+            let li = peers[idx].leap as usize;
+            if li < 4 {
+                votes[li] += 1;
+            }
+        }
+        // Find the most-voted leap state
+        let (best_vote, best_li) = votes
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, &v)| v)
+            .map(|(i, &v)| (v, i))
+            .unwrap_or((0, 0));
+        if best_vote > half as u32 {
+            match best_li {
+                1 => LeapIndicator::AddLeapSecond,
+                2 => LeapIndicator::RemoveLeapSecond,
+                3 => LeapIndicator::Alarm,
+                _ => LeapIndicator::NoWarning,
+            }
+        } else {
+            // No clear majority — use the system peer's value
+            // (the system peer is survivors[0] if no prefer, which is the
+            // peer selected above in step 4)
+            peers[survivors[0]].leap
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1557,9 +1595,7 @@ impl SystemState {
             return usize::MAX;
         }
 
-        // 3. Run clustering algorithm with configured minclock
-        // (default 3, overridable via `tos minclock` in the config).
-        let minclock = 3; // FIXME: wire from DaemonEngine::minsane/config
+        // 3. Run clustering algorithm with the selection policy
         let survivors = clock_cluster(peers, now, policy);
         if survivors.is_empty() {
             self.leap = LeapIndicator::Alarm;
@@ -1572,21 +1608,49 @@ impl SystemState {
             return usize::MAX;
         }
 
-        // 4. Pick the system peer — prefer the PREFER peer if any survivor has the flag,
-        //    otherwise use the first survivor.
-        let sys_peer_idx = survivors
+        // 4. Pick the system peer with clockhop hysteresis.
+        //    Prefer the PREFER peer, then previous system peer (if within clockhop
+        //    threshold of the new best), then first survivor.
+        let prefer_idx = survivors
             .iter()
             .copied()
-            .find(|&i| peers[i].flags.contains(PeerFlags::PREFER))
-            .unwrap_or(survivors[0]);
+            .find(|&i| peers[i].flags.contains(PeerFlags::PREFER));
+        let best_idx = prefer_idx.unwrap_or(survivors[0]);
+
+        // Clockhop hysteresis: if the previous system peer is still a survivor
+        // and its offset is within `policy.clockhop` of the best candidate,
+        // retain the previous system peer to avoid unnecessary clock steps.
+        let sys_peer_idx = if self.sys_peer_associd != 0 {
+            let prev_sys_idx = peers
+                .iter()
+                .position(|p| p.associd == self.sys_peer_associd);
+            match (prev_sys_idx, prefer_idx) {
+                // If there's a PREFER peer, always use it (no hysteresis)
+                (_, Some(idx)) => idx,
+                // No PREFER: check if previous sys peer is still a survivor
+                (Some(prev), None) if survivors.contains(&prev) => {
+                    let offset_diff = (peers[prev].offset - peers[best_idx].offset).abs();
+                    if offset_diff < policy.clockhop {
+                        prev // Stay with previous system peer
+                    } else {
+                        best_idx
+                    }
+                }
+                _ => best_idx,
+            }
+        } else {
+            best_idx
+        };
 
         // 5. Run combining algorithm with the system peer index
         let (combined_offset, combined_jitter) =
             clock_combine(peers, &survivors, sys_peer_idx, now);
         let sys_peer = &peers[sys_peer_idx];
 
-        // 6. Update system variables
-        self.leap = sys_peer.leap;
+        // 6. Leap consensus: majority vote among survivors.
+        //    NTPsec: if more than half of survivors agree on a leap state,
+        //    adopt it. Otherwise, use the system peer's leap indicator.
+        self.leap = Self::compute_leap_consensus(peers, &survivors);
         self.stratum = sys_peer.stratum.saturating_add(1).min(NTP_MAXSTRAT);
         self.reference_id = sys_peer.reference_id;
         self.reference_time = sys_peer.receive_time;
