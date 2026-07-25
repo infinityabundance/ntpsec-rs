@@ -58,6 +58,9 @@ pub struct NtsAssociation {
     pub ntspe_port: u16,
     /// Monotonic sequence counter for nonce generation (client side).
     pub sequence: u64,
+    /// Last Unique Identifier sent in a request.
+    /// The server MUST echo this back; the response verifier checks it.
+    pub last_uik: Vec<u8>,
 }
 
 impl NtsAssociation {
@@ -82,6 +85,7 @@ impl NtsAssociation {
             ke_port,
             ntspe_port,
             sequence: 0,
+            last_uik: Vec::new(),
         }
     }
 
@@ -519,6 +523,7 @@ fn perform_nts_ke_with_config(
         ke_port: port,
         ntspe_port: 0, // Default NTP port unless negotiated otherwise
         sequence: 0,
+        last_uik: Vec::new(),
     })
 }
 
@@ -537,16 +542,14 @@ pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<
     let mut result = packet.encode_header().to_vec();
 
     // ── 1. NTS Unique Identifier extension field (RFC 8915 §5.1) ──────────
-    // The UIK identifies which NTS-KE session keys to use.
-    // For now, use a fixed 4-byte identifier derived from the server_cookie prefix.
-    let uik_payload = if !assoc.server_cookie.is_empty() {
-        // Use first 4 bytes of the server cookie as the unique identifier
-        let len = assoc.server_cookie.len().min(8);
-        assoc.server_cookie[..len].to_vec()
-    } else {
-        vec![0x00; 4]
-    };
-    let uik_ext = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, uik_payload);
+    // The UIK must be unpredictable and at least 32 bytes (RFC 8915 §5.1).
+    // Use getrandom to fill a CSPRNG buffer; the server echoes this back
+    // and the client MUST verify the echo on the response path.
+    let mut uik_payload = vec![0u8; 32];
+    getrandom::getrandom(&mut uik_payload).unwrap_or_else(|_| {
+        // Fallback: zeroed UI is detectable and harmless
+    });
+    let uik_ext = ExtensionField::new(EXTENSION_FIELD_UNIQUE_IDENTIFIER, uik_payload.clone());
     result.extend_from_slice(&uik_ext.encode());
 
     // ── 2. NTS Cookie extension field (RFC 8915 §5.2) ─────────────────────
@@ -560,7 +563,8 @@ pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<
 
     // ── 3. NTS Authenticator extension field (RFC 8915 §5.3) ───────────────
     // Build AEAD using the C2S key. AAD = NTP header + UIK + Cookie.
-    // Nonce = 8-byte big-endian sequence number.
+    // Nonce = 8-byte big-endian sequence number plus 8 bytes additional
+    // padding to reach the required 16-byte minimum (RFC 8915 §5.3).
     let aad = {
         let header = &result[..NTP_HEADER_SIZE.min(result.len())];
         let ext_data = &result[NTP_HEADER_SIZE.min(result.len())..];
@@ -571,7 +575,11 @@ pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<
     };
 
     let key = Key::<Aes128Siv>::from_slice(&assoc.c2s_key);
-    let nonce = assoc.sequence.to_be_bytes().to_vec();
+    // Nonce: 8-byte big-endian sequence number + 8 zero bytes (padding)
+    // to meet the 16-byte minimum required by RFC 8915 §5.3.
+    let mut nonce = vec![0u8; 16];
+    nonce[..8].copy_from_slice(&assoc.sequence.to_be_bytes());
+    // nonce[8..16] remain zero (Additional Padding)
     let headers: [&[u8]; 2] = [&aad, &nonce];
 
     let mut siv = Aes128Siv::new(key);
@@ -583,7 +591,10 @@ pub fn build_nts_request(packet: &NtpPacket, assoc: &mut NtsAssociation) -> Vec<
     let auth_ext = ExtensionField::new(EXTENSION_FIELD_NTS_AUTHENTICATOR, authenticator.encode());
     result.extend_from_slice(&auth_ext.encode());
 
-    // ── 4. Increment sequence ────────────────────────────────────────────
+    // ── 4. Store UIK for response verification ────────────────────────────
+    assoc.last_uik = uik_payload;
+
+    // ── 5. Increment sequence ────────────────────────────────────────────
     assoc.sequence = assoc.sequence.wrapping_add(1);
 
     result

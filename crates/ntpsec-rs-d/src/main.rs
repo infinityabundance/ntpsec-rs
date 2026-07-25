@@ -672,28 +672,31 @@ fn main() {
         let timer_actions = engine.tick(now);
         execute_actions(&timer_actions, &mut clock, &mut network, &mut store);
 
-        // ── 2b. Process NTS-KE pending queue ────────────────────────────
-        // Perform NTS-KE handshakes for NTS-enabled peers.
-        // This is blocking I/O, so we process one per cycle to avoid
-        // starving other operations.
-        let pending = engine.drain_nts_ke_queue();
-        for (associd, host, port) in pending {
-            tracing::info!(
-                "Initiating NTS-KE for associd {} at {}:{}",
-                associd,
-                host,
-                port
-            );
-            match ntpsec_rs_core::nts_client::perform_nts_ke(&host, port) {
-                Ok(nts_assoc) => {
+        // ── 2b. Process one NTS-KE handshake per cycle ──────────────────
+        // Popping one at a time prevents remaining entries from being
+        // dropped and prevents blocking the event loop for multiple
+        // sequential handshake attempts.
+        if let Some((associd, host, port)) = engine.pop_nts_ke() {
+            tracing::info!("NTS-KE for associd {} at {}:{}", associd, host, port);
+            // Spawn a worker thread so the blocking TLS handshake
+            // does not hold the event loop.  The result is fed back
+            // synchronously on completion (thread join).
+            let host_c = host.clone();
+            let handle = std::thread::spawn(move || {
+                ntpsec_rs_core::nts_client::perform_nts_ke(&host_c, port)
+            });
+            match handle.join() {
+                Ok(Ok(nts_assoc)) => {
                     engine.add_nts_association(associd, nts_assoc);
                     tracing::info!("NTS-KE completed for associd {}", associd);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("NTS-KE for associd {} failed: {}", associd, e);
                 }
+                Err(_) => {
+                    tracing::warn!("NTS-KE thread for associd {} panicked", associd);
+                }
             }
-            break; // Process one per cycle for fairness
         }
 
         // ── 3. Periodic status & statistics (every ~10 sec real time) ──

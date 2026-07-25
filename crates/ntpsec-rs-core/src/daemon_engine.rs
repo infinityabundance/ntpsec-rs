@@ -938,8 +938,8 @@ pub struct DaemonEngine {
     stats_write_counter: u64,
 
     /// Queue of NTS-KE handshakes to perform for NTS-enabled peers.
-    /// The shell executes these asynchronously and injects the result.
-    pub nts_ke_pending: Vec<(u16, String, u16)>,
+    /// The shell pops one per cycle to avoid blocking the event loop.
+    pub nts_ke_pending: std::collections::VecDeque<(u16, String, u16)>,
 
     /// System variables map for setvar configuration.
     pub sysvars: HashMap<String, String>,
@@ -1044,7 +1044,7 @@ impl DaemonEngine {
             nts_config: None,
             nts_associations: HashMap::new(),
             pool_resolver: HashMap::new(),
-            nts_ke_pending: Vec::new(),
+            nts_ke_pending: std::collections::VecDeque::new(),
             stats_write_counter: 0,
             sysvars: HashMap::new(),
             stats_enabled: true,
@@ -1178,7 +1178,7 @@ impl DaemonEngine {
                         self.timers.schedule_poll(peer_id, 0, 0);
                         // Queue NTS-KE handshake for this peer
                         if nts_pending {
-                            self.nts_ke_pending.push((associd, addr.clone(), 4460));
+                            self.nts_ke_pending.push_back((associd, addr.clone(), 4460));
                         }
                     }
                 }
@@ -1758,11 +1758,11 @@ impl DaemonEngine {
         actions
     }
 
-    /// Process the NTS-KE pending queue — returns actions for the shell.
-    /// The shell should drain this queue and perform the handshakes,
-    /// then inject the resulting NtsAssociations via add_nts_association.
-    pub fn drain_nts_ke_queue(&mut self) -> Vec<(u16, String, u16)> {
-        self.nts_ke_pending.drain(..).collect()
+    /// Pop the next pending NTS-KE handshake from the queue.
+    /// Returns None when the queue is empty.
+    /// The shell processes one per cycle to avoid blocking the event loop.
+    pub fn pop_nts_ke(&mut self) -> Option<(u16, String, u16)> {
+        self.nts_ke_pending.pop_front()
     }
 
     /// Add an NTS association result from a completed NTS-KE handshake.
