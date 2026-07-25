@@ -1,6 +1,6 @@
 # ntpsec-rs Replacement Contract
 
-**Version:** 0.3.20
+**Version:** 0.3.24
 **Date:** 2026-07-25
 **Oracle:** NTPsec 1.2.4+dfsg-1 (Debian)
 **Status:** Active development — not yet a drop-in replacement

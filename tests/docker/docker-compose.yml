@@ -1,0 +1,64 @@
+# ntpsec-rs Oracle Differential Test Lab
+#
+# Runs ntpsec-rs and NTPsec side-by-side in isolated network namespaces,
+# feeds them identical synthetic packet streams, and compares state.
+#
+# Usage:
+#   docker compose -f tests/docker/docker-compose.yml up --build
+#   docker compose -f tests/docker/docker-compose.yml logs -f oracle
+
+services:
+  # NTPsec reference daemon (the oracle)
+  ntpsec-oracle:
+    image: ubuntu:22.04
+    command: >
+      bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq ntpsec ntpsec-ntpdig python3 &&
+        ntpd -c /etc/ntp-oracle.conf -n -N
+      "
+    volumes:
+      - ./tests/docker/ntp-oracle.conf:/etc/ntp-oracle.conf:ro
+    networks:
+      - ntp-lab
+    cap_add:
+      - SYS_TIME
+      - NET_ADMIN
+
+  # ntpsec-rs daemon under test
+  ntpsec-rs:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ntpsec-rs
+    command: >
+      ntpd-rs -c /etc/ntp-rs.conf -n -N
+    volumes:
+      - ./tests/docker/ntp-rs.conf:/etc/ntp-rs.conf:ro
+    networks:
+      - ntp-lab
+    cap_add:
+      - SYS_TIME
+      - NET_ADMIN
+
+  # Synthetic packet generator for differential testing
+  harness:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ntpsec-rs
+    command: >
+      python3 /tests/docker/oracle_harness.py
+    volumes:
+      - ./tests/docker:/tests/docker:ro
+      - ./tests/fixtures:/tests/fixtures:ro
+    networks:
+      - ntp-lab
+    depends_on:
+      - ntpsec-oracle
+      - ntpsec-rs
+
+networks:
+  ntp-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.0.0/24

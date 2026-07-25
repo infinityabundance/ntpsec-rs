@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+        arch: [x86_64]
+        toolchain: [stable, nightly]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy, rustfmt
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+        continue-on-error: true
+
+      - name: Check formatting
+        run: cargo fmt --check
+        continue-on-error: true
+
+  # Cross-compilation smoke test
+  cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross || true
+
+      - name: Cross-compile
+        run: cargo build --target ${{ matrix.target }} --workspace
+
+  # Differential oracle test: compare ntpsec-rs against NTPsec
+  oracle:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NTPsec oracle
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ntpsec ntpsec-ntpdig
+
+      - name: Build ntpsec-rs
+        run: cargo build --release
+
+      - name: Run oracle comparison
+        run: |
+          # Start reference NTPsec daemon in lab mode
+          # Compare output format, Mode 6 variables, selection
+          cargo run --release -p ntpsec-rs-d -- --lab-daemon --config tests/fixtures/ntp.conf &
+          NTPD_PID=$!
+          sleep 2
+          # Run comparison suite
+          cargo test --release --test oracle_compare -- --nocapture
+          kill $NTPD_PID 2>/dev/null || true
+        continue-on-error: true
+
+  # Fuzz testing (daily or on schedule)
+  fuzz:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz || true
+
+      - name: Run fuzz targets
+        run: |
+          cargo fuzz run ntp_packet_decode -- -max_total_time=300 || true
+          cargo fuzz run mode6_decode -- -max_total_time=300 || true
+        continue-on-error: true

@@ -1,0 +1,36 @@
+[package]
+name = "ntpsec-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ntpsec-rs-core = { path = "../crates/ntpsec-rs-core" }
+
+[[bin]]
+name = "ntp_packet_decode"
+path = "fuzz_targets/ntp_packet_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mode6_decode"
+path = "fuzz_targets/mode6_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "config_parser"
+path = "fuzz_targets/config_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "extension_fields"
+path = "fuzz_targets/extension_fields.rs"
+test = false
+doc = false

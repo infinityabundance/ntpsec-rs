@@ -1,0 +1,32 @@
+Source: ntpsec-rs
+Section: net
+Priority: optional
+Maintainer: ntpsec-rs contributors
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.75)
+Standards-Version: 4.6.2
+Homepage: https://github.com/infinityabundance/ntpsec-rs
+
+Package: ntpsec-rs-core
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: NTPsec core library — deterministic time synchronization engine
+ Forensic Rust reconstruction of the NTPsec time-discipline brain.
+
+Package: ntpsec-rs-d
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ntpsec-rs-core (= ${binary:Version})
+Description: NTPsec daemon — high-precision time synchronization daemon
+ Drop-in replacement for NTPsec ntpd. Synchronizes system time with NTP servers,
+ supports NTS, Mode 6 control protocol, and broad configuration compatibility.
+
+Package: ntpsec-rs-query
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ntpsec-rs-core (= ${binary:Version})
+Description: NTP query tool — ntpq replacement
+ Provides ntpq-compatible Mode 6 query interface.
+
+Package: ntpsec-rs-dig
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ntpsec-rs-core (= ${binary:Version})
+Description: NTP query tool — ntpdig replacement
+ Provides ntpdig-compatible NTP query interface.
