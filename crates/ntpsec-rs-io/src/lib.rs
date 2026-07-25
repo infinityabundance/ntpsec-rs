@@ -154,11 +154,11 @@ impl RealNetworkIo {
     }
 
     /// Wait for readability on any socket, with a timeout in milliseconds.
-    /// Returns the index of a socket that has data ready.
+    /// Returns ALL ready socket indices, not just the first one.
     /// timeout_ms: -1 = infinite, 0 = poll (non-blocking), >0 = milliseconds.
-    pub fn poll_readable(&mut self, timeout_ms: i32) -> Result<Option<usize>, IoError> {
+    pub fn poll_readable(&mut self, timeout_ms: i32) -> Result<Vec<usize>, IoError> {
         if self.sockets.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         #[cfg(target_os = "linux")]
@@ -168,13 +168,16 @@ impl RealNetworkIo {
             }
         }
 
-        // Fallback: poll(2)-based readiness detection
         self.poll_fallback(timeout_ms)
     }
 
-    /// epoll_wait implementation (Linux only).
+    /// epoll_wait: returns ALL ready socket indices.
+    /// Uses level-triggered mode (not EPOLLET) so that any ready socket
+    /// that we cannot drain fully in one cycle will re-trigger on the
+    /// next poll call.  This avoids the edge-triggered starvation bug
+    /// where a non-drained socket stops generating readiness events.
     #[cfg(target_os = "linux")]
-    fn epoll_wait(&mut self, timeout_ms: i32) -> Result<Option<usize>, IoError> {
+    fn epoll_wait(&mut self, timeout_ms: i32) -> Result<Vec<usize>, IoError> {
         let mut events: [libc::epoll_event; 64] = unsafe { std::mem::zeroed() };
         let nfds = unsafe {
             libc::epoll_wait(
@@ -187,26 +190,32 @@ impl RealNetworkIo {
         if nfds < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
-                return Ok(None); // Signal interrupted — loop will re-evaluate
+                return Ok(Vec::new());
             }
             return Err(IoError::RecvFailed(format!("epoll_wait: {err}")));
         }
         if nfds == 0 {
-            return Ok(None); // Timeout — no ready sockets
+            return Ok(Vec::new());
         }
-        // Find the socket index from the returned fd
+        // Collect ALL ready socket indices — not just the first one.
+        let mut ready = Vec::with_capacity(nfds as usize);
         for i in 0..nfds as usize {
             let fd = events[i].u64 as i32;
             if let Some(idx) = self.socket_fds.iter().position(|&f| f == fd) {
-                return Ok(Some(idx));
+                if !ready.contains(&idx) {
+                    ready.push(idx);
+                }
             }
         }
-        Ok(None)
+        Ok(ready)
     }
 
-    /// poll(2) fallback for non-Linux or when epoll is unavailable.
-    fn poll_fallback(&mut self, timeout_ms: i32) -> Result<Option<usize>, IoError> {
+    /// poll(2) fallback — returns ALL ready socket indices.
+    fn poll_fallback(&mut self, timeout_ms: i32) -> Result<Vec<usize>, IoError> {
         let nfds = self.sockets.len();
+        if nfds == 0 {
+            return Ok(Vec::new());
+        }
         let mut fds: Vec<libc::pollfd> = self
             .socket_fds
             .iter()
@@ -221,19 +230,20 @@ impl RealNetworkIo {
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
-                return Ok(None);
+                return Ok(Vec::new());
             }
             return Err(IoError::RecvFailed(format!("poll: {err}")));
         }
         if ret == 0 {
-            return Ok(None);
+            return Ok(Vec::new());
         }
+        let mut ready = Vec::new();
         for (idx, pfd) in fds.iter().enumerate() {
             if pfd.revents & libc::POLLIN != 0 {
-                return Ok(Some(idx));
+                ready.push(idx);
             }
         }
-        Ok(None)
+        Ok(ready)
     }
 
     /// Receive a datagram from a specific socket by index.
@@ -310,14 +320,16 @@ impl NetworkIo for RealNetworkIo {
         #[cfg(target_os = "linux")]
         if self.epoll_fd >= 0 {
             let mut event = libc::epoll_event {
-                events: (libc::EPOLLIN | libc::EPOLLET) as u32, // edge-triggered
+                events: libc::EPOLLIN as u32, // level-triggered — safe under partial drain
                 u64: fd as u64,
             };
             let ret =
                 unsafe { libc::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut event) };
             if ret != 0 {
-                // epoll_ctl failed — non-fatal; poll fallback will be used
+                // epoll_ctl failure: disable epoll entirely, fall back to poll(2)
                 let _ = std::io::Error::last_os_error();
+                unsafe { libc::close(self.epoll_fd) };
+                self.epoll_fd = -1;
             }
         }
 

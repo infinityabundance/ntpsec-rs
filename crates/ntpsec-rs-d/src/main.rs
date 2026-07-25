@@ -612,28 +612,40 @@ fn main() {
         }
 
         // ── 1b. Wait for socket readiness with computed deadline ───────
+        // poll_readable returns ALL ready socket indices (not just the first).
+        // We drain each ready socket to EAGAIN before moving to the next,
+        // with a global per-cycle budget to prevent any one socket from
+        // starving timers or refclocks.
         match network.poll_readable(timeout_ms) {
-            Ok(Some(socket_idx)) => {
-                // Drain all available packets from the ready socket
-                let drain_budget: usize = 64; // max packets per wakeup
-                for _ in 0..drain_budget {
-                    match network.recv_from(socket_idx) {
-                        Ok(dgram) => {
-                            let event = DaemonEvent::PacketReceived(dgram);
-                            let actions = engine.handle(event);
-                            execute_actions(&actions, &mut clock, &mut network, &mut store);
-                        }
-                        Err(IoError::RecvFailed(_)) => break, // No more data
-                        Err(e) => {
-                            if iteration % 100 == 0 {
-                                tracing::debug!("Recv error: {e}");
-                            }
+            Ok(ready_sockets) => {
+                let global_budget: usize = 256;
+                let mut packets_processed: usize = 0;
+                for &socket_idx in &ready_sockets {
+                    loop {
+                        if packets_processed >= global_budget {
                             break;
                         }
+                        match network.recv_from(socket_idx) {
+                            Ok(dgram) => {
+                                packets_processed += 1;
+                                let event = DaemonEvent::PacketReceived(dgram);
+                                let actions = engine.handle(event);
+                                execute_actions(&actions, &mut clock, &mut network, &mut store);
+                            }
+                            Err(IoError::RecvFailed(_)) => break, // EAGAIN — drained
+                            Err(e) => {
+                                if iteration % 100 == 0 {
+                                    tracing::debug!("Recv error: {e}");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if packets_processed >= global_budget {
+                        break;
                     }
                 }
             }
-            Ok(None) => {} // Timeout or no ready sockets
             Err(e) => {
                 if iteration % 100 == 0 {
                     tracing::debug!("Poll error: {e}");

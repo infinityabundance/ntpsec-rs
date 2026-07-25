@@ -989,6 +989,17 @@ impl SystemEventTracker {
     }
 }
 
+/// Typed result from response authentication, avoiding reliance on
+/// cumulative counters for flash bit classification.
+pub(crate) enum ResponseAuthResult {
+    /// No authentication configured — peer accepted without crypto.
+    NotConfigured,
+    /// Cryptographic authentication succeeded.
+    Authenticated,
+    /// Authentication failed with the specific reason and flash bit.
+    Failed { reason: String, flash_bit: u32 },
+}
+
 impl DaemonEngine {
     pub fn new(config: ConfigTree) -> Self {
         let mut engine = Self {
@@ -2423,6 +2434,121 @@ impl DaemonEngine {
         }
     }
 
+    /// Verify authentication on a server response, returning a typed result.
+    /// This is a static function to avoid borrow conflicts with `self.peers`.
+    fn verify_response_auth(
+        auth: &AuthKeyStore,
+        nts_assocs: &HashMap<u16, NtsAssociation>,
+        auth_counters: &mut AuthCounters,
+        server_counters: &mut ServerCounters,
+        peer: &Peer,
+        dgram_bytes: &[u8],
+        notrust_enforced: bool,
+    ) -> ResponseAuthResult {
+        // NTS-authenticated response
+        if peer.flags.contains(PeerFlags::XLEAVE) && nts_assocs.contains_key(&peer.associd) {
+            let nts_ok = nts_assocs
+                .get(&peer.associd)
+                .and_then(|nts| crate::nts_client::verify_nts_response(dgram_bytes, nts).ok())
+                .is_some();
+            if nts_ok {
+                return ResponseAuthResult::Authenticated;
+            }
+            return ResponseAuthResult::Failed {
+                reason: "NTS authentication failed".to_string(),
+                flash_bit: FlashBits::TEST10.bits(),
+            };
+        }
+
+        // No key configured for this association
+        if peer.keyid == 0 {
+            if notrust_enforced {
+                // NOTRUST: the packet must carry a MAC verifiable against
+                // a trusted key in the key store.  A mere presence check
+                // is insufficient — we must actually verify.
+                let tail = split_packet_tail(dgram_bytes);
+                match tail {
+                    Ok((_, Some((kid, mac_val)))) => {
+                        // Look up the key and verify
+                        if let Some(key) = auth.get_key(kid) {
+                            let auth_start = dgram_bytes.len() - (4 + mac_val.len());
+                            let authenticated_data = &dgram_bytes[..auth_start];
+                            if key.verify_mac(authenticated_data, mac_val) {
+                                auth_counters.foundkey = auth_counters.foundkey.saturating_add(1);
+                                return ResponseAuthResult::Authenticated;
+                            }
+                            auth_counters.badauth = auth_counters.badauth.saturating_add(1);
+                            return ResponseAuthResult::Failed {
+                                reason: "NOTRUST: MAC verification failed".to_string(),
+                                flash_bit: FlashBits::TEST10.bits(),
+                            };
+                        }
+                        auth_counters.notfound = auth_counters.notfound.saturating_add(1);
+                        return ResponseAuthResult::Failed {
+                            reason: "NOTRUST: unknown key ID in packet".to_string(),
+                            flash_bit: FlashBits::TEST8.bits(),
+                        };
+                    }
+                    _ => {}
+                }
+                server_counters.restricted = server_counters.restricted.saturating_add(1);
+                return ResponseAuthResult::Failed {
+                    reason: "NOTRUST: no MAC present".to_string(),
+                    flash_bit: FlashBits::TEST8.bits(),
+                };
+            }
+            // No auth configured — legitimate unauthenticated response
+            return ResponseAuthResult::NotConfigured;
+        }
+
+        // MAC-based auth with a configured key.
+        // We verify directly so we can classify the failure precisely
+        // without relying on cumulative counter state.
+        let tail = split_packet_tail(dgram_bytes);
+        let (pkt_keyid, mac_val) = match tail {
+            Ok((_, Some((kid, mac)))) => (kid, mac),
+            _ => {
+                auth_counters.badkey = auth_counters.badkey.saturating_add(1);
+                return ResponseAuthResult::Failed {
+                    reason: "no MAC in response".to_string(),
+                    flash_bit: FlashBits::TEST8.bits(),
+                };
+            }
+        };
+
+        if pkt_keyid != peer.keyid {
+            auth_counters.badkey = auth_counters.badkey.saturating_add(1);
+            return ResponseAuthResult::Failed {
+                reason: format!("wrong key ID: pkt {} != expected {}", pkt_keyid, peer.keyid),
+                flash_bit: FlashBits::TEST8.bits(),
+            };
+        }
+
+        let mac_area_start = dgram_bytes.len() - (4 + mac_val.len());
+        let authenticated = &dgram_bytes[..mac_area_start];
+
+        let key = auth.get_key(pkt_keyid);
+
+        if let Some(k) = key {
+            if k.verify_mac(authenticated, mac_val) {
+                auth_counters.foundkey = auth_counters.foundkey.saturating_add(1);
+                ResponseAuthResult::Authenticated
+            } else {
+                auth_counters.badauth = auth_counters.badauth.saturating_add(1);
+                ResponseAuthResult::Failed {
+                    reason: "MAC verification failed".to_string(),
+                    flash_bit: FlashBits::TEST10.bits(),
+                }
+            }
+        } else {
+            auth_counters.notfound = auth_counters.notfound.saturating_add(1);
+            ResponseAuthResult::Failed {
+                reason: format!("key ID {} not in key store", pkt_keyid),
+                flash_bit: FlashBits::TEST8.bits(),
+            }
+        }
+    }
+
     /// Handle a server (or symmetric passive) response packet.
     fn handle_server_response(
         &mut self,
@@ -2457,65 +2583,39 @@ impl DaemonEngine {
                 let (_, restrict_flags) = self.restrictions.check(&dgram_source, NtpMode::Server);
                 let notrust_enforced = restrict_flags.contains(RestrictFlags::NOTRUST);
 
-                // Auth verification: NTS or MAC-based, depending on peer config
-                let auth_ok = if peer.flags.contains(PeerFlags::XLEAVE)
-                    && self.nts_associations.contains_key(&peer.associd)
-                {
-                    // NTS response verification
-                    let nts_auth_ok = if let Some(nts) = self.nts_associations.get(&peer.associd) {
-                        crate::nts_client::verify_nts_response(&dgram_bytes, nts).is_ok()
-                    } else {
-                        false
-                    };
-                    if !nts_auth_ok {
+                // ── Auth verification: NTS, MAC or none ────────────────────
+                // Returns a typed result so the caller can set the exact
+                // flash bit and counter for the current packet without
+                // relying on cumulative counter state.
+                //
+                // Note: we pass the required fields explicitly to avoid
+                // double-borrow of `self` (peers is already borrowed mutably).
+                let auth_result = Self::verify_response_auth(
+                    &self.auth,
+                    &self.nts_associations,
+                    &mut self.system.auth_counters,
+                    &mut self.system.server_counters,
+                    peer,
+                    &dgram_bytes,
+                    notrust_enforced,
+                );
+
+                match auth_result {
+                    ResponseAuthResult::Authenticated => {
+                        peer.flags |= PeerFlags::AUTHENABLE | PeerFlags::AUTHENTIC;
+                    }
+                    ResponseAuthResult::NotConfigured => {
+                        // No auth configured — clear any stale auth flags
+                        peer.flags &= !(PeerFlags::AUTHENABLE | PeerFlags::AUTHENTIC);
+                    }
+                    ResponseAuthResult::Failed { reason, flash_bit } => {
+                        peer.flash |= flash_bit;
                         self.pending_requests.remove(req_idx);
-                        return vec![DaemonAction::Log(
-                            "NTS response authentication failed".to_string(),
-                        )];
+                        return vec![DaemonAction::Log(format!(
+                            "NTP packet authentication failed: {reason}",
+                        ))];
                     }
-                    peer.flags |= PeerFlags::AUTHENABLE | PeerFlags::AUTHENTIC;
-                    true
-                } else {
-                    // MAC-based auth verification using the peer's expected key ID
-                    if peer.keyid == 0 {
-                        if notrust_enforced {
-                            let has_mac = match split_packet_tail(&dgram_bytes) {
-                                Ok((_, Some((_kid, _)))) => true,
-                                _ => false,
-                            };
-                            if !has_mac {
-                                self.system.server_counters.restricted =
-                                    self.system.server_counters.restricted.saturating_add(1);
-                                self.pending_requests.remove(req_idx);
-                                return vec![DaemonAction::Log(
-                                    "NOTRUST: unauthenticated server response rejected".to_string(),
-                                )];
-                            }
-                        }
-                        peer.flags |= PeerFlags::AUTHENABLE;
-                        true
-                    } else {
-                        peer.flags |= PeerFlags::AUTHENABLE;
-                        let counters = &mut self.system.auth_counters;
-                        Self::verify_packet_auth(&self.auth, &dgram_bytes, peer.keyid, counters)
-                    }
-                };
-
-                if !auth_ok {
-                    if self.system.auth_counters.badkey > 0 {
-                        peer.flash |= FlashBits::TEST8.bits();
-                    } else if self.system.auth_counters.badauth > 0 {
-                        peer.flash |= FlashBits::TEST10.bits();
-                    } else {
-                        peer.flash |= FlashBits::TEST8.bits();
-                    }
-                    self.pending_requests.remove(req_idx);
-                    return vec![DaemonAction::Log(
-                        "NTP packet authentication failed".to_string(),
-                    )];
                 }
-
-                peer.flags |= PeerFlags::AUTHENTIC;
 
                 // Check for duplicate (TEST1) — same originate already processed
                 if peer.originate_time == t1 {
