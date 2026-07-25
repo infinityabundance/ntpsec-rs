@@ -831,6 +831,75 @@ struct PendingDns {
     is_pool: bool,
 }
 
+/// An NTS-KE handshake job awaiting execution.
+/// Stored in the engine queue and dispatched to the shell for async execution.
+/// Tracks lifecycle state for generation-safe completion and retry/backoff.
+#[derive(Debug, Clone)]
+pub struct NtsKeJob {
+    /// Association ID of the NTS-enabled peer.
+    pub associd: u16,
+    /// NTS-KE server hostname.
+    pub hostname: String,
+    /// NTS-KE server port.
+    pub port: u16,
+    /// Generation number for this association.
+    /// Used to discard late worker results from stale handshake attempts.
+    pub generation: u64,
+    /// Number of failed attempts so far.
+    pub attempt: u32,
+    /// Current lifecycle state.
+    pub state: NtsKeJobState,
+    /// Earliest NTP timestamp at which a retry is allowed (backoff).
+    pub retry_at: Option<i64>,
+    /// Error message from the last failed attempt.
+    pub error: Option<String>,
+}
+
+impl NtsKeJob {
+    /// Create a new NTS-KE job for a peer.
+    pub fn new(associd: u16, hostname: String, port: u16) -> Self {
+        Self {
+            associd,
+            hostname,
+            port,
+            generation: 0,
+            attempt: 0,
+            state: NtsKeJobState::Queued,
+            retry_at: None,
+            error: None,
+        }
+    }
+}
+
+/// Lifecycle state of an NTS-KE handshake attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NtsKeJobState {
+    /// Queued, awaiting dispatch to the shell.
+    Queued,
+    /// Handshake worker thread is running.
+    InFlight,
+    /// Handshake succeeded, association ready.
+    Completed,
+    /// Handshake failed; retry may be pending.
+    Failed,
+    /// Association was removed; this job is stale.
+    Cancelled,
+}
+
+/// An in-flight NTS-KE handshake worker.
+/// Tracked by the engine so late completions can be matched to
+/// the correct association generation.
+#[derive(Debug)]
+pub struct NtsKeInFlight {
+    /// Association ID of the NTS-enabled peer.
+    pub associd: u16,
+    /// Generation of the association at the time this worker was spawned.
+    /// If the association has been re-created since, the result is stale.
+    pub generation: u64,
+    /// The worker thread handle.
+    pub handle: std::thread::JoinHandle<Result<NtsAssociation, String>>,
+}
+
 /// State for a fragmented MRU query response.
 /// The client requests subsequent fragments using the same nonce and an
 /// incremented offset value.
@@ -956,10 +1025,10 @@ pub struct DaemonEngine {
     stats_write_counter: u64,
 
     /// Queue of NTS-KE handshakes to perform for NTS-enabled peers.
-    pub nts_ke_pending: std::collections::VecDeque<(u16, String, u16)>,
+    pub nts_ke_pending: std::collections::VecDeque<NtsKeJob>,
     /// Currently running NTS-KE handshakes (persistent outstanding jobs).
     /// The shell polls these for completion each cycle without blocking.
-    pub nts_ke_inflight: Vec<(u16, std::thread::JoinHandle<Result<NtsAssociation, String>>)>,
+    pub nts_ke_inflight: Vec<NtsKeInFlight>,
 
     /// Pending DNS resolutions for hostname-based associations.
     /// The shell processes these asynchronously and feeds results back.
@@ -1819,7 +1888,7 @@ impl DaemonEngine {
 
     /// Pop the next pending NTS-KE handshake from the queue.
     /// Returns None when the queue is empty.
-    pub fn pop_nts_ke(&mut self) -> Option<(u16, String, u16)> {
+    pub fn pop_nts_ke(&mut self) -> Option<NtsKeJob> {
         self.nts_ke_pending.pop_front()
     }
 
@@ -1828,24 +1897,50 @@ impl DaemonEngine {
     pub fn add_inflight_nts_ke(
         &mut self,
         associd: u16,
+        generation: u64,
         handle: std::thread::JoinHandle<Result<NtsAssociation, String>>,
     ) {
-        self.nts_ke_inflight.push((associd, handle));
+        self.nts_ke_inflight.push(NtsKeInFlight {
+            associd,
+            generation,
+            handle,
+        });
     }
 
     /// Poll all in-flight NTS-KE handshakes for completion.
-    /// Returns completed associations. Unfinished workers remain in the list.
+    /// Returns completed associations. Stale results (wrong generation)
+    /// are silently discarded. Unfinished workers remain in the list.
     pub fn try_recv_nts_ke(&mut self) -> Vec<(u16, Result<NtsAssociation, String>)> {
         let mut done = Vec::new();
         let mut alive = Vec::new();
-        for (associd, handle) in self.nts_ke_inflight.drain(..) {
-            if handle.is_finished() {
-                match handle.join() {
-                    Ok(result) => done.push((associd, result)),
-                    Err(_) => done.push((associd, Err("NTS-KE thread panicked".to_string()))),
+        for inflight in self.nts_ke_inflight.drain(..) {
+            if inflight.handle.is_finished() {
+                match inflight.handle.join() {
+                    Ok(result) => {
+                        // Check generation: discard stale results from old handshakes
+                        // that completed after the association was re-initialized.
+                        let is_stale = self
+                            .nts_associations
+                            .get(&inflight.associd)
+                            .map(|a| a.generation != inflight.generation)
+                            .unwrap_or(true);
+                        if is_stale {
+                            // Stale result — silently discard
+                            done.push((
+                                inflight.associd,
+                                Err("NTS-KE result stale: association generation mismatch"
+                                    .to_string()),
+                            ));
+                        } else {
+                            done.push((inflight.associd, result));
+                        }
+                    }
+                    Err(_) => {
+                        done.push((inflight.associd, Err("NTS-KE thread panicked".to_string())));
+                    }
                 }
             } else {
-                alive.push((associd, handle));
+                alive.push(inflight);
             }
         }
         self.nts_ke_inflight = alive;
@@ -1854,7 +1949,14 @@ impl DaemonEngine {
 
     /// Add an NTS association result from a completed NTS-KE handshake.
     /// Called by the daemon shell after perform_nts_ke succeeds.
-    pub fn add_nts_association(&mut self, associd: u16, assoc: NtsAssociation) {
+    pub fn add_nts_association(&mut self, associd: u16, mut assoc: NtsAssociation) {
+        // Increment generation on each replacement to invalidate stale workers
+        let current_gen = self
+            .nts_associations
+            .get(&associd)
+            .map(|a| a.generation)
+            .unwrap_or(0);
+        assoc.generation = current_gen.wrapping_add(1);
         self.nts_associations.insert(associd, assoc);
     }
 
@@ -3728,7 +3830,7 @@ fn create_peer_from_template(
     peers: &mut PeerTable,
     next_associd: &mut u16,
     timers: &mut TimerQueue,
-    nts_ke_pending: &mut std::collections::VecDeque<(u16, String, u16)>,
+    nts_ke_pending: &mut std::collections::VecDeque<NtsKeJob>,
     sa: libc::sockaddr_storage,
     mode: NtpMode,
     opts: &AssocOptions,
@@ -3782,7 +3884,7 @@ fn create_peer_from_template(
     timers.schedule_poll(peer_id, 0, 0);
     // Queue NTS-KE handshake for this peer
     if opts.nts {
-        nts_ke_pending.push_back((associd, addr.to_string(), 4460));
+        nts_ke_pending.push_back(NtsKeJob::new(associd, addr.to_string(), 4460));
     }
 }
 

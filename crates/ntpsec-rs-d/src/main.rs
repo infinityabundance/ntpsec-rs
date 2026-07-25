@@ -674,18 +674,21 @@ fn main() {
 
         // ── 2b. Non-blocking NTS-KE handshake processing ───────────────
         // Start ONE new handshake per cycle (if any are pending).
-        if let Some((associd, host, port)) = engine.pop_nts_ke() {
+        if let Some(job) = engine.pop_nts_ke() {
+            let associd = job.associd;
+            let hostname = job.hostname.clone();
+            let port = job.port;
+            let generation = job.generation;
             tracing::info!(
                 "Spawning NTS-KE for associd {} at {}:{}",
                 associd,
-                host,
+                hostname,
                 port
             );
-            let host_c = host.clone();
             let handle = std::thread::spawn(move || {
-                ntpsec_rs_core::nts_client::perform_nts_ke(&host_c, port)
+                ntpsec_rs_core::nts_client::perform_nts_ke(&hostname, port)
             });
-            engine.add_inflight_nts_ke(associd, handle);
+            engine.add_inflight_nts_ke(associd, generation, handle);
         }
         // Poll previously-spawned workers for completion (non-blocking).
         for (associd, result) in engine.try_recv_nts_ke() {

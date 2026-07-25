@@ -61,6 +61,10 @@ pub struct NtsAssociation {
     /// Last Unique Identifier sent in a request.
     /// The server MUST echo this back; the response verifier checks it.
     pub last_uik: Vec<u8>,
+    /// Generation number for this association.
+    /// Incremented each time the association is replaced (re-handshake).
+    /// Used to discard stale NTS-KE worker results.
+    pub generation: u64,
 }
 
 impl NtsAssociation {
@@ -86,6 +90,7 @@ impl NtsAssociation {
             ntspe_port,
             sequence: 0,
             last_uik: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -524,6 +529,7 @@ fn perform_nts_ke_with_config(
         ntspe_port: 0, // Default NTP port unless negotiated otherwise
         sequence: 0,
         last_uik: Vec::new(),
+        generation: 0,
     })
 }
 
