@@ -228,13 +228,14 @@ impl LoopFilter {
             }
             DisciplineType::KernelPll => {
                 // Kernel PLL: return a kernel-style adjustment that the shell applies
-                // via adjtimex.  The engine does NOT call adjtimex itself — that is
+                // via adjtimex with full kernel parameters.
+                // The engine does NOT call adjtimex itself — that is
                 // the shell's responsibility, preserving the deterministic boundary.
                 self.last_update = now;
                 self.clock_set = true;
                 self.offset = 0.0;
                 self.phase = 0.0;
-                return Adjustment::Slew(offset, self.frequency);
+                return Adjustment::KernelSlew(offset, self.frequency);
             }
         };
 
@@ -361,6 +362,9 @@ pub enum Adjustment {
     Step(f64),
     /// Slew the clock: adjust by `offset` seconds at `freq` PPM.
     Slew(f64, f64),
+    /// Kernel-assisted slew: the shell should call adjtimex with
+    /// full kernel parameters (offset, freq, maxerror, esterror, status, timeconst).
+    KernelSlew(f64, f64),
     /// The offset exceeds the panic threshold.  Daemon should exit.
     Panic(f64),
     /// Ignore the sample (e.g., duplicate or invalid).
@@ -373,6 +377,9 @@ impl Adjustment {
     }
     pub fn is_slew(&self) -> bool {
         matches!(self, Adjustment::Slew(_, _))
+    }
+    pub fn is_kernel_slew(&self) -> bool {
+        matches!(self, Adjustment::KernelSlew(_, _))
     }
     pub fn is_panic(&self) -> bool {
         matches!(self, Adjustment::Panic(_))

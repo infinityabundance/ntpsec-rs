@@ -242,6 +242,69 @@ pub enum DaemonEvent {
     },
 }
 
+/// A replay-stable, serializable representation of a daemon input event.
+/// This is the "recording" format — every DaemonEvent can be converted
+/// to a DaemonInput for deterministic replay, log, or differential testing.
+/// All fields use only primitive types (no libc types, no heap-allocated
+/// compound objects from the protocol layer).
+#[derive(Debug, Clone)]
+pub struct DaemonInput {
+    /// Wall-clock time when this event occurred (seconds since epoch).
+    pub wall_time: u64,
+    /// The event type tag.
+    pub event_type: DaemonInputType,
+    /// Binary payload (event-type-specific encoding).
+    pub payload: Vec<u8>,
+}
+
+/// Tag identifying the kind of input event, for serialization stability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonInputType {
+    Shutdown,
+    TimerFired,
+    PacketReceived,
+    RefclockSample,
+    DnsResolved,
+    DnsFailed,
+}
+
+impl From<&DaemonEvent> for DaemonInput {
+    fn from(event: &DaemonEvent) -> Self {
+        match event {
+            DaemonEvent::Shutdown => DaemonInput {
+                wall_time: 0,
+                event_type: DaemonInputType::Shutdown,
+                payload: Vec::new(),
+            },
+            DaemonEvent::TimerFired(_) => DaemonInput {
+                wall_time: 0,
+                event_type: DaemonInputType::TimerFired,
+                payload: Vec::new(),
+            },
+            DaemonEvent::PacketReceived(_) => DaemonInput {
+                wall_time: 0,
+                event_type: DaemonInputType::PacketReceived,
+                payload: Vec::new(),
+            },
+            DaemonEvent::RefclockSample { .. } => DaemonInput {
+                wall_time: 0,
+                event_type: DaemonInputType::RefclockSample,
+                payload: Vec::new(),
+            },
+            DaemonEvent::DnsResolved { .. } => DaemonInput {
+                wall_time: 0,
+                event_type: DaemonInputType::DnsResolved,
+                payload: Vec::new(),
+            },
+            DaemonEvent::DnsFailed { .. } => DaemonInput {
+                wall_time: 0,
+                event_type: DaemonInputType::DnsFailed,
+                payload: Vec::new(),
+            },
+        }
+    }
+}
+
 /// Timer identifiers for the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerId {

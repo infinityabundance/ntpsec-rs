@@ -195,6 +195,39 @@ impl FileGenRegistry {
         Ok(())
     }
 
+    /// Format a loopstats line: MJD secs offset freq_ppm jitter
+    /// Returns the formatted line WITHOUT the write/rotation side effects.
+    pub fn format_loopstats(&self, sys: &SystemState, freq_ppm: f64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mjd = now.as_secs() / 86400 + 40587;
+        let secs = now.as_secs() % 86400;
+        format!(
+            "{} {} {} {:.6} {:.3} {:.6}",
+            mjd, secs, 0i64, sys.sys_offset, freq_ppm, sys.sys_jitter
+        )
+    }
+
+    /// Format a peerstats line: MJD secs associd offset delay dispersion reach
+    pub fn format_peerstats(&self, peer: &Peer) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mjd = now.as_secs() / 86400 + 40587;
+        let secs = now.as_secs() % 86400;
+        format!(
+            "{} {} {} {:.6} {:.6} {:.6} {}",
+            mjd,
+            secs,
+            peer.associd,
+            peer.offset,
+            peer.delay,
+            peer.dispersion,
+            peer.reach.register()
+        )
+    }
+
     /// Write a loopstats entry: MJD secs offset freq_ppm jitter
     pub fn write_loopstats(
         &mut self,
@@ -206,18 +239,12 @@ impl FileGenRegistry {
         if let Some(parent) = path.parent() {
             self.rotate_if_needed("loopstats", parent)?;
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let mjd = now.as_secs() / 86400 + 40587; // Modified Julian Date approx
-        let secs = now.as_secs() % 86400;
-        let content = format!(
-            "{} {} {} {:.6} {:.3} {:.6}\n",
-            mjd, secs, 0i64, sys.sys_offset, freq_ppm, sys.sys_jitter
-        );
+        let content = self.format_loopstats(sys, freq_ppm);
+        let mut line = content;
+        line.push('\n');
         write_stat_file_ex(
             path,
-            &content,
+            &line,
             self.files.iter_mut().find(|(n, _)| n == "loopstats"),
         )
     }
@@ -228,24 +255,12 @@ impl FileGenRegistry {
         if let Some(parent) = path.parent() {
             self.rotate_if_needed("peerstats", parent)?;
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let mjd = now.as_secs() / 86400 + 40587;
-        let secs = now.as_secs() % 86400;
-        let content = format!(
-            "{} {} {} {:.6} {:.6} {:.6} {}\n",
-            mjd,
-            secs,
-            peer.associd,
-            peer.offset,
-            peer.delay,
-            peer.dispersion,
-            peer.reach.register()
-        );
+        let content = self.format_peerstats(peer);
+        let mut line = content;
+        line.push('\n');
         write_stat_file_ex(
             path,
-            &content,
+            &line,
             self.files.iter_mut().find(|(n, _)| n == "peerstats"),
         )
     }

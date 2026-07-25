@@ -698,9 +698,9 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, policy: &SelectionPolicy)
         }
 
         // 4. Find the worst unprotected survivor by selection jitter.
-        //    Use sync_distance as a tiebreaker when jitter values are equal.
-        //    The elimination threshold is pure selection jitter (ntpsec):
-        //      φ_λ(max) > maxclock × φ_S
+        //    Sync distance is used as a tiebreaker when jitter values match.
+        //    The elimination threshold:
+        //      φ_λ(max) > maxclock × φ_S   (ntpsec: peer_jitter > maxclock * select_jitter)
         let mut worst_sj = 0.0f64;
         let mut worst_sd = 0.0f64;
         let mut worst_idx: Option<usize> = None;

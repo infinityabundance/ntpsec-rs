@@ -623,31 +623,38 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "mintc" => Some("3".to_string()),
         "minpoll" => Some(format!("{}", crate::ntp_proto::NTP_MINPOLL)),
         "maxpoll" => Some(format!("{}", crate::ntp_proto::NTP_MAXPOLL)),
-        // ── MRU list stats (not yet tracked) ─────────────────────────────
-        "mru_deepest" => Some("0".to_string()),
-        "mru_enabled" => Some("0".to_string()),
-        "mru_maxage" => Some("0".to_string()),
-        "mru_maxdepth" => Some("0".to_string()),
-        "mru_maxmem" => Some("0".to_string()),
-        "mru_mindepth" => Some("0".to_string()),
-        "mru_minage" => Some("0".to_string()),
-        "mru_mem" => Some("0".to_string()),
-        "mru_meminc" => Some("0".to_string()),
-        "mru_npairs" => Some("0".to_string()),
-        "mru_polls" => Some("0".to_string()),
-        // ── NTS (not yet tracked) ────────────────────────────────────────
-        "nts" => Some("none".to_string()),
-        "nts_enabled" => Some("0".to_string()),
-        "nts_peers" => Some("0".to_string()),
-        "nts_keys" => Some("0".to_string()),
-        "nts_cookielen" => Some("0".to_string()),
-        "nts_providers" => Some("0".to_string()),
+        // ── MRU list stats ────────────────────────────────────────────
+        "mru_deepest" => Some(format!("{}", sys.mru_deepest)),
+        "mru_enabled" => Some(format!("{}", sys.mru_enabled)),
+        "mru_maxage" => Some(format!("{}", sys.mru_maxage)),
+        "mru_maxdepth" => Some(format!("{}", sys.mru_maxdepth)),
+        "mru_maxmem" => Some(format!("{}", sys.mru_maxmem)),
+        "mru_mindepth" => Some(format!("{}", sys.mru_mindepth)),
+        "mru_minage" => Some(format!("{}", sys.mru_minage)),
+        "mru_mem" => Some(format!("{}", sys.mru_mem)),
+        "mru_meminc" => Some(format!("{}", sys.mru_meminc)),
+        "mru_npairs" => Some(format!("{}", sys.mru_npairs)),
+        "mru_polls" => Some(format!("{}", sys.mru_polls)),
+        // ── NTS ─────────────────────────────────────────────────────────
+        "nts" => Some(
+            if sys.nts_enabled > 0 {
+                "enabled"
+            } else {
+                "none"
+            }
+            .to_string(),
+        ),
+        "nts_enabled" => Some(format!("{}", sys.nts_enabled)),
+        "nts_peers" => Some(format!("{}", sys.nts_peers)),
+        "nts_keys" => Some(format!("{}", sys.nts_keys)),
+        "nts_cookielen" => Some(format!("{}", sys.nts_cookielen)),
+        "nts_providers" => Some(format!("{}", sys.nts_providers)),
         // ── Offset / discipline ──────────────────────────────────────────
         "offset" => Some(format!("{:?}", sys.sys_offset)),
         "old_offset" => Some(format!("{:?}", sys.sys_offset)),
         // ── Orphan mode ──────────────────────────────────────────────────
-        "orphan" => Some("0".to_string()),
-        "orphwait" => Some("0".to_string()),
+        "orphan" => Some(format!("{}", sys.orph_stratum)),
+        "orphwait" => Some(format!("{}", sys.orphwait)),
         // ── Peer / association ───────────────────────────────────────────
         "peer" => Some(format!("{}", sys.peer_count)),
         "peers" => Some(format!("{}", sys.peer_count)),
@@ -669,7 +676,7 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "selpeer" => Some(format!("{}", sys.sys_peer_associd)),
         "selpeer_sel" => Some(format!("{}", sys.sys_peer_associd)),
         "selpeer_src" => Some(format!("{}", sys.sys_peer_associd)),
-        "selpeer_previous" => Some("0".to_string()),
+        "selpeer_previous" => Some(format!("{}", sys.selpeer_previous)),
         // ── Server-side (ss_) counters ───────────────────────────────────
         "ss_badauth" => Some(format!("{}", sys.server_counters.badauth)),
         "ss_badlength" => Some(format!("{}", sys.server_counters.badlength)),

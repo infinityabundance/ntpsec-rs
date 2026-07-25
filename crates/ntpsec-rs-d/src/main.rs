@@ -774,7 +774,8 @@ fn main() {
     tracing::info!("Shutting down...");
 
     // 1. Flush statistics (loopstats and peerstats) immediately
-    engine.flush_stats();
+    let flush_actions = engine.flush_stats();
+    execute_actions(&flush_actions, &mut clock, &mut network, &mut store);
     let stats_actions = engine.handle(DaemonEvent::Shutdown);
     execute_actions(&stats_actions, &mut clock, &mut network, &mut store);
 
@@ -897,6 +898,12 @@ fn execute_actions<C: SystemClock, N: NetworkIo, S: StateStore>(
                         tracing::error!("Slew failed: {e}");
                     }
                 }
+                Adjustment::KernelSlew(offset, freq) => {
+                    // Kernel-assisted slew: use adjtimex with all parameters
+                    if let Err(e) = clock.slew(*offset, *freq) {
+                        tracing::error!("KernelSlew failed: {e}");
+                    }
+                }
                 Adjustment::Panic(offset) => {
                     tracing::error!("Panic: offset {:.6}s exceeds threshold!", offset);
                     std::process::exit(1);
@@ -994,10 +1001,18 @@ fn run_query_mode<C: SystemClock, N: NetworkIo, S: StateStore>(
             let adj = engine
                 .loop_filter
                 .local_clock(engine.system.sys_offset, now);
-            if let Adjustment::Step(offset) = adj {
-                if clock.step(offset).is_ok() {
-                    tracing::info!("Set clock: offset {:.6}s", offset);
+            match adj {
+                Adjustment::Step(offset) => {
+                    if clock.step(offset).is_ok() {
+                        tracing::info!("Set clock: offset {:.6}s", offset);
+                    }
                 }
+                Adjustment::Slew(offset, freq) | Adjustment::KernelSlew(offset, freq) => {
+                    if clock.slew(offset, freq).is_ok() {
+                        tracing::info!("Slew clock: offset {:.6}s freq {:.3}ppm", offset, freq);
+                    }
+                }
+                _ => {}
             }
             break;
         }

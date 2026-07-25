@@ -1833,14 +1833,17 @@ impl DaemonEngine {
                     }
                 }
                 TimerEvent::StatsWrite => {
-                    // Periodic statistics write
+                    // Periodic statistics write — emit AppendStatistic actions
+                    // for the shell to handle (keeps I/O out of the engine).
                     if let Some(ref stats_dir) = self.stats_dir {
                         let path = std::path::Path::new(stats_dir);
-                        let _ = self.filegen.write_loopstats(
-                            &path.join("loopstats"),
-                            &self.system,
-                            self.loop_filter.frequency_ppm(),
-                        );
+                        let line = self
+                            .filegen
+                            .format_loopstats(&self.system, self.loop_filter.frequency_ppm());
+                        actions.push(DaemonAction::AppendStatistic {
+                            stream: "loopstats".to_string(),
+                            line,
+                        });
                     }
                 }
                 _ => {}
@@ -1848,20 +1851,26 @@ impl DaemonEngine {
         }
 
         // ── Periodic stats writes (every 10 iterations) ───────────────
+        // Emit AppendStatistic actions for the shell to handle.
         self.stats_write_counter += 1;
         if self.stats_write_counter % 10 == 0 {
-            if let Some(ref stats_dir) = self.stats_dir {
-                let path = std::path::Path::new(stats_dir);
-                // Write loopstats
-                let _ = self.filegen.write_loopstats(
-                    &path.join("loopstats"),
-                    &self.system,
-                    self.loop_filter.frequency_ppm(),
-                );
-                // Write peerstats for all peers
+            if let Some(ref _stats_dir) = self.stats_dir {
+                // Format loopstats line
+                let loop_line = self
+                    .filegen
+                    .format_loopstats(&self.system, self.loop_filter.frequency_ppm());
+                actions.push(DaemonAction::AppendStatistic {
+                    stream: "loopstats".to_string(),
+                    line: loop_line,
+                });
+                // Format peerstats for all peers
                 for i in 0..self.peers.len() {
                     if let Some(peer) = self.peers.get(i) {
-                        let _ = self.filegen.write_peerstats(&path.join("peerstats"), peer);
+                        let peer_line = self.filegen.format_peerstats(peer);
+                        actions.push(DaemonAction::AppendStatistic {
+                            stream: "peerstats".to_string(),
+                            line: peer_line,
+                        });
                     }
                 }
             }
@@ -3618,19 +3627,23 @@ impl DaemonEngine {
             }
             TimerId::StatsWrite => {
                 let mut actions = Vec::new();
-                if let Some(ref stats_dir) = self.stats_dir {
-                    let path = std::path::Path::new(stats_dir);
-                    let _ = self.filegen.write_loopstats(
-                        &path.join("loopstats"),
-                        &self.system,
-                        self.loop_filter.frequency_ppm(),
-                    );
+                if self.stats_dir.is_some() {
+                    let loop_line = self
+                        .filegen
+                        .format_loopstats(&self.system, self.loop_filter.frequency_ppm());
+                    actions.push(DaemonAction::AppendStatistic {
+                        stream: "loopstats".to_string(),
+                        line: loop_line,
+                    });
                     for i in 0..self.peers.len() {
                         if let Some(peer) = self.peers.get(i) {
-                            let _ = self.filegen.write_peerstats(&path.join("peerstats"), peer);
+                            let peer_line = self.filegen.format_peerstats(peer);
+                            actions.push(DaemonAction::AppendStatistic {
+                                stream: "peerstats".to_string(),
+                                line: peer_line,
+                            });
                         }
                     }
-                    actions.push(DaemonAction::Log("stats written".to_string()));
                 }
                 actions
             }
@@ -3778,20 +3791,27 @@ impl DaemonEngine {
     /// Flush all pending statistics (loopstats and peerstats) to disk.
     /// Called on graceful shutdown (SIGTERM) to ensure stats are persisted
     /// even when the periodic timer hasn't fired yet.
-    pub fn flush_stats(&mut self) {
-        if let Some(ref stats_dir) = self.stats_dir {
-            let path = std::path::Path::new(stats_dir);
-            let _ = self.filegen.write_loopstats(
-                &path.join("loopstats"),
-                &self.system,
-                self.loop_filter.frequency_ppm(),
-            );
+    pub fn flush_stats(&mut self) -> Vec<DaemonAction> {
+        let mut actions = Vec::new();
+        if self.stats_dir.is_some() {
+            let loop_line = self
+                .filegen
+                .format_loopstats(&self.system, self.loop_filter.frequency_ppm());
+            actions.push(DaemonAction::AppendStatistic {
+                stream: "loopstats".to_string(),
+                line: loop_line,
+            });
             for i in 0..self.peers.len() {
                 if let Some(peer) = self.peers.get(i) {
-                    let _ = self.filegen.write_peerstats(&path.join("peerstats"), peer);
+                    let peer_line = self.filegen.format_peerstats(peer);
+                    actions.push(DaemonAction::AppendStatistic {
+                        stream: "peerstats".to_string(),
+                        line: peer_line,
+                    });
                 }
             }
         }
+        actions
     }
 }
 

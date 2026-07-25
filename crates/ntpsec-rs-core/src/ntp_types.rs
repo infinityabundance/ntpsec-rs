@@ -17,6 +17,62 @@
 use core::fmt;
 use core::ops::{Add, Div, Mul, Sub};
 
+/// A time interval in seconds, as a newtype for dimensional safety.
+/// Prevents accidental mixing of offsets, delays, dispersions, and jitters,
+/// all of which are measured in seconds but have different physical meanings.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Seconds(pub f64);
+
+impl Seconds {
+    pub fn new(val: f64) -> Self {
+        Self(val)
+    }
+    pub fn as_f64(&self) -> f64 {
+        self.0
+    }
+}
+
+impl Add for Seconds {
+    type Output = Seconds;
+    fn add(self, other: Seconds) -> Seconds {
+        Seconds(self.0 + other.0)
+    }
+}
+
+impl Sub for Seconds {
+    type Output = Seconds;
+    fn sub(self, other: Seconds) -> Seconds {
+        Seconds(self.0 - other.0)
+    }
+}
+
+impl Mul<f64> for Seconds {
+    type Output = Seconds;
+    fn mul(self, other: f64) -> Seconds {
+        Seconds(self.0 * other)
+    }
+}
+
+impl Div for Seconds {
+    type Output = f64;
+    fn div(self, other: Seconds) -> f64 {
+        self.0 / other.0
+    }
+}
+
+/// Frequency measured in parts per million (PPM).
+/// PPM is dimensionless but physically distinct from raw fractions.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Ppm(pub f64);
+impl Ppm {
+    pub fn new(val: f64) -> Self {
+        Self(val)
+    }
+    pub fn as_f64(&self) -> f64 {
+        self.0
+    }
+}
+
 // ──── Sized integer types ───────────────────────────────────────────────────
 
 /// NTP signed 8-bit integer.
