@@ -30,6 +30,7 @@
 
 use crate::ntp_auth::*;
 use crate::ntp_config::*;
+use crate::ntp_dns;
 use crate::ntp_filegen::*;
 use crate::ntp_fp;
 use crate::ntp_io::*;
@@ -1103,32 +1104,49 @@ impl DaemonEngine {
                     };
                     let opts = parse_assoc_options(options);
 
-                    let srcaddr = addr.parse::<std::net::IpAddr>().ok().map(|ip| {
-                        let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-                        match ip {
-                            std::net::IpAddr::V4(v4) => {
+                    // Resolve address: IP literal → fast path, hostname → DNS
+                    let sockaddrs: Vec<std::net::SocketAddr> =
+                        if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+                            vec![std::net::SocketAddr::new(ip, 123)]
+                        } else {
+                            match crate::ntp_dns::resolve_hostname(addr, 123, 5) {
+                                Ok(addrs) => addrs,
+                                Err(_) => {
+                                    // DNS resolution failed — skip this hostname.
+                                    // The shell layer should report this via system
+                                    // events or logging.
+                                    continue;
+                                }
+                            }
+                        };
+
+                    for sockaddr in &sockaddrs {
+                        // Convert std::net::SocketAddr to libc::sockaddr_storage
+                        let sa = match *sockaddr {
+                            std::net::SocketAddr::V4(v4) => {
+                                let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                                 let sin =
                                     unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in) };
                                 sin.sin_family = libc::AF_INET as libc::sa_family_t;
-                                sin.sin_port = 123u16.to_be();
+                                sin.sin_port = v4.port().to_be();
                                 sin.sin_addr = libc::in_addr {
-                                    s_addr: u32::from_ne_bytes(v4.octets()),
+                                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
                                 };
+                                sa
                             }
-                            std::net::IpAddr::V6(v6) => {
+                            std::net::SocketAddr::V6(v6) => {
+                                let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                                 let sin6 =
                                     unsafe { &mut *(&mut sa as *mut _ as *mut libc::sockaddr_in6) };
                                 sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-                                sin6.sin6_port = 123u16.to_be();
+                                sin6.sin6_port = v6.port().to_be();
                                 sin6.sin6_addr = libc::in6_addr {
-                                    s6_addr: v6.octets(),
+                                    s6_addr: v6.ip().octets(),
                                 };
+                                sa
                             }
-                        }
-                        sa
-                    });
+                        };
 
-                    if let Some(sa) = srcaddr {
                         let mut peer = Peer::new(
                             sa,
                             mode,
@@ -1182,6 +1200,22 @@ impl DaemonEngine {
                         // Queue NTS-KE handshake for this peer
                         if nts_pending {
                             self.nts_ke_pending.push_back((associd, addr.clone(), 4460));
+                        }
+
+                        // Register in pool_resolver for periodic DNS refresh
+                        // (hostname-based server/peer/pool all benefit from refresh)
+                        if sockaddrs.len() > 1 || addr.parse::<std::net::IpAddr>().is_err() {
+                            let pool_entry =
+                                self.pool_resolver.entry(addr.clone()).or_insert_with(|| {
+                                    PoolState {
+                                        hostname: addr.clone(),
+                                        port: 123,
+                                        last_refresh: 0,
+                                        refresh_interval: 3600,
+                                        associds: Vec::new(),
+                                    }
+                                });
+                            pool_entry.associds.push(associd);
                         }
                     }
                 }

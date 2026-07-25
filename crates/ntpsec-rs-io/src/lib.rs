@@ -70,7 +70,6 @@ impl SystemClock for RealSystemClock {
 
     fn slew(&mut self, offset: f64, freq_ppm: f64) -> Result<(), IoError> {
         let mut tmx: libc::timex = unsafe { std::mem::zeroed() };
-        tmx.modes = libc::ADJ_OFFSET | libc::ADJ_FREQUENCY;
         let _ = unsafe { libc::adjtimex(&mut tmx) };
         let nano = (tmx.status & libc::STA_NANO) != 0;
         tmx.modes = libc::ADJ_OFFSET | libc::ADJ_FREQUENCY;

@@ -227,28 +227,14 @@ impl LoopFilter {
                 (offset - self.phase) / tau_sec
             }
             DisciplineType::KernelPll => {
-                // Kernel PLL: call adjtimex to let the kernel discipline the clock
-                let mut tmx: libc::timex = unsafe { std::mem::zeroed() };
-                tmx.modes = libc::MOD_OFFSET
-                    | libc::MOD_MAXERROR
-                    | libc::MOD_ESTERROR
-                    | libc::MOD_STATUS
-                    | libc::MOD_TIMECONST;
-                tmx.offset = (offset * 1_000_000_000.0) as i64; // seconds → nanoseconds
-                tmx.maxerror = (self.max_error * 1_000_000.0) as i64; // seconds → microseconds
-                tmx.esterror = (self.est_error * 1_000_000.0) as i64;
-                tmx.status = libc::STA_PLL;
-                tmx.constant = self.poll as i64;
-                let rc = unsafe { libc::adjtimex(&mut tmx) };
-                if rc < 0 {
-                    tracing::warn!("adjtimex failed: {}", std::io::Error::last_os_error());
-                }
-                // The kernel handles the phase/frequency adjustment; update bookkeeping and return.
+                // Kernel PLL: return a kernel-style adjustment that the shell applies
+                // via adjtimex.  The engine does NOT call adjtimex itself — that is
+                // the shell's responsibility, preserving the deterministic boundary.
                 self.last_update = now;
                 self.clock_set = true;
                 self.offset = 0.0;
                 self.phase = 0.0;
-                return Adjustment::Slew(0.0, self.frequency);
+                return Adjustment::Slew(offset, self.frequency);
             }
         };
 
