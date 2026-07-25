@@ -863,6 +863,9 @@ pub struct DaemonEngine {
 
     /// Minimum number of sane peers for the clock to synchronize.
     pub minsane: usize,
+    /// Selection policy — controls minsane, minclock, maxdist, etc.
+    /// Shared with the selection pipeline.
+    pub selection_policy: SelectionPolicy,
 
     /// Association ID of the system peer, or None if unsynchronized.
     pub system_peer_associd: Option<u16>,
@@ -1013,6 +1016,7 @@ impl DaemonEngine {
             leap_table: LeapTable::new(),
             precision: -20, // ~1 us typical
             minsane: 1,
+            selection_policy: SelectionPolicy::default(),
             config: ConfigTree::new(),
             system_peer_associd: None,
             system_peer_id: None,
@@ -1897,8 +1901,10 @@ impl DaemonEngine {
         // Collect all peers into a Vec for the selection pipeline
         let mut peers_vec: Vec<Peer> = self.peers.iter().cloned().collect();
 
-        // Run the full selection pipeline
-        let sys_peer_idx = self.system.update_from_peers(&mut peers_vec, now);
+        // Run the full selection pipeline with the configured policy
+        let sys_peer_idx =
+            self.system
+                .update_from_peers(&mut peers_vec, now, &self.selection_policy);
 
         // Track system peer by both index (legacy) and association ID
         if sys_peer_idx < self.peers.len() {

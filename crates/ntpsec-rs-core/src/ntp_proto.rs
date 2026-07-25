@@ -355,6 +355,44 @@ impl RateLimit {
     }
 }
 
+// ──── Selection Policy ──────────────────────────────────────────────
+
+/// Selection policy parameters matching ntpsec's `tos` and `tinker` directives.
+/// Passed through the selection pipeline so that configuration values are the
+/// single source of truth — NOT hardcoded constants in clock_cluster or
+/// update_from_peers.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionPolicy {
+    /// Minimum number of selectable peers (sys_minsane). Default: 1.
+    pub minsane: usize,
+    /// Minimum number of survivors to keep (sys_minclock). Default: 3.
+    pub minclock: usize,
+    /// Maximum survivors (sys_maxclock). Default: 10.
+    pub maxclock: usize,
+    /// Maximum root distance for a peer to be selectable. Default: 1.5.
+    pub maxdist: f64,
+    /// Minimum root distance floor. Default: 0.001.
+    pub mindist: f64,
+    /// Clockhop hysteresis threshold in seconds. Default: 0.001 (1 ms).
+    pub clockhop: f64,
+    /// Maximum clock jitter threshold for elimination. Default: 3.0.
+    pub maxclock_jitter: f64,
+}
+
+impl Default for SelectionPolicy {
+    fn default() -> Self {
+        Self {
+            minsane: 1,
+            minclock: 3,
+            maxclock: 10,
+            maxdist: NTP_MAXDIST,
+            mindist: NTP_MINDIST,
+            clockhop: 0.001,
+            maxclock_jitter: 3.0,
+        }
+    }
+}
+
 // ──── Root Distance & Dispersion ──────────────────────────────────────
 
 /// Compute root synchronization distance (RFC 5905 §10.1).
@@ -576,7 +614,7 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
 /// TRUE (truechimer from intersection) and PREFER peers are immune to removal.
 ///
 /// Returns the survivors (indices into the original peers array).
-pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<usize> {
+pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, policy: &SelectionPolicy) -> Vec<usize> {
     let n = peers.len();
 
     // Always filter by flash first (exclude peers with any TEST bit set).
@@ -606,11 +644,11 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<u
     };
 
     // ─── Repeated elimination (ntpsec's while loop) ──────────────────────
-    // Default maxclock_jitter = 3.0 (ntpsec default).
-    let maxclock_jitter: f64 = 3.0;
+    // maxclock_jitter from selection policy (default 3.0).
+    let maxclock_jitter = policy.maxclock_jitter;
 
     loop {
-        if indices.len() <= minclock {
+        if indices.len() <= policy.minclock {
             break;
         }
 
@@ -684,12 +722,12 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<u
         }
     }
 
-    // ─── Final resize: keep at most `minclock` survivors ─────────────
+    // ─── Final resize: keep at most `policy.minclock` survivors ──────
     // After the elimination loop stops (either no survivor exceeds the
     // threshold or count <= minclock), trim down to minclock by removing
     // the worst selection-jitter survivor one at a time.
     // This matches ntpsec's while (nsurv > sys_minclock) loop.
-    while indices.len() > minclock {
+    while indices.len() > policy.minclock {
         // Recompute selection jitter for the current set
         let mut sel_jitter = vec![0.0f64; indices.len()];
         for i in 0..indices.len() {
@@ -1490,7 +1528,12 @@ impl SystemState {
 
     /// Update system state from a set of peers.  Returns the index of the
     /// selected system peer, or usize::MAX if no peer was selected.
-    pub fn update_from_peers(&mut self, peers: &mut [Peer], now: NtpTs64) -> usize {
+    pub fn update_from_peers(
+        &mut self,
+        peers: &mut [Peer],
+        now: NtpTs64,
+        policy: &SelectionPolicy,
+    ) -> usize {
         // 1. Mark unreachable peers as failed TEST9
         for peer in peers.iter_mut() {
             if !peer.reach.is_reachable() {
@@ -1517,7 +1560,7 @@ impl SystemState {
         // 3. Run clustering algorithm with configured minclock
         // (default 3, overridable via `tos minclock` in the config).
         let minclock = 3; // FIXME: wire from DaemonEngine::minsane/config
-        let survivors = clock_cluster(peers, now, minclock);
+        let survivors = clock_cluster(peers, now, policy);
         if survivors.is_empty() {
             self.leap = LeapIndicator::Alarm;
             self.stratum = NTP_MAXSTRAT;
@@ -1957,7 +2000,8 @@ mod tests {
         }
 
         let mut sys = SystemState::new();
-        sys.update_from_peers(&mut peers, now);
+        let policy = SelectionPolicy::default();
+        sys.update_from_peers(&mut peers, now, &policy);
         assert_eq!(sys.stratum, 3);
         assert_eq!(sys.leap, LeapIndicator::NoWarning);
     }
@@ -2028,7 +2072,8 @@ mod tests {
             p.flash = FlashBits::PASS.bits();
             p.reference_time = _now;
         }
-        let survivors = clock_cluster(&mut peers, _now, 3);
+        let policy = SelectionPolicy::default();
+        let survivors = clock_cluster(&mut peers, _now, &policy);
         // The outlier should be pruned
         assert!(
             survivors.len() <= 4,
@@ -2059,7 +2104,8 @@ mod tests {
         let _n = clock_intersection(&mut peers, now);
 
         // Verify cluster retains prefer peer
-        let survivors = clock_cluster(&mut peers, now, 3);
+        let policy = SelectionPolicy::default();
+        let survivors = clock_cluster(&mut peers, now, &policy);
         assert!(
             survivors.contains(&0),
             "prefer peer should survive clustering"
@@ -2083,7 +2129,8 @@ mod tests {
         peers[0].jitter = 5.0;
         peers[1].jitter = 0.001;
 
-        let survivors = clock_cluster(&mut peers, now, 3);
+        let policy = SelectionPolicy::default();
+        let survivors = clock_cluster(&mut peers, now, &policy);
         assert!(
             survivors.contains(&0),
             "prefer peer should remain despite high jitter"
@@ -2267,12 +2314,13 @@ mod tests {
             }
         }
 
-        let survivors = clock_cluster(&mut peers, now, 3);
+        let policy = SelectionPolicy::default();
+        let survivors = clock_cluster(&mut peers, now, &policy);
 
         // Peer 5 (unreachable) must have been filtered by flash
         assert!(
             !survivors.contains(&5),
-            "unreachable peer 5 should be filtered by flash"
+            "unreachable peer (index 5) should be pruned by flash"
         );
 
         // Prefer peer (index 4) MUST survive despite being the worst
