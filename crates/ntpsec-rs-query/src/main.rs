@@ -52,6 +52,14 @@ struct Cli {
     /// Timeout in seconds
     #[arg(short = 't', long, default_value = "5")]
     timeout: u32,
+
+    /// Force IPv4 only
+    #[arg(long = "ipv4")]
+    ipv4: bool,
+
+    /// Force IPv6 only
+    #[arg(long = "ipv6")]
+    ipv6: bool,
 }
 
 enum CliCommand {
