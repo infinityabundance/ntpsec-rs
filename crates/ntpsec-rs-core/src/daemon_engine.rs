@@ -937,6 +937,10 @@ pub struct DaemonEngine {
     /// Iteration counter for periodic stats writes.
     stats_write_counter: u64,
 
+    /// Queue of NTS-KE handshakes to perform for NTS-enabled peers.
+    /// The shell executes these asynchronously and injects the result.
+    pub nts_ke_pending: Vec<(u16, String, u16)>,
+
     /// System variables map for setvar configuration.
     pub sysvars: HashMap<String, String>,
 
@@ -1040,6 +1044,7 @@ impl DaemonEngine {
             nts_config: None,
             nts_associations: HashMap::new(),
             pool_resolver: HashMap::new(),
+            nts_ke_pending: Vec::new(),
             stats_write_counter: 0,
             sysvars: HashMap::new(),
             stats_enabled: true,
@@ -1160,18 +1165,21 @@ impl DaemonEngine {
                             peer.flags |= PeerFlags::NTS;
                         }
                         // Assign a unique association ID (collision-free across wrap)
-                        if let Some(aid) =
-                            Self::allocate_associd(&mut self.next_associd, &self.peers)
-                        {
-                            peer.associd = aid;
-                        } else {
-                            // ID space exhausted; skip this peer
-                            continue;
-                        }
+                        let associd = Self::allocate_associd(&mut self.next_associd, &self.peers);
+                        let associd = match associd {
+                            Some(aid) => aid,
+                            None => continue, // ID space exhausted
+                        };
+                        peer.associd = associd;
                         let peer_id = self.peers.len();
+                        let nts_pending = opts.nts;
                         self.peers.add(peer);
                         // Schedule initial poll as one-shot (re-armed on transmit)
                         self.timers.schedule_poll(peer_id, 0, 0);
+                        // Queue NTS-KE handshake for this peer
+                        if nts_pending {
+                            self.nts_ke_pending.push((associd, addr.clone(), 4460));
+                        }
                     }
                 }
                 ConfigOption::DriftFile(path) => {
@@ -1748,6 +1756,19 @@ impl DaemonEngine {
         // explicitly, to keep tick() free of side effects for testing.
 
         actions
+    }
+
+    /// Process the NTS-KE pending queue — returns actions for the shell.
+    /// The shell should drain this queue and perform the handshakes,
+    /// then inject the resulting NtsAssociations via add_nts_association.
+    pub fn drain_nts_ke_queue(&mut self) -> Vec<(u16, String, u16)> {
+        self.nts_ke_pending.drain(..).collect()
+    }
+
+    /// Add an NTS association result from a completed NTS-KE handshake.
+    /// Called by the daemon shell after perform_nts_ke succeeds.
+    pub fn add_nts_association(&mut self, associd: u16, assoc: NtsAssociation) {
+        self.nts_associations.insert(associd, assoc);
     }
 
     /// Poll all active refclocks for new samples.
