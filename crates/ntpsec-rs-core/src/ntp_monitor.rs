@@ -154,6 +154,8 @@ pub struct MonList {
     /// Minimum inter-packet interval in seconds (from `discard minimum`).
     /// Default is 0.0 (no minimum spacing). Set via the `discard minimum` directive.
     pub min_interval: f64,
+    /// MRU terlist flag — enables terlist in MRU responses.
+    pub mru_terlist: bool,
     /// Nonce cache for MRU query authentication.
     pub nonce_cache: NonceCache,
 }
@@ -162,12 +164,13 @@ impl MonList {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            max_entries: 600,      // ntpsec default
-            min_distance: 600,     // ntpsec default (seconds)
-            max_age: 3600,         // MRU_MAX_AGE = 3600 seconds (1 hour)
-            rate_limit_count: 10,  // ntpsec default rate limit packet count
-            min_avg_interval: 0.2, // 200 ms (~5 packets/sec max)
+            max_entries: 600,     // ntpsec default
+            min_distance: 600,    // ntpsec default (seconds)
+            max_age: 3600,        // MRU_MAX_AGE = 3600 seconds (1 hour)
+            rate_limit_count: 10, // ntpsec default rate limit packet count
+            min_avg_interval: 0.2,
             min_interval: 0.0,
+            mru_terlist: false,
             nonce_cache: NonceCache::new(),
         }
     }

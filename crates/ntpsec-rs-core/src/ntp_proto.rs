@@ -394,47 +394,61 @@ pub fn root_dispersion(peer: &Peer, now: NtpTs64) -> f64 {
 ///    midpoints, increasing allow until a valid interval is found.
 /// 5. Mark out-of-intersection peers with TEST5.
 pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
-    let n = peers.len();
+    // Build an explicit candidate index list excluding non-finite peers.
+    // Non-finite offsets, jitter, root_delay or root_dispersion cannot
+    // participate in intersection.
+    // First, mark non-finite peers as TEST5 in a separate pass.
+    for p in peers.iter_mut() {
+        if !p.offset.is_finite()
+            || !p.jitter.is_finite()
+            || !p.root_delay.is_finite()
+            || !p.root_dispersion.is_finite()
+        {
+            p.flash |= FlashBits::TEST5.bits();
+        }
+    }
+    // Then build the candidate list from finite peers only.
+    let candidates: Vec<usize> = peers
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            p.offset.is_finite()
+                && p.jitter.is_finite()
+                && p.root_delay.is_finite()
+                && p.root_dispersion.is_finite()
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let n = candidates.len();
     if n == 0 {
         return 0;
     }
 
-    // Reject non-finite peers before selection.
-    // NaN or infinite offsets cannot participate in intersection.
-    for peer in peers.iter_mut() {
-        if !peer.offset.is_finite() {
-            peer.flash |= FlashBits::TEST5.bits();
-        }
-    }
-
-    // Compute synch (half-width of confidence interval) for each peer.
-    //   synch = max(MINDISTANCE, root_delay/2 + root_dispersion + phi*elapsed + jitter)
-    // This matches ntpsec's full confidence interval computation.
+    // Compute synch (half-width of confidence interval) for each candidate.
     let phi = 15e-6; // 15 ppm clock skew
-    let synch: Vec<f64> = peers
+    let synch: Vec<f64> = candidates
         .iter()
-        .map(|p| {
+        .map(|&idx| {
+            let p = &peers[idx];
             let elapsed =
                 ntp_fp::ntp_ts64_to_double(now) - ntp_fp::ntp_ts64_to_double(p.reference_time);
-            // Clamp negative elapsed time to prevent invalid synch values.
             let elapsed = elapsed.max(0.0);
-            if !p.offset.is_finite() {
-                return f64::NAN;
-            }
             let base = p.root_delay / 2.0 + p.root_dispersion + phi * elapsed + p.jitter;
             base.max(NTP_MINDIST)
         })
         .collect();
 
-    // Build THREE endpoints per peer as required by RFC 5905 §11.2.1:
+    // Build THREE endpoints per candidate as required by RFC 5905 §11.2.1:
     //   (offset - synch,  +1, peer_index)   // lower bound: enter
     //   (offset,          0,  peer_index)   // midpoint: vote
     //   (offset + synch,  -1, peer_index)   // upper bound: leave
+    // synch[i] corresponds to candidates[i], NOT to peers[i].
     let mut endpoints: Vec<(f64, i8, usize)> = Vec::with_capacity(3 * n);
-    for (i, p) in peers.iter().enumerate() {
-        endpoints.push((p.offset - synch[i], 1, i));
-        endpoints.push((p.offset, 0, i));
-        endpoints.push((p.offset + synch[i], -1, i));
+    for (i, &pidx) in candidates.iter().enumerate() {
+        let p = &peers[pidx];
+        endpoints.push((p.offset - synch[i], 1, pidx));
+        endpoints.push((p.offset, 0, pidx));
+        endpoints.push((p.offset + synch[i], -1, pidx));
     }
     // Sort by offset; when equal, +1 (enter) < 0 (midpoint) < -1 (leave).
     // This ordering ensures that at a given value, all enters are processed
@@ -577,10 +591,15 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<u
         return indices;
     }
 
-    // Identify protected peers by their ORIGINAL array index.
-    let prefer_idx = peers
-        .iter()
-        .position(|p| p.flags.contains(PeerFlags::PREFER));
+    // Identify protected peers (TRUE or PREFER) by their original index.
+    // Use a predicate, not a single stored index, so both TRUE and PREFER
+    // are immune to removal during clustering.
+    let protected = |idx: usize| {
+        idx < peers.len()
+            && peers[idx]
+                .flags
+                .intersects(PeerFlags::TRUE | PeerFlags::PREFER)
+    };
 
     // ─── Repeated elimination (ntpsec's while loop) ──────────────────────
     // Default maxclock_jitter = 3.0 (ntpsec default).
@@ -623,25 +642,38 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<u
             break;
         }
 
-        // 3. Find the survivor with the WORST (largest) selection jitter.
-        //    Protected peers (PREFER) are immune from removal.
-        let mut worst_sj = 0.0f64;
+        // 3. Compute root synchronization distance for each survivor.
+        //    The elimination metric is selection_jitter × root_distance
+        //    (ntpsec: combined metric for identifying worst candidate).
+        let phi = 15e-6;
+        let mut sync_dist = vec![0.0f64; indices.len()];
+        for i in 0..indices.len() {
+            let p = &peers[indices[i]];
+            let elapsed =
+                ntp_fp::ntp_ts64_to_double(now) - ntp_fp::ntp_ts64_to_double(p.reference_time);
+            let dist = p.root_delay / 2.0 + p.root_dispersion + phi * elapsed.max(0.0) + p.jitter;
+            sync_dist[i] = dist.max(NTP_MINDIST);
+        }
+
+        // 4. Compute elimination metric: selection_jitter × sync_distance.
+        //    Find the worst unprotected survivor.
+        let mut worst_metric = 0.0f64;
         let mut worst_idx: Option<usize> = None;
         for i in 0..indices.len() {
-            let is_protected = prefer_idx.map_or(false, |pa| indices[i] == pa);
-            if is_protected {
+            if protected(indices[i]) {
                 continue;
             }
-            if sel_jitter[i] > worst_sj {
-                worst_sj = sel_jitter[i];
+            let metric = sel_jitter[i] * sync_dist[i];
+            if metric > worst_metric {
+                worst_metric = metric;
                 worst_idx = Some(i);
             }
         }
 
-        // 4. Remove the worst if its selection jitter exceeds the threshold:
+        // 5. Remove the worst if its selection jitter exceeds the threshold:
         //    φ_λ(max) > maxclock × φ_S   (ntpsec: peer_jitter > maxclock * select_jitter)
         match worst_idx {
-            Some(wi) if worst_sj > maxclock_jitter * select_jitter => {
+            Some(wi) if worst_metric > maxclock_jitter * select_jitter => {
                 indices.remove(wi);
             }
             _ => break,
@@ -673,11 +705,11 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<u
             };
         }
 
-        // Find worst non-protected peer
+        // Find worst non-protected peer (TRUE and PREFER are immune)
         let worst = sel_jitter
             .iter()
             .enumerate()
-            .filter(|(idx, _)| prefer_idx.map_or(true, |pa| indices[*idx] != pa))
+            .filter(|(idx, _)| !protected(indices[*idx]))
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx);
 
@@ -1344,6 +1376,15 @@ pub struct SystemState {
     // ── MS-SNTP / ntpsignd ─────────────────────────────────────────────
     /// Path to ntpsignd socket for MS-SNTP authentication.
     pub ntp_signd_socket: Option<String>,
+    /// MS-SNTP authentication enabled flag.
+    pub mssntp: u32,
+    /// Key revocation interval (seconds).
+    pub revoke_interval: u32,
+    /// PPS configuration: unit number.
+    pub pps_unit: Option<u8>,
+    pub pps_assert: u32,
+    pub pps_clear: u32,
+    pub pps_prefer: u32,
 
     // ── Gate 10: Tinker / Orphan ──────────────────────────────────────────
     /// Tinker tc-increment value.
@@ -1424,6 +1465,12 @@ impl Default for SystemState {
             nts_cookielen: 0,
             nts_providers: 0,
             ntp_signd_socket: None,
+            mssntp: 0,
+            revoke_interval: 0,
+            pps_unit: None,
+            pps_assert: 0,
+            pps_clear: 0,
+            pps_prefer: 0,
             tcincrement: 0.0,
             orph_stratum: 0,
             orphwait: 300,
@@ -1463,7 +1510,9 @@ impl SystemState {
             return usize::MAX;
         }
 
-        // 3. Run clustering algorithm with system minclock
+        // 3. Run clustering algorithm with configured minclock (default 3)
+        // The caller (run_selection in daemon_engine) should pass the engine's
+        // configured minclock value here.
         let survivors = clock_cluster(peers, now, 3);
         if survivors.is_empty() {
             self.leap = LeapIndicator::Alarm;

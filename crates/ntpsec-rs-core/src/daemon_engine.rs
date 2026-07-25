@@ -1520,12 +1520,13 @@ impl DaemonEngine {
                 ConfigOption::CallDelay(val) => {
                     self.call_delay = *val;
                 }
-                ConfigOption::Mruterlist(_val) => {
-                    // MRU terlist flag — minor config, no runtime effect yet
+                ConfigOption::Mruterlist(val) => {
+                    // MRU terlist flag — enables terlist in MRU responses
+                    self.monitor.mru_terlist = *val;
                 }
                 ConfigOption::Mssntp(val) => {
-                    // MS-SNTP authentication flag — parsed for completeness
-                    self.system.nts_enabled = if *val { 1 } else { 0 };
+                    // MS-SNTP authentication flag (separate from NTS)
+                    self.system.mssntp = if *val { 1 } else { 0 };
                 }
                 ConfigOption::NtpSigndSocket(path) => {
                     // Path to the ntpsignd socket for MS-SNTP
@@ -1533,8 +1534,7 @@ impl DaemonEngine {
                 }
                 ConfigOption::Revoke(val) => {
                     // Key revocation interval in seconds
-                    // (used by crypto, stored for completeness)
-                    let _ = val;
+                    self.system.revoke_interval = *val;
                 }
                 ConfigOption::Pps {
                     unit,
@@ -1542,8 +1542,17 @@ impl DaemonEngine {
                     clear,
                     prefer,
                 } => {
-                    // PPS configuration — used by the PPS refclock driver
-                    let _ = (unit, assert, clear, prefer);
+                    // PPS configuration — store for PPS refclock driver
+                    self.system.pps_unit = Some(*unit);
+                    if *assert {
+                        self.system.pps_assert = 1;
+                    }
+                    if *clear {
+                        self.system.pps_clear = 1;
+                    }
+                    if *prefer {
+                        self.system.pps_prefer = 1;
+                    }
                 }
                 ConfigOption::Provider { host, port, cert } => {
                     // NTS provider host — adds to NTS provider list
@@ -2474,6 +2483,14 @@ impl DaemonEngine {
                 let tail = split_packet_tail(dgram_bytes);
                 match tail {
                     Ok((_, Some((kid, mac_val)))) => {
+                        // NOTRUST requires the key to be TRUSTED, not just loaded.
+                        if !auth.is_trusted_key(kid) {
+                            auth_counters.notfound = auth_counters.notfound.saturating_add(1);
+                            return ResponseAuthResult::Failed {
+                                reason: "NOTRUST: key ID {} is not trusted".to_string(),
+                                flash_bit: FlashBits::TEST8.bits(),
+                            };
+                        }
                         // Look up the key and verify
                         if let Some(key) = auth.get_key(kid) {
                             let auth_start = dgram_bytes.len() - (4 + mac_val.len());
