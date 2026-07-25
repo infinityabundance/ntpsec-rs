@@ -1,0 +1,90 @@
+# ntpsec-rs File and Path Registry
+# Oracle: NTPsec 1.2.4+dfsg-1
+# Generated: 2026-07-25
+
+[meta]
+notes = """
+File path compatibility is essential for drop-in replacement.
+Monitoring scripts, log parsers, and automation depend on these paths.
+"""
+
+[[file]]
+name = "config"
+path = "/etc/ntp.conf"
+status = "implemented"
+notes = "Default config path. Configurable via -c/--config flag."
+
+[[file]]
+name = "drift"
+path = "/var/lib/ntp/ntp.drift"
+status = "implemented"
+notes = "Drift file path. Configurable via driftfile directive or -f/--driftfile."
+
+[[file]]
+name = "pid"
+path = "/var/run/ntpd.pid"
+status = "implemented"
+notes = "Configurable via -p/--pidfile."
+
+[[file]]
+name = "log"
+path = "/var/log/ntp.log"
+status = "implemented"
+notes = "Configurable via logfile directive or -l/--logfile."
+
+[[file]]
+name = "keys"
+path = "/etc/ntp.keys"
+status = "partial"
+notes = "Parsed from config (keys directive). Loading integration via shell may be absent."
+
+[[file]]
+name = "leap"
+path = "/var/lib/ntp/leap-seconds"
+status = "implemented"
+notes = "Default for ntpleapfetch-rs output. Configurable via leapfile directive."
+
+[[file]]
+name = "stats_dir"
+path = "/var/log/ntpstats/"
+status = "implemented"
+notes = "Configurable via statsdir directive."
+
+[[statfile]]
+name = "loopstats"
+path = "/var/log/ntpstats/loopstats"
+status = "implemented"
+notes = "Written by filegen system. Periodic (every 10 ticks)."
+
+[[statfile]]
+name = "peerstats"
+path = "/var/log/ntpstats/peerstats"
+status = "implemented"
+
+[[statfile]]
+name = "clockstats"
+path = "/var/log/ntpstats/clockstats"
+status = "partial"
+notes = "Filegen infrastructure exists. May not be wired to all refclocks."
+
+[[statfile]]
+name = "rawstats"
+path = "/var/log/ntpstats/rawstats"
+status = "absent"
+notes = "Not implemented."
+
+[[statfile]]
+name = "sysstats"
+path = "/var/log/ntpstats/sysstats"
+status = "absent"
+
+[[statfile]]
+name = "protostats"
+path = "/var/log/ntpstats/protostats"
+status = "absent"
+
+[[file]]
+name = "ntp_signd_socket"
+path = "/var/run/ntp_signd"
+status = "implemented"
+notes = "Configurable via ntpsigndsocket directive."

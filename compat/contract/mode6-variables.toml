@@ -1,0 +1,725 @@
+# ntpsec-rs Mode 6 Variable Registry
+# Oracle: NTPsec 1.2.4+dfsg-1
+# Generated from: ntp_control.rs, daemon_engine.rs, control_client.rs
+
+[meta]
+system_variables_total = 92
+system_implemented = 52
+system_placeholder = 40
+peer_variables_total = 33
+peer_implemented = 20
+peer_placeholder = 13
+opcodes_implemented = [
+  "OP_READSTAT(1)", "OP_READVAR(2)", "OP_WRITEVAR(3)",
+  "OP_READCLOCK(4)", "OP_WRITECLOCK(5)", "OP_SETTRAP(6)",
+  "OP_ASYNCMSG(7)", "OP_CONFIGURE(8)", "OP_READ_MRU(10)",
+  "OP_READ_ORDLIST_A(11)", "OP_REQ_NONCE(12)",
+]
+notes = """
+OP_SETTRAP, OP_ASYNCMSG, OP_CONFIGURE are declared but produce BADOP
+(no implementation). OP_READ_ORDLIST_A handled same as OP_READVAR.
+"""
+
+# ── Default READVAR responses ──────────────────────────────────────────
+
+[default_response.system]
+variables = [
+  "version", "processor", "system", "leap", "stratum", "precision",
+  "rootdelay", "rootdisp", "refid", "reftime", "peer", "tc", "offset",
+  "frequency", "sys_jitter", "rootdist",
+]
+notes = "16 variables returned when 'rv' queried with associd=0."
+
+[default_response.peer]
+variables = [
+  "srcaddr", "stratum", "offset", "delay", "dispersion", "jitter",
+  "hpoll", "ppoll", "reach", "flash", "leap", "refid", "reftime",
+  "hmode", "pmode", "precision",
+]
+notes = "16 variables returned when 'rv <associd>' queried."
+
+# ── System variable inventory ──────────────────────────────────────────
+
+[[variable]]
+name = "version"
+status = "implemented"
+scope = "system"
+notes = "Hardcoded to 'ntpsec-rs 1.3.3'"
+
+[[variable]]
+name = "processor"
+status = "implemented"
+scope = "system"
+notes = "std::env::consts::ARCH"
+
+[[variable]]
+name = "system"
+status = "implemented"
+scope = "system"
+notes = "std::env::consts::OS"
+
+[[variable]]
+name = "leap"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "stratum"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "precision"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "rootdelay"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "rootdisp"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "rootdist"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "refid"
+status = "implemented"
+scope = "system"
+notes = "ASCII or 8-char hex format"
+
+[[variable]]
+name = "reftime"
+status = "implemented"
+scope = "system"
+notes = "NTP-epoch seconds.microseconds"
+
+[[variable]]
+name = "clock"
+status = "implemented"
+scope = "system"
+notes = "Alias for reftime"
+
+[[variable]]
+name = "peer"
+status = "implemented"
+scope = "system"
+notes = "peer_count. Aliases: peers, peer_count"
+
+[[variable]]
+name = "tc"
+status = "implemented"
+scope = "system"
+notes = "sys.poll"
+
+[[variable]]
+name = "offset"
+status = "implemented"
+scope = "system"
+notes = "Alias: sys_offset"
+
+[[variable]]
+name = "frequency"
+status = "implemented"
+scope = "system"
+notes = "Aliases: freq_drift, freq_ppm, sys_frequency"
+
+[[variable]]
+name = "sys_jitter"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "uptime"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "hostname"
+status = "implemented"
+scope = "system"
+notes = "Alias: host"
+
+[[variable]]
+name = "status"
+status = "implemented"
+scope = "system"
+notes = "4-char hex from sys_status"
+
+[[variable]]
+name = "flash"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "compliance"
+status = "implemented"
+scope = "system"
+notes = "1 if |offset| < 0.001"
+
+[[variable]]
+name = "clk_jitter"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "clk_wander"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "expire"
+status = "implemented"
+scope = "system"
+notes = "Alias: leap_expire"
+
+[[variable]]
+name = "leapsec"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "leap_alert"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "leap_before"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "leap_after"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "tai"
+status = "implemented"
+scope = "system"
+notes = "Alias: tai_offset"
+
+[[variable]]
+name = "selbroken"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "seldisp"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "selpeer"
+status = "implemented"
+scope = "system"
+notes = "Aliases: selpeer_sel, selpeer_src"
+
+[[variable]]
+name = "auth_badauth"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "auth_badkey"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "auth_decrypts"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "auth_encrypts"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "auth_foundkey"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "auth_notfound"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "auth_reset"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_badauth"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_badlength"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_declined"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_delayed"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_kodsent"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_limited"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_oldver"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_received"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_rejected"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_restricted"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_thisver"
+status = "implemented"
+scope = "system"
+
+[[variable]]
+name = "ss_uptime"
+status = "implemented"
+scope = "system"
+
+# ── Placeholder system variables ───────────────────────────────────────
+
+[[variable]]
+name = "old_offset"
+status = "placeholder"
+scope = "system"
+notes = "Returns same as offset"
+
+[[variable]]
+name = "dstadr"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded '0.0.0.0'"
+
+[[variable]]
+name = "dstport"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded '123'"
+
+[[variable]]
+name = "ident"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded empty string"
+
+[[variable]]
+name = "bias"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded '0.0'"
+
+[[variable]]
+name = "candidate"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "selpeer_previous"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded '0'"
+
+[[variable]]
+name = "auth_type"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "auth_flags"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "auth_keys"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "auth_keyno"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mintc"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded '3'"
+
+[[variable]]
+name = "minpoll"
+status = "placeholder"
+scope = "system"
+notes = "Uses NTP_MINPOLL constant"
+
+[[variable]]
+name = "maxpoll"
+status = "placeholder"
+scope = "system"
+notes = "Uses NTP_MAXPOLL constant"
+
+[[variable]]
+name = "tcincrement"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "orphan"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "orphwait"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "ss_reset"
+status = "placeholder"
+scope = "system"
+
+# ── MRU variables (all placeholders) ───────────────────────────────────
+
+[[variable]]
+name = "mru_deepest"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_enabled"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_maxage"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_maxdepth"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_maxmem"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_mindepth"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_minage"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_mem"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_meminc"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_npairs"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "mru_polls"
+status = "placeholder"
+scope = "system"
+
+# ── NTS variables (all placeholders) ───────────────────────────────────
+
+[[variable]]
+name = "nts"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded 'none'"
+
+[[variable]]
+name = "nts_enabled"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "nts_peers"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "nts_keys"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "nts_cookielen"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "nts_providers"
+status = "placeholder"
+scope = "system"
+
+[[variable]]
+name = "refclock"
+status = "placeholder"
+scope = "system"
+notes = "Hardcoded empty string"
+
+# ── Peer variables ─────────────────────────────────────────────────────
+
+[[variable]]
+name = "srcaddr"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "stratum"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "offset"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "delay"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "dispersion"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "jitter"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "hpoll"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "ppoll"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "reach"
+status = "implemented"
+scope = "peer"
+notes = "2-char hex from reach register"
+
+[[variable]]
+name = "flash"
+status = "implemented"
+scope = "peer"
+notes = "Hex from flash bits"
+
+[[variable]]
+name = "leap"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "refid"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "reftime"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "hmode"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "pmode"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "precision"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "dstadr"
+status = "conditional"
+scope = "peer"
+notes = "Some if peer.dstadr is Some, else absent"
+
+[[variable]]
+name = "keyid"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "flags"
+status = "implemented"
+scope = "peer"
+notes = "Hex from PeerFlags bitmask"
+
+[[variable]]
+name = "org"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "rec"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "xmt"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "rootdelay"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "rootdisp"
+status = "implemented"
+scope = "peer"
+
+[[variable]]
+name = "version"
+status = "implemented"
+scope = "peer"
+
+# ── Peer placeholders ──────────────────────────────────────────────────
+
+[[variable]]
+name = "bias"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "candidate"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "clk_jitter"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "clk_wander"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "filterror"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "selbroken"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "seldisp"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "timer"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "ttl"
+status = "placeholder"
+scope = "peer"
+
+[[variable]]
+name = "unreach"
+status = "placeholder"
+scope = "peer"
+
+# ── Writeable variables ────────────────────────────────────────────────
+
+[[writeable]]
+name = "offset"
+scope = "system"
+status = "implemented"
+
+[[writeable]]
+name = "frequency"
+scope = "system"
+status = "implemented"
+
+[[writeable]]
+name = "stratum"
+scope = "system"
+status = "implemented"
+
+[[writeable]]
+name = "refid"
+scope = "system"
+status = "implemented"
+notes = "Accepts ASCII (<=4) or hex (0x prefix)"
+
+[[writeable]]
+name = "syslog"
+scope = "system"
+status = "implemented"

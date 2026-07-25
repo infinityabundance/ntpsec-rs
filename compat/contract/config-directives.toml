@@ -1,0 +1,307 @@
+# ntpsec-rs Configuration Directive Inventory
+# Oracle: NTPsec 1.2.4+dfsg-1
+# Generated: 2026-07-25
+
+[[directive]]
+name = "server"
+status = "implemented"
+fields = { addr = "String", options = "Vec<String>" }
+suboptions = [
+  { name = "iburst", status = "implemented" },
+  { name = "burst", status = "implemented" },
+  { name = "prefer", status = "implemented" },
+  { name = "noselect", status = "implemented", notes = "Maps to NOSYNC" },
+  { name = "true", status = "implemented" },
+  { name = "key", status = "implemented" },
+  { name = "minpoll", status = "implemented" },
+  { name = "maxpoll", status = "implemented" },
+  { name = "version", status = "implemented" },
+  { name = "mode", status = "implemented", notes = "Parsed but NOT applied to peer.mode" },
+  { name = "xleave", status = "implemented" },
+  { name = "nts", status = "implemented" },
+  { name = "bias", status = "partial", notes = "Parsed but NOT applied to peer" },
+]
+notes = "Hostnames resolved via DNS at config time. Pool tracking for periodic DNS refresh."
+
+[[directive]]
+name = "peer"
+status = "implemented"
+fields = { addr = "String", options = "Vec<String>" }
+suboptions = [
+  { name = "iburst", status = "implemented" },
+  { name = "burst", status = "implemented" },
+  { name = "prefer", status = "implemented" },
+  { name = "noselect", status = "implemented" },
+  { name = "true", status = "implemented" },
+  { name = "key", status = "implemented" },
+  { name = "minpoll", status = "implemented" },
+  { name = "maxpoll", status = "implemented" },
+  { name = "version", status = "implemented" },
+  { name = "mode", status = "partial", notes = "Parsed not applied" },
+  { name = "xleave", status = "implemented" },
+  { name = "nts", status = "implemented" },
+  { name = "bias", status = "partial" },
+]
+notes = "Uses NtpMode::SymActive instead of Client. Same suboptions as server."
+
+[[directive]]
+name = "pool"
+status = "implemented"
+fields = { addr = "String", options = "Vec<String>" }
+suboptions = [
+  { name = "iburst", status = "implemented" },
+  { name = "burst", status = "implemented" },
+  { name = "prefer", status = "implemented" },
+  { name = "noselect", status = "implemented" },
+  { name = "true", status = "implemented" },
+  { name = "key", status = "implemented" },
+  { name = "minpoll", status = "implemented" },
+  { name = "maxpoll", status = "implemented" },
+  { name = "version", status = "implemented" },
+  { name = "mode", status = "partial" },
+  { name = "xleave", status = "implemented" },
+  { name = "nts", status = "implemented" },
+  { name = "bias", status = "partial" },
+]
+notes = "Same suboptions as server. Resolves multiple addresses."
+
+[[directive]]
+name = "refclock"
+status = "partial"
+fields = { refclock_type = "u8", unit = "u8", options = "Vec<String>" }
+notes = """
+Options Vec<String> is NOT parsed into structured fields. Only create peer with
+defaults. Driver-specific parsing absent. Fudge applied via apply_fudge_to_peer.
+"""
+
+[[directive]]
+name = "restrict"
+status = "implemented"
+fields = { addr = "String", flags = "Vec<String>" }
+suboptions = [
+  { name = "-4", status = "implemented" },
+  { name = "-6", status = "implemented" },
+  { name = "default", status = "implemented" },
+  { name = "ignore", status = "implemented" },
+  { name = "nomodify", status = "implemented" },
+  { name = "nopeer", status = "implemented" },
+  { name = "noquery", status = "implemented" },
+  { name = "notrap", status = "implemented" },
+  { name = "notrust", status = "implemented" },
+  { name = "limited", status = "implemented" },
+  { name = "kod", status = "implemented" },
+  { name = "noserve", status = "implemented" },
+  { name = "server", status = "implemented" },
+  { name = "ntpport", status = "divergent", notes = "ntpport flag not implemented" },
+  { name = "mssntp", status = "absent" },
+  { name = "flake", status = "absent" },
+  { name = "version", status = "absent" },
+]
+notes = "IP/mask entries do NOT support CIDR mask notation — only /32 or /128."
+
+[[directive]]
+name = "driftfile"
+status = "implemented"
+field = "String"
+
+[[directive]]
+name = "statsdir"
+status = "implemented"
+field = "String"
+
+[[directive]]
+name = "leapfile"
+status = "implemented"
+field = "String"
+
+[[directive]]
+name = "logfile"
+status = "implemented"
+field = "String"
+
+[[directive]]
+name = "ntpsigndsocket"
+status = "implemented"
+field = "String"
+
+[[directive]]
+name = "includefile"
+status = "implemented"
+field = "String"
+notes = "Handled at parse time."
+
+[[directive]]
+name = "keys"
+status = "partial"
+field = "String"
+notes = "Parsed and stored. Key file loading done by shell — integration may be absent."
+
+[[directive]]
+name = "trustedkey"
+status = "implemented"
+field = "u32"
+
+[[directive]]
+name = "controlkey"
+status = "implemented"
+field = "u32"
+
+[[directive]]
+name = "requestkey"
+status = "absent"
+
+[[directive]]
+name = "leapsmearinterval"
+status = "implemented"
+field = "u32"
+
+[[directive]]
+name = "broadcastdelay"
+status = "implemented"
+field = "u64"
+
+[[directive]]
+name = "calldelay"
+status = "implemented"
+field = "u64"
+
+[[directive]]
+name = "mruterlist"
+status = "implemented"
+field = "bool"
+
+[[directive]]
+name = "mssntp"
+status = "implemented"
+field = "bool"
+
+[[directive]]
+name = "revoke"
+status = "implemented"
+field = "u32"
+
+[[directive]]
+name = "dscp"
+status = "partial"
+field = "u8"
+notes = "Handled via Other catch-all. Not a structured ConfigOption variant."
+
+[[directive]]
+name = "enable"
+status = "partial"
+field = "String"
+suboptions = [
+  { name = "stats", status = "implemented" },
+  { name = "monitor", status = "implemented" },
+  { name = "auth", status = "implemented" },
+  { name = "mode7", status = "absent" },
+  { name = "kernel", status = "absent" },
+  { name = "calibrate", status = "absent" },
+  { name = "bclient", status = "absent" },
+]
+notes = "Only stats, monitor, auth handled. Others silently ignored."
+
+[[directive]]
+name = "disable"
+status = "partial"
+field = "String"
+suboptions = [
+  { name = "stats", status = "implemented" },
+  { name = "monitor", status = "implemented" },
+  { name = "auth", status = "implemented" },
+]
+
+[[directive]]
+name = "nts"
+status = "implemented"
+fields = { key_file = "Option<String>", cert_file = "Option<String>", port = "Option<u16>" }
+suboptions = [
+  { name = "key", status = "implemented" },
+  { name = "cert", status = "implemented" },
+  { name = "port", status = "implemented" },
+]
+
+[[directive]]
+name = "nts (legacy)"
+status = "implemented"
+variant = "NtsServer"
+fields = { key_file = "String", cert_file = "String" }
+notes = "Legacy form requiring both key and cert."
+
+[[directive]]
+name = "fudge"
+status = "implemented"
+fields = { refclock_type = "u8", unit = "u8", time1 = "f64", time2 = "f64", stratum = "u8", refid = "String" }
+
+[[directive]]
+name = "tinker"
+status = "implemented"
+fields = { step = "Option<f64>", panic = "Option<f64>", dispersion = "Option<f64>", stepout = "Option<f64>", minpoll = "Option<i32>", maxpoll = "Option<i32>" }
+
+[[directive]]
+name = "tos"
+status = "implemented"
+fields = { minsane = "Option<usize>", minclock = "Option<usize>", maxdist = "Option<f64>" }
+notes = """
+NTPsec also supports: orphan, mintc, mindist, maxclock, ceil, floor, coeff, beep.
+Only minsane, minclock, maxdist are parsed in the structured Tos variant.
+'orphan' handled via Other catch-all (different code path — design smell).
+"""
+
+[[directive]]
+name = "mru"
+status = "implemented"
+fields = { maxdepth = "Option<usize>", maxage = "Option<u32>" }
+
+[[directive]]
+name = "interface"
+status = "partial"
+fields = { name = "String", action = "InterfaceAction" }
+notes = "Parsed structurally but engine action is no-op ('handled by shell')."
+
+[[directive]]
+name = "statistics"
+status = "implemented"
+field = { kinds = "Vec<String>" }
+
+[[directive]]
+name = "filegen"
+status = "implemented"
+fields = { name = "String", file = "Option<String>", gen_type = "Option<String>", enable = "bool" }
+
+[[directive]]
+name = "setvar"
+status = "implemented"
+fields = { name = "String", value = "String" }
+notes = "Stored in sysvars HashMap. NOT returned in Mode 6 READVAR responses (dead storage)."
+
+[[directive]]
+name = "discard"
+status = "implemented"
+fields = { average = "Option<u32>", minimum = "Option<u32>", monitor = "Option<u32>" }
+
+[[directive]]
+name = "pps"
+status = "implemented"
+fields = { unit = "u8", assert = "bool", clear = "bool", prefer = "bool" }
+
+[[directive]]
+name = "provider"
+status = "partial"
+fields = { host = "String", port = "Option<u16>", cert = "Option<String>" }
+notes = "Host, port, cert parsed but discarded (only nts_providers counter incremented)."
+
+# Silent ignored directives (parsed as Other, no engine effect)
+[[silently_ignored]]
+directives = [
+  "acll", "broadcast", "broadcastclient", "ceiling", "clockstats",
+  "compatibility", "crypto", "decodetimestamp", "epeer", "hostname",
+  "ident", "io", "ipv4", "ipv6", "kod", "limit", "link", "listen",
+  "logconfig", "loopinfo", "lowlimit", "manycastclient", "manycastserver",
+  "mask", "maxclock", "maxdist", "maxskew", "minclock", "mindist",
+  "minsane", "mintc", "mode7", "monitor", "msldap", "nice", "nomodify",
+  "nonvolatile", "nopeer", "notrap", "notrust", "orphan", "phone",
+  "pidfile", "pw", "random", "refid", "requestkey", "step", "stepback",
+  "stepforward", "stepout", "struggle", "sysinfo", "syslog", "timer",
+  "trap", "ttl", "type", "unconfig", "unpeer"
+]

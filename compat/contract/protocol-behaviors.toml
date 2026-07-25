@@ -1,0 +1,97 @@
+# ntpsec-rs Protocol Behaviors Inventory
+# Oracle: NTPsec 1.2.4+dfsg-1
+
+[authentication]
+status = "75-85%"
+notes = """
+Digest: MD5(16), SHA1(20), AES-128-CMAC(16). Key file parsing, trusted keys,
+control key, server/client MAC verification, NOTRUST enforcement,
+auth-required mode. NTS framework exists but lifecycle incomplete.
+"""
+
+[packet]
+status = "85-90%"
+notes = """
+Full NTP encode/decode, build_request/response/KoD, split_packet_tail,
+extension field parsing, packet validation (TEST1-TEST10), offset/delay
+computation, kiss codes. Broadcast null-origin discovery logged only.
+"""
+
+[filter]
+status = "80-85%"
+notes = """
+8-entry clock filter, minimum-delay selection, reachability register,
+sample acceptance/validation, poll_update with iburst/burst/adaptive.
+Dispersion aging, spike detection, popcorn filtering status unknown.
+"""
+
+[selection]
+status = "80-85%"
+notes = """
+Intersection (RFC 5905 §11.2.1 three-tuple majority), clustering with
+selection_jitter, combining with weighted average, root distance,
+preferred peer, clockhop hysteresis, leap consensus.
+Full update_from_peers pipeline. Non-finite candidates excluded.
+"""
+
+[discipline]
+status = "70-75%"
+notes = """
+PLL/FLL/hybrid/KernelPLL. Step vs slew, panic threshold, frequency
+management, step-slew suppression, tinker configuration.
+Engine boundary recently corrected (no adjtimex in deterministic core).
+"""
+
+[mode6]
+status = "75-80%"
+notes = """
+READVAR, READSTAT, WRITEVAR, WRITECLOCK, READ_MRU, REQ_NONCE implemented.
+SETTRAP, ASYNCMSG, CONFIGURE declared but BADOP. Fragmented responses.
+Error responses. 92 system vars (52 real, 40 placeholder).
+33 peer vars (20 real, 13 placeholder). setvar not rendered.
+"""
+
+[monitor]
+status = "70-75%"
+notes = """
+MRU list tracking, rate limiting, nonce cache, fragmented queries,
+entry filtering, spoofed source detection. resall/resany/kod unused.
+"""
+
+[restrict]
+status = "75-80%"
+notes = """
+16 flags matching ntpsec. Address matching (IPv4/IPv6). Default rules.
+Action dispatch (Ignore/Discard/SendKod/Accept). Missing: ntpport,
+mssntp, flake, version flags.
+"""
+
+[kod]
+status = "80-85%"
+notes = """
+Sending (DENY, RATE, RSTR), response handling (rate→poll, deny→demobilize),
+rate limiting (send frequency). All codes implemented.
+"""
+
+[refclock]
+status = "55-70%"
+notes = """
+RefclockManager framework, SHM/SOCK/PPS/NMEA/GPSD/JJY/Oncore/Trimble/
+TrueTime/Arbiter drivers exist. Individual drivers need hardware evidence.
+"""
+
+[orphan]
+status = "30%"
+notes = "Orphan fields exist in SystemState. Orphan election algorithm not implemented."
+
+[pool]
+status = "50%"
+notes = "PoolState struct, pool_resolver HashMap, DNS at config time. No periodic refresh loop."
+
+[nts]
+status = "60-70%"
+notes = """
+NTS-KE client: TLS 1.3, ALPN, SNI, certificate validation, cookie handling,
+AEAD authenticators. Worker-based handshake. Request/response verification.
+Missing: full lifecycle (replenishment, backoff, generation-safe completion).
+"""

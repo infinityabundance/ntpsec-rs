@@ -1,0 +1,59 @@
+# ntpsec-rs Platform Support Matrix
+# Generated: 2026-07-25
+
+[meta]
+notes = """
+'Supported' means: builds, starts, exchanges packets, serves time,
+exposes Mode 6, survives platform gauntlet tests.
+Compilation-only is not sufficient for support claims.
+"""
+
+[[platform]]
+arch = "x86-64"
+os = "Linux (glibc)"
+status = "implemented"
+notes = "Primary development target. Sandbox/seccomp profiles exist."
+
+[[platform]]
+arch = "x86-64"
+os = "Linux (musl)"
+status = "untested"
+notes = "Alpine builds mentioned in review. No current CI evidence."
+
+[[platform]]
+arch = "AArch64"
+os = "Linux (glibc)"
+status = "partial"
+notes = "Seccomp profiles exist. Compilation not verified."
+
+[[platform]]
+arch = "AArch64"
+os = "Linux (musl)"
+status = "untested"
+
+[[platform]]
+arch = "x86-64"
+os = "FreeBSD"
+status = "absent"
+notes = "No FreeBSD-specific code paths. libc usage may not compile."
+
+[[platform]]
+arch = "x86-64"
+os = "macOS"
+status = "absent"
+notes = "No macOS-specific code paths. adjtimex is Linux-only."
+
+[[platform]]
+arch = "RISC-V"
+os = "Linux"
+status = "untested"
+
+# ── Build requirements ────────────────────────────────────────────────
+
+[build]
+rust_version = "1.75+"
+notes = "Uses modern Rust features (impl Trait, RPITIT, etc.)"
+
+[dependencies]
+libc = "0.2"
+notes = "Linux-only syscall interface. Porting required for non-Linux."

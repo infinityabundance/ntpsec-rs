@@ -1,0 +1,69 @@
+# ntpsec-rs Exit Code Registry
+# Oracle: NTPsec 1.2.4+dfsg-1
+# Generated: 2026-07-25
+
+[meta]
+notes = """
+Exit codes are critical for systemd unit files, service managers,
+and automation scripts that check daemon health.
+"""
+
+[[exit_code]]
+code = 0
+meaning = "Success"
+status = "implemented"
+notes = "Normal exit."
+
+[[exit_code]]
+code = 1
+meaning = "General error / config parse failure"
+status = "implemented"
+notes = "Daemon returns on fatal startup error."
+
+[[exit_code]]
+code = 2
+meaning = "Clock panic"
+status = "implemented"
+notes = "Adjustment::Panic calls process::exit(1). Should be exit code 2 per NTPsec."
+
+[[exit_code]]
+code = 3
+meaning = "Query mode: sync not achieved"
+status = "partial"
+notes = "-q mode exists but exit code behavior may not match NTPsec."
+
+[[exit_code]]
+code = 4
+meaning = "Permission failure / privilege error"
+status = "absent"
+notes = "Not explicitly returned on permission failures."
+
+[[signal]]
+signal = "SIGHUP"
+meaning = "Reload configuration"
+status = "partial"
+notes = """
+Reload is implemented (handle_reload in main.rs). It clears and re-applies
+config. Transactional reload (diff, retain, rollback) may be partial.
+"""
+
+[[signal]]
+signal = "SIGINT"
+meaning = "Graceful shutdown"
+status = "implemented"
+
+[[signal]]
+signal = "SIGTERM"
+meaning = "Graceful shutdown"
+status = "implemented"
+
+[[signal]]
+signal = "SIGUSR1"
+meaning = "Statistics toggle/rotate"
+status = "absent"
+notes = "Not implemented."
+
+[[signal]]
+signal = "SIGUSR2"
+meaning = "Debug level toggle"
+status = "absent"

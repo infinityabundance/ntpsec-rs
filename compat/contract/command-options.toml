@@ -1,0 +1,203 @@
+# ntpsec-rs CLI Flags Inventory
+# All 15 binaries use clap 4.x derive macros
+# Generated: 2026-07-25
+
+[[binary]]
+name = "ntpd-rs"
+description = "NTP daemon"
+has_help = true
+flags = [
+  { name = "-c", long = "--config", type = "PathBuf", purpose = "Config file", default = "/etc/ntp.conf", status = "implemented" },
+  { name = "-n", long = "--nofork", type = "bool", purpose = "Foreground (no fork)", default = "false", status = "implemented" },
+  { name = "-g", long = "--panicgate", type = "bool", purpose = "Override panic threshold", default = "false", status = "implemented" },
+  { name = "-x", long = "--slew", type = "bool", purpose = "Always slew", default = "false", status = "implemented" },
+  { name = "-q", long = "--query", type = "bool", purpose = "Query mode", default = "false", status = "implemented" },
+  { name = "-f", long = "--driftfile", type = "PathBuf", purpose = "Drift file path", default = "None", status = "implemented" },
+  { name = "--lab-daemon", type = "bool", purpose = "Deterministic lab mode", default = "false", status = "implemented" },
+  { name = "-r", long = "--trace", type = "bool", purpose = "Trace recording", default = "false", status = "implemented" },
+  { name = "--record-trace", type = "PathBuf", purpose = "Trace file path", default = "None", status = "implemented" },
+  { name = "-s", long = "--seccomp", type = "bool", purpose = "Enable seccomp", default = "false", status = "implemented" },
+  { name = "-u", long = "--user", type = "String", purpose = "Drop privileges to user", default = "None", status = "implemented" },
+  { name = "-p", long = "--pidfile", type = "PathBuf", purpose = "PID file path", default = "None", status = "implemented" },
+  { name = "-l", long = "--logfile", type = "PathBuf", purpose = "Log file path", default = "None", status = "implemented" },
+  { name = "-i", long = "--jaildir", type = "PathBuf", purpose = "chroot directory", default = "None", status = "implemented" },
+  { name = "-I", long = "--interface", type = "Vec<String>", purpose = "Listen interface", default = "[]", status = "implemented" },
+  { name = "-k", long = "--keyfile", type = "PathBuf", purpose = "Key file", default = "None", status = "implemented" },
+  { name = "-t", long = "--trustedkey", type = "Vec<u32>", purpose = "Trusted keys", default = "[]", status = "implemented" },
+  { name = "-w", long = "--wait-sync", type = "bool", purpose = "Wait for sync before main loop", default = "false", status = "implemented" },
+  { name = "-N", long = "--nice", type = "bool", purpose = "High priority", default = "false", status = "implemented" },
+  { name = "-4", type = "bool", purpose = "Force IPv4", default = "false", status = "implemented" },
+  { name = "-6", type = "bool", purpose = "Force IPv6", default = "false", status = "implemented" },
+]
+missing = [
+  "-A (disable auth)", "-a (require auth)", "-b (broadcast client)",
+  "-D / --set-debug-level", "-L / --listen", "-U / --interface-update-interval",
+  "-v (verbose)", "--saveconfig", "--pcc",
+]
+
+[[binary]]
+name = "ntpq-rs"
+description = "NTP query tool"
+has_help = true
+flags = [
+  { name = "host", type = "String", purpose = "Host to query", default = "127.0.0.1", status = "implemented" },
+  { name = "-p", long = "--port", type = "u16", purpose = "Port", default = "123", status = "implemented" },
+  { name = "-c", long = "--command", type = "Vec<String>", purpose = "Execute command", default = "[]", status = "implemented" },
+  { name = "-p", long = "--peers", type = "bool", purpose = "Print known peers", default = "false", status = "implemented" },
+  { name = "-v", long = "--verbose", type = "bool", purpose = "Verbose", default = "false", status = "implemented" },
+  { name = "-n", long = "--numeric", type = "bool", purpose = "Numeric only", default = "false", status = "implemented" },
+  { name = "-d", long = "--debug", type = "bool", purpose = "Debug", default = "false", status = "implemented" },
+  { name = "-a", long = "--auth-key", type = "u32", purpose = "Auth key ID", default = "None", status = "implemented" },
+  { name = "-k", long = "--key-file", type = "String", purpose = "Key file", default = "None", status = "implemented" },
+  { name = "-t", long = "--timeout", type = "u32", purpose = "Timeout (s)", default = "5", status = "implemented" },
+]
+missing = ["-4", "-6", "-i (interactive)", "-w / --wide"]
+
+[[binary]]
+name = "ntpdig-rs"
+description = "NTP query tool"
+has_help = true
+flags = [
+  { name = "server", type = "String", purpose = "NTP server", default = "required", status = "implemented" },
+  { name = "-4", type = "bool", purpose = "IPv4 only", default = "false", status = "implemented" },
+  { name = "-6", type = "bool", purpose = "IPv6 only", default = "false", status = "implemented" },
+  { name = "-v", long = "--verbose", type = "bool", purpose = "Verbose", default = "false", status = "implemented" },
+  { name = "-t", long = "--timeout", type = "u32", purpose = "Timeout (s)", default = "5", status = "implemented" },
+  { name = "-p", long = "--port", type = "u16", purpose = "Port", default = "123", status = "implemented" },
+  { name = "-s", long = "--samples", type = "u32", purpose = "Sample count", default = "1", status = "implemented" },
+]
+missing = ["-c/--count", "-D (debug)", "-j/--json", "-m/--mode", "-r/--resolution"]
+
+[[binary]]
+name = "ntpkeygen-rs"
+description = "NTP key generator"
+has_help = true
+flags = [
+  { name = "-o", long = "--output", type = "String", purpose = "Output path", default = "/etc/ntp.keys", status = "implemented" },
+  { name = "-n", long = "--count", type = "u32", purpose = "Key count", default = "10", status = "implemented" },
+  { name = "-d", long = "--digest", type = "String", purpose = "Digest type", default = "MD5", status = "implemented" },
+  { name = "-l", long = "--key-length", type = "u32", purpose = "Key length (bytes)", default = "16", status = "implemented" },
+  { name = "-p", long = "--print", type = "bool", purpose = "Print to stdout", default = "false", status = "implemented" },
+]
+missing = ["Certificate/identity key generation (IFF, GQ, MV, PC)"]
+
+[[binary]]
+name = "ntpleapfetch-rs"
+description = "Leap second fetcher"
+has_help = true
+flags = [
+  { name = "-o", long = "--output", type = "String", purpose = "Output path", default = "/var/lib/ntp/leap-seconds", status = "implemented" },
+  { name = "-u", long = "--url", type = "String", purpose = "Download URL", default = "ietf URL", status = "implemented" },
+  { name = "-f", long = "--force", type = "bool", purpose = "Force download", default = "false", status = "implemented" },
+  { name = "-v", long = "--verbose", type = "bool", purpose = "Verbose", default = "false", status = "implemented" },
+  { name = "-p", long = "--print", type = "bool", purpose = "Print to stdout", default = "false", status = "implemented" },
+]
+missing = ["-s/--source", "-t/--timeout"]
+
+[[binary]]
+name = "ntpmon-rs"
+description = "Real-time monitor"
+has_help = true
+flags = [
+  { name = "host", type = "String", purpose = "Host to monitor", default = "127.0.0.1", status = "implemented" },
+  { name = "-p", long = "--port", type = "u16", purpose = "Port", default = "123", status = "implemented" },
+  { name = "-r", long = "--interval", type = "u32", purpose = "Refresh (s)", default = "2", status = "implemented" },
+  { name = "-n", long = "--count", type = "u32", purpose = "Iterations", default = "0", status = "implemented" },
+]
+missing = ["-4", "-6", "-c/--command", "-n/--numeric (different meaning)", "--format"]
+
+[[binary]]
+name = "ntpfrob-rs"
+description = "System utilities"
+has_help = true
+subcommands = ["precision", "jitter", "dump", "bumpclock", "tickadj", "ppsapi", "status"]
+missing = ["-a/--all", "-n/--numeric"]
+
+[[binary]]
+name = "ntpsnmpd-rs"
+description = "SNMP daemon"
+has_help = true
+flags = [
+  { name = "host", type = "String", purpose = "NTP host", default = "127.0.0.1", status = "implemented" },
+  { name = "-p", long = "--port", type = "u16", purpose = "NTP port", default = "123", status = "implemented" },
+  { name = "-s", long = "--snmp-port", type = "u16", purpose = "SNMP port", default = "1161", status = "implemented" },
+  { name = "-i", long = "--interval", type = "u64", purpose = "Poll interval (s)", default = "60", status = "implemented" },
+  { name = "-o", long = "--output", type = "String", purpose = "Output file", default = "/var/log/ntpstats/snmp", status = "implemented" },
+]
+missing = ["-c/--config", "-d/--debug", "-f/--foreground", "-k/--keyfile", "-l/--logfile", "-n/--nofork", "-P/--pidfile", "-4", "-6"]
+
+[[binary]]
+name = "ntpsweep-rs"
+description = "Network sweep"
+has_help = true
+flags = [
+  { name = "hosts", type = "Vec<String>", purpose = "NTP servers", default = "positional", status = "implemented" },
+  { name = "-f", long = "--host-file", type = "String", purpose = "Host list file", default = "None", status = "implemented" },
+  { name = "-t", long = "--timeout", type = "u32", purpose = "Timeout (s)", default = "5", status = "implemented" },
+  { name = "-p", long = "--port", type = "u16", purpose = "Port", default = "123", status = "implemented" },
+]
+missing = ["-l/--list", "-m/--max-stratum", "-w/--wait", "-4", "-6"]
+
+[[binary]]
+name = "ntptime-rs"
+description = "Kernel time state"
+has_help = true
+flags = [
+  { name = "-v", long = "--verbose", type = "bool", purpose = "Verbose", default = "false", status = "implemented" },
+]
+missing = ["Read-write support: -c, -r, -s, -o, -f, -m, -e, -t, -T"]
+
+[[binary]]
+name = "ntptrace-rs"
+description = "Sync chain tracer"
+has_help = true
+flags = [
+  { name = "host", type = "String", purpose = "Start host", default = "127.0.0.1", status = "implemented" },
+  { name = "-d", long = "--max-depth", type = "u32", purpose = "Max depth", default = "10", status = "implemented" },
+  { name = "-t", long = "--timeout", type = "u32", purpose = "Timeout (s)", default = "5", status = "implemented" },
+]
+missing = ["-n/--numeric", "-h/--host", "-m/--max-hosts", "-p/--port (hardcoded to 123)", "-r/--retries", "-w/--wait", "-4", "-6"]
+
+[[binary]]
+name = "ntpviz-rs"
+description = "Statistics visualizer"
+has_help = true
+flags = [
+  { name = "file", type = "String", purpose = "Stats file path", default = "required", status = "implemented" },
+  { name = "-s", long = "--summary", type = "bool", purpose = "Show summary", default = "false", status = "implemented" },
+]
+missing = ["-d/--directory", "-o/--output", "-p/--period", "-t/--type", "-w/--window", "-6", "-c/--config"]
+
+[[binary]]
+name = "ntpwait-rs"
+description = "Wait for sync"
+has_help = true
+flags = [
+  { name = "-t", long = "--timeout", type = "u32", purpose = "Max wait (s)", default = "30", status = "implemented" },
+  { name = "-p", long = "--poll-interval", type = "u32", purpose = "Poll interval (s)", default = "1", status = "implemented" },
+  { name = "-v", long = "--verbose", type = "bool", purpose = "Verbose", default = "false", status = "implemented" },
+  { name = "-c", long = "--command", type = "String", purpose = "ntpq command", default = "rv 0", status = "implemented" },
+]
+missing = ["-n/--numeric", "-w/--wait", "-4", "-6"]
+
+[[binary]]
+name = "ntploggps-rs"
+description = "GPS logger"
+has_help = true
+flags = [
+  { name = "source", type = "String", purpose = "GPS source", default = "gpsd://localhost", status = "implemented" },
+  { name = "-o", long = "--output", type = "String", purpose = "Output file", default = "/var/log/ntpstats/gpsd", status = "implemented" },
+  { name = "-i", long = "--interval", type = "u64", purpose = "Poll interval (s)", default = "10", status = "implemented" },
+]
+missing = ["-v/--verbose", "-s/--socket", "-4", "-6"]
+
+[[binary]]
+name = "ntplogtemp-rs"
+description = "Temperature logger"
+has_help = true
+flags = [
+  { name = "source", type = "String", purpose = "Temperature source", default = "/sys/class/thermal/thermal_zone0/temp", status = "implemented" },
+  { name = "-o", long = "--output", type = "String", purpose = "Output file", default = "/var/log/ntpstats/temperature", status = "implemented" },
+  { name = "-i", long = "--interval", type = "u64", purpose = "Poll interval (s)", default = "60", status = "implemented" },
+]
+missing = ["-d/--device", "-s/--source", "-v/--verbose", "-4", "-6"]
