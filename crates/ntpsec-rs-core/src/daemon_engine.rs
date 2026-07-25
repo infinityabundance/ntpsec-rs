@@ -1139,8 +1139,11 @@ impl DaemonEngine {
                             peer.flags |= PeerFlags::NOSYNC;
                         }
                         if opts.true_flag {
-                            // "true" flag — mark as preferred for truechimers
-                            peer.flags |= PeerFlags::PREFER;
+                            // "true" flag — mark as TRUE (truechimer), not PREFER
+                            // These are separate concepts: TRUE means mandatory
+                            // inclusion in the survivor set; PREFER means priority
+                            // when selecting the system peer.
+                            peer.flags |= PeerFlags::TRUE;
                         }
                         if opts.keyid != 0 {
                             peer.keyid = opts.keyid;
@@ -1148,6 +1151,9 @@ impl DaemonEngine {
                         }
                         if opts.xleave {
                             peer.flags |= PeerFlags::XLEAVE;
+                        }
+                        if opts.nts {
+                            peer.flags |= PeerFlags::NTS;
                         }
                         // Assign a unique association ID (collision-free across wrap)
                         if let Some(aid) =
@@ -1616,7 +1622,7 @@ impl DaemonEngine {
             match event {
                 TimerEvent::Poll(id) => {
                     if let Some(peer) = self.peers.get_mut(id) {
-                        let (pkt, wire_bytes) = if peer.flags.contains(PeerFlags::XLEAVE)
+                        let (pkt, wire_bytes) = if peer.flags.contains(PeerFlags::NTS)
                             && self.nts_associations.contains_key(&peer.associd)
                         {
                             // NTS-authenticated request
@@ -2207,7 +2213,6 @@ impl DaemonEngine {
                         )];
                     }
                 } else if self.auth_required {
-                    // Global auth_required: unauthenticated packets are rejected
                     self.system.server_counters.rejected =
                         self.system.server_counters.rejected.saturating_add(1);
                     return vec![DaemonAction::Log(
@@ -2446,7 +2451,7 @@ impl DaemonEngine {
         notrust_enforced: bool,
     ) -> ResponseAuthResult {
         // NTS-authenticated response
-        if peer.flags.contains(PeerFlags::XLEAVE) && nts_assocs.contains_key(&peer.associd) {
+        if peer.flags.contains(PeerFlags::NTS) && nts_assocs.contains_key(&peer.associd) {
             let nts_ok = nts_assocs
                 .get(&peer.associd)
                 .and_then(|nts| crate::nts_client::verify_nts_response(dgram_bytes, nts).ok())

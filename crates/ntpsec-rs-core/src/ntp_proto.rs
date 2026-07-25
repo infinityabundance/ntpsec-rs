@@ -399,6 +399,14 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
         return 0;
     }
 
+    // Reject non-finite peers before selection.
+    // NaN or infinite offsets cannot participate in intersection.
+    for peer in peers.iter_mut() {
+        if !peer.offset.is_finite() {
+            peer.flash |= FlashBits::TEST5.bits();
+        }
+    }
+
     // Compute synch (half-width of confidence interval) for each peer.
     //   synch = max(MINDISTANCE, root_delay/2 + root_dispersion + phi*elapsed + jitter)
     // This matches ntpsec's full confidence interval computation.
@@ -408,7 +416,12 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
         .map(|p| {
             let elapsed =
                 ntp_fp::ntp_ts64_to_double(now) - ntp_fp::ntp_ts64_to_double(p.reference_time);
-            let base = p.root_delay / 2.0 + p.root_dispersion + phi * elapsed.max(0.0) + p.jitter;
+            // Clamp negative elapsed time to prevent invalid synch values.
+            let elapsed = elapsed.max(0.0);
+            if !p.offset.is_finite() {
+                return f64::NAN;
+            }
+            let base = p.root_delay / 2.0 + p.root_dispersion + phi * elapsed + p.jitter;
             base.max(NTP_MINDIST)
         })
         .collect();
@@ -545,7 +558,7 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
 /// TRUE (truechimer from intersection) and PREFER peers are immune to removal.
 ///
 /// Returns the survivors (indices into the original peers array).
-pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
+pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64, minclock: usize) -> Vec<usize> {
     let n = peers.len();
 
     // Always filter by flash first (exclude peers with any TEST bit set).
@@ -570,8 +583,7 @@ pub fn clock_cluster(peers: &mut [Peer], now: NtpTs64) -> Vec<usize> {
         .position(|p| p.flags.contains(PeerFlags::PREFER));
 
     // ─── Repeated elimination (ntpsec's while loop) ──────────────────────
-    // Default values (can be configured via `tos` minclock/maxclock).
-    let minclock: usize = 3;
+    // Default maxclock_jitter = 3.0 (ntpsec default).
     let maxclock_jitter: f64 = 3.0;
 
     loop {
@@ -1451,8 +1463,8 @@ impl SystemState {
             return usize::MAX;
         }
 
-        // 3. Run clustering algorithm
-        let survivors = clock_cluster(peers, now);
+        // 3. Run clustering algorithm with system minclock
+        let survivors = clock_cluster(peers, now, 3);
         if survivors.is_empty() {
             self.leap = LeapIndicator::Alarm;
             self.stratum = NTP_MAXSTRAT;
@@ -1963,7 +1975,7 @@ mod tests {
             p.flash = FlashBits::PASS.bits();
             p.reference_time = _now;
         }
-        let survivors = clock_cluster(&mut peers, _now);
+        let survivors = clock_cluster(&mut peers, _now, 3);
         // The outlier should be pruned
         assert!(
             survivors.len() <= 4,
@@ -1994,7 +2006,7 @@ mod tests {
         let _n = clock_intersection(&mut peers, now);
 
         // Verify cluster retains prefer peer
-        let survivors = clock_cluster(&mut peers, now);
+        let survivors = clock_cluster(&mut peers, now, 3);
         assert!(
             survivors.contains(&0),
             "prefer peer should survive clustering"
@@ -2018,7 +2030,7 @@ mod tests {
         peers[0].jitter = 5.0;
         peers[1].jitter = 0.001;
 
-        let survivors = clock_cluster(&mut peers, now);
+        let survivors = clock_cluster(&mut peers, now, 3);
         assert!(
             survivors.contains(&0),
             "prefer peer should remain despite high jitter"
@@ -2202,7 +2214,7 @@ mod tests {
             }
         }
 
-        let survivors = clock_cluster(&mut peers, now);
+        let survivors = clock_cluster(&mut peers, now, 3);
 
         // Peer 5 (unreachable) must have been filtered by flash
         assert!(

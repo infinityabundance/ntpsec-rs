@@ -77,6 +77,8 @@ bitflags::bitflags! {
         /// TRUE — peer is a truechimer (passed TEST5 / intersection).
         /// Set during clock selection, cleared when falseticker.
         const TRUE      = 1 << 9;
+        /// NTS — peer uses NTS authentication.
+        const NTS       = 1 << 10;
     }
 }
 
