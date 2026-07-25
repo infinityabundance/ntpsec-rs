@@ -1329,6 +1329,10 @@ pub struct SystemState {
     /// Number of NTS providers.
     pub nts_providers: u32,
 
+    // ── MS-SNTP / ntpsignd ─────────────────────────────────────────────
+    /// Path to ntpsignd socket for MS-SNTP authentication.
+    pub ntp_signd_socket: Option<String>,
+
     // ── Gate 10: Tinker / Orphan ──────────────────────────────────────────
     /// Tinker tc-increment value.
     pub tcincrement: f64,
@@ -1407,6 +1411,7 @@ impl Default for SystemState {
             nts_keys: 0,
             nts_cookielen: 0,
             nts_providers: 0,
+            ntp_signd_socket: None,
             tcincrement: 0.0,
             orph_stratum: 0,
             orphwait: 300,

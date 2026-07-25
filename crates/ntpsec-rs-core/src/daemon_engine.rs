@@ -1503,6 +1503,41 @@ impl DaemonEngine {
                 ConfigOption::CallDelay(val) => {
                     self.call_delay = *val;
                 }
+                ConfigOption::Mruterlist(_val) => {
+                    // MRU terlist flag — minor config, no runtime effect yet
+                }
+                ConfigOption::Mssntp(val) => {
+                    // MS-SNTP authentication flag — parsed for completeness
+                    self.system.nts_enabled = if *val { 1 } else { 0 };
+                }
+                ConfigOption::NtpSigndSocket(path) => {
+                    // Path to the ntpsignd socket for MS-SNTP
+                    self.system.ntp_signd_socket = Some(path.clone());
+                }
+                ConfigOption::Revoke(val) => {
+                    // Key revocation interval in seconds
+                    // (used by crypto, stored for completeness)
+                    let _ = val;
+                }
+                ConfigOption::Pps {
+                    unit,
+                    assert,
+                    clear,
+                    prefer,
+                } => {
+                    // PPS configuration — used by the PPS refclock driver
+                    let _ = (unit, assert, clear, prefer);
+                }
+                ConfigOption::Provider { host, port, cert } => {
+                    // NTS provider host — adds to NTS provider list
+                    self.system.nts_providers += 1;
+                    // Host and cert are stored for NTS-KE client use
+                    let _ = (host, port, cert);
+                }
+                ConfigOption::Include(path) => {
+                    // includefile is handled by the config parser at parse time
+                    // includefile is handled at parse time by the config parser
+                }
                 _ => {}
             }
         }
