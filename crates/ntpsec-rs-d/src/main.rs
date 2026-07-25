@@ -513,9 +513,13 @@ fn main() {
         }
     }
 
-    // ──── Main Event Loop (readiness-driven) ──────────────────────────
+    // ──── Main Event Loop (readiness-driven, fair) ───────────────────
     tracing::info!("Entering main event loop with {} peers", engine.peers.len());
     let mut iteration: u64 = 0;
+    // Rotating start index for per-socket fairness — starts at 0 and
+    // advances each cycle so no single socket can monopolize the front
+    // of the ready list across consecutive cycles.
+    let mut fairness_offset: usize = 0;
 
     while running.load(Ordering::Relaxed) {
         iteration += 1;
@@ -616,13 +620,22 @@ fn main() {
         // We drain each ready socket to EAGAIN before moving to the next,
         // with a global per-cycle budget to prevent any one socket from
         // starving timers or refclocks.
+        // A rotating fairness_offset prevents systemic front-of-list bias.
         match network.poll_readable(timeout_ms) {
-            Ok(ready_sockets) => {
+            Ok(mut ready_sockets) => {
+                if !ready_sockets.is_empty() && fairness_offset < ready_sockets.len() {
+                    ready_sockets.rotate_left(fairness_offset);
+                }
+                fairness_offset = (fairness_offset + 1) % ready_sockets.len().max(1);
+
+                let per_socket_quota: usize = 32;
                 let global_budget: usize = 256;
                 let mut packets_processed: usize = 0;
                 for &socket_idx in &ready_sockets {
+                    let mut pkts_from_this: usize = 0;
                     loop {
-                        if packets_processed >= global_budget {
+                        if packets_processed >= global_budget || pkts_from_this >= per_socket_quota
+                        {
                             break;
                         }
                         match network.recv_from(socket_idx) {
@@ -640,6 +653,7 @@ fn main() {
                                 break;
                             }
                         }
+                        pkts_from_this += 1;
                     }
                     if packets_processed >= global_budget {
                         break;
