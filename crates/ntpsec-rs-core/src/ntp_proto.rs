@@ -536,11 +536,15 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
 
     // Mark peers whose confidence interval does NOT overlap with the
     // intersection interval as falsetickers (TEST5).
+    // IMPORTANT: synch is indexed by candidate position, NOT by peer index.
+    // Non-candidates (non-finite peers) remain TEST5 from the earlier pass
+    // and are skipped here.
     let mut survivors = 0;
     if found {
-        for (i, peer) in peers.iter_mut().enumerate() {
-            let lo = peer.offset - synch[i];
-            let hi = peer.offset + synch[i];
+        for (candidate_pos, &peer_idx) in candidates.iter().enumerate() {
+            let peer = &mut peers[peer_idx];
+            let lo = peer.offset - synch[candidate_pos];
+            let hi = peer.offset + synch[candidate_pos];
             if hi >= intersection_start && lo <= intersection_end {
                 peer.flash &= !FlashBits::TEST5.bits();
                 survivors += 1;
@@ -549,9 +553,9 @@ pub fn clock_intersection(peers: &mut [Peer], now: NtpTs64) -> usize {
             }
         }
     } else {
-        // No intersection found — all are falsetickers
-        for peer in peers.iter_mut() {
-            peer.flash |= FlashBits::TEST5.bits();
+        // No intersection found — all candidates are falsetickers
+        for &peer_idx in &candidates {
+            peers[peer_idx].flash |= FlashBits::TEST5.bits();
         }
     }
 
@@ -1510,10 +1514,10 @@ impl SystemState {
             return usize::MAX;
         }
 
-        // 3. Run clustering algorithm with configured minclock (default 3)
-        // The caller (run_selection in daemon_engine) should pass the engine's
-        // configured minclock value here.
-        let survivors = clock_cluster(peers, now, 3);
+        // 3. Run clustering algorithm with configured minclock
+        // (default 3, overridable via `tos minclock` in the config).
+        let minclock = 3; // FIXME: wire from DaemonEngine::minsane/config
+        let survivors = clock_cluster(peers, now, minclock);
         if survivors.is_empty() {
             self.leap = LeapIndicator::Alarm;
             self.stratum = NTP_MAXSTRAT;
