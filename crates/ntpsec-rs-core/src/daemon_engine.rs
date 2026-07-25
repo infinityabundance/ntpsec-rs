@@ -30,7 +30,6 @@
 
 use crate::ntp_auth::*;
 use crate::ntp_config::*;
-use crate::ntp_dns;
 use crate::ntp_filegen::*;
 use crate::ntp_fp;
 use crate::ntp_io::*;
