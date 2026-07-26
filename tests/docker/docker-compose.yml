@@ -32,7 +32,9 @@ services:
 
   # ntpsec-rs daemon under test (package-based)
   ntpsec-rs:
-    image: ntpsec-rs-package
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.ntpsec-rs
     command: >
       ntpd-rs -c /etc/ntp-rs.conf -n -I 0.0.0.0
     volumes:

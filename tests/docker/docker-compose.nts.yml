@@ -29,6 +29,8 @@ services:
         ipv4_address: 10.200.0.30
     volumes:
       - nts-certs:/nts-certs:ro
+      # Mount prebuilt test binary from CI build step
+      - ../../tests/docker/bin:/build/tests:ro
     depends_on:
       - chrony-nts
       - ntpsec-rs

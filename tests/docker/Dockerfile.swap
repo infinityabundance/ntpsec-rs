@@ -10,18 +10,14 @@
 
 FROM ubuntu:24.04
 
-# Install dependencies: python3 for scripting, ntpsec for reference ntpd/ntpq,
-# xz-utils and gpg for potential future package verification
+# Install dependencies: python3 for scripting, ntpsec for reference ntpd/ntpq
 RUN apt-get update -qq && \
-    apt-get install -y -qq python3 ntpsec xz-utils gpg && \
+    apt-get install -y -qq python3 ntpsec && \
     rm -rf /var/lib/apt/lists/*
 
-# Create directory for incoming .deb packages
-RUN mkdir -p /tmp/packages
-
 # Copy ntpsec-rs .deb packages from the build context
-# Paths are relative to build context (project root)
-COPY tests/docker/ntpsec-rs-*.deb /tmp/packages/
+# Packages are in tests/docker/packages/ (prepared by CI build step)
+COPY tests/docker/packages/ /tmp/packages/
 
 # Copy the swap test script
 COPY tests/docker/test-package-swap.sh /test-package-swap.sh

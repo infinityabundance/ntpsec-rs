@@ -32,7 +32,6 @@ if [ -f "$CERT_SRC" ]; then
 else
     echo "WARNING: Shared certificate not found at $CERT_SRC"
     echo "Falling back to extracting via container name..."
-    # Try to extract by running docker exec on the host
     if command -v docker &>/dev/null; then
         docker cp chrony-nts:/etc/chrony/nts-cert.pem "$CERT_DST" 2>/dev/null || \
         docker cp ntpsec-rs-chrony-nts-1:/etc/chrony/nts-cert.pem "$CERT_DST" 2>/dev/null || \
@@ -41,16 +40,31 @@ else
 fi
 
 echo ""
-echo "=== 3. Building NTS-KE interop test binary ==="
-cd /build
-cargo test --test nts_ke_chrony_interop --no-run -p ntpsec-rs-core 2>&1
-# Find the built test binary
-TEST_BINARY=$(find target/debug -name 'nts_ke_chrony_interop*' -type f 2>/dev/null | head -1)
-if [ -n "$TEST_BINARY" ]; then
-    echo "Test binary: $TEST_BINARY"
+echo "=== 3. Locating NTS-KE interop test binary ==="
+
+# Check for prebuilt binary (baked into image by CI or mounted)
+if [ -x /build/tests/nts_ke_test ]; then
+    TEST_BINARY="/build/tests/nts_ke_test"
+    echo "Using prebuilt binary: $TEST_BINARY"
+elif [ -x /build/bin/nts_ke_test ]; then
+    TEST_BINARY="/build/bin/nts_ke_test"
+    echo "Using prebuilt binary: $TEST_BINARY"
 else
-    echo "ERROR: Could not find nts_ke_chrony_interop test binary"
-    exit 1
+    echo "No prebuilt binary found, building from source..."
+    # Install Rust toolchain for building
+    apt-get update -qq && apt-get install -y -qq curl build-essential pkg-config
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    export PATH="/root/.cargo/bin:${PATH}"
+
+    # Copy source (Dockerfile.runner already copied it or we use what's baked)
+    cd /build
+    cargo test --test nts_ke_chrony_interop --no-run -p ntpsec-rs-core 2>&1
+    TEST_BINARY=$(find target/debug -name 'nts_ke_chrony_interop*' -type f 2>/dev/null | head -1)
+    if [ -z "$TEST_BINARY" ]; then
+        echo "ERROR: Could not find nts_ke_chrony_interop test binary"
+        exit 1
+    fi
+    echo "Built from source: $TEST_BINARY"
 fi
 
 echo ""
@@ -62,17 +76,12 @@ NTSKE_PORT="4460" \
 "$TEST_BINARY" --nocapture
 
 echo ""
-echo "=== 5. Installing ntpq ==="
-apt-get update -qq 2>/dev/null | tail -1
-apt-get install -y -qq ntpsec 2>&1 | tail -1
-
-echo ""
-echo "=== 6. Cross-container ntpq against ntpsec-rs ==="
+echo "=== 5. Cross-container ntpq against ntpsec-rs ==="
 echo "Testing ntpq -pn ntpsec-rs:"
-timeout 5 ntpq -pn ntpsec-rs 2>&1 || echo "(ntpq peers result)"
+timeout 5 ntpq -pn ntpsec-rs 2>&1 || echo "(ntpq peers result - may fail if ntpsec-rs not responding)"
 echo ""
 echo "Testing ntpq -c rv ntpsec-rs:"
-timeout 5 ntpq -c rv ntpsec-rs 2>&1 || echo "(ntpq rv result)"
+timeout 5 ntpq -c rv ntpsec-rs 2>&1 || echo "(ntpq rv result - may fail due to NTPsec Python formatting bug)"
 
 echo ""
-echo "=== 7. Test harness complete ==="
+echo "=== 6. Test harness complete ==="

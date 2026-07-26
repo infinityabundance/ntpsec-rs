@@ -1,26 +1,13 @@
 FROM ubuntu:24.04
 
-# Install runtime dependencies + Rust toolchain for building the interop test
+# Install runtime dependencies
 RUN apt-get update -qq && apt-get install -y -qq \
     python3 \
     ntpsec \
-    curl \
-    build-essential \
-    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust via rustup (gives latest stable, needed for edition 2021 / rustls 0.23)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Copy the entire project source so cargo can resolve workspace dependencies
-WORKDIR /build
-COPY Cargo.toml /build/Cargo.toml
-COPY Cargo.lock /build/Cargo.lock
-COPY crates/ /build/crates/
-
-# Pre-fetch dependencies (cached in a Docker layer for faster rebuilds)
-RUN cargo fetch
+# Create directory for prebuilt test binary (mounted/baked in from CI)
+RUN mkdir -p /build/tests
 
 # Copy the test-runner script
 COPY tests/docker/test-runner.sh /test-runner.sh

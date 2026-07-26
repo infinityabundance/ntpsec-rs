@@ -1,9 +1,29 @@
+# ntpsec-rs .dockerignore — prevent Docker build context from ballooning
+
+# Build artifacts
 target/
+**/target/
+
+# Version control
 .git/
+.gitattributes
 .gitignore
-*.md
-fuzz/
-packaging/
-docs/
-.github/
-.cargo/
+.gitmodules
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Project-specific excludes
+fuzz/corpus/
+fuzz/artifacts/
+docker/
+*.deb
+*.rpm
