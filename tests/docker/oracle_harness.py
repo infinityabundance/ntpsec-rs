@@ -213,6 +213,23 @@ def main():
                 "field": f"state.{var}", "oracle": o_val, "rs": r_val
             })
 
+    # Also compare peer state
+    print("\n[3b] Querying peer state via Mode 6 (associd=1)...")
+    oracle_peer = query_mode6(ORACLE_HOST, MODE6_PORT, 1)
+    rs_peer = query_mode6(RS_HOST, MODE6_PORT, 1)
+    results["oracle"]["peer_state"] = oracle_peer.get("vars", {})
+    results["ntpsec_rs"]["peer_state"] = rs_peer.get("vars", {})
+
+    peer_vars = ["srcaddr", "stratum", "offset", "delay", "dispersion",
+                  "reach", "poll", "hpoll", "jitter", "flash"]
+    for var in peer_vars:
+        o_val = oracle_peer.get("vars", {}).get(var, "N/A")
+        r_val = rs_peer.get("vars", {}).get(var, "N/A")
+        if o_val != r_val:
+            results["diffs"].append({
+                "field": f"peer.{var}", "oracle": o_val, "rs": r_val
+            })
+
     # Generate report
     print(f"\n[4] Results: {len(results['diffs'])} total differences")
     print("\n=== State Comparison ===")

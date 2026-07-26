@@ -5,9 +5,9 @@ RUN cargo build --release -p ntpsec-rs-d -p ntpsec-rs-query -p ntpsec-rs-dig
 
 FROM debian:bookworm-slim
 RUN apt-get update -qq && apt-get install -y -qq libc6 python3 && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/ntpsec-rs-d /usr/local/bin/
-COPY --from=builder /build/target/release/ntpsec-rs-query /usr/local/bin/
-COPY --from=builder /build/target/release/ntpsec-rs-dig /usr/local/bin/
-RUN ln -s /usr/local/bin/ntpsec-rs-d /usr/local/bin/ntpd-rs && \
-    ln -s /usr/local/bin/ntpsec-rs-query /usr/local/bin/ntpq-rs && \
-    ln -s /usr/local/bin/ntpsec-rs-dig /usr/local/bin/ntpdig-rs
+COPY --from=builder /build/target/release/ntpd-rs /usr/local/bin/
+COPY --from=builder /build/target/release/ntpq-rs /usr/local/bin/
+COPY --from=builder /build/target/release/ntpdig-rs /usr/local/bin/
+RUN ln -s /usr/local/bin/ntpd-rs /usr/local/bin/ntpsec-rs-d && \
+    ln -s /usr/local/bin/ntpq-rs /usr/local/bin/ntpsec-rs-query && \
+    ln -s /usr/local/bin/ntpdig-rs /usr/local/bin/ntpsec-rs-dig
