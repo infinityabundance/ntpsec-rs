@@ -4,6 +4,7 @@
 # feeds them identical synthetic packet streams, and compares state.
 #
 # Usage:
+#   cd ntpsec-rs
 #   docker compose -f tests/docker/docker-compose.yml up --build
 #   docker compose -f tests/docker/docker-compose.yml logs -f oracle
 
@@ -18,7 +19,7 @@ services:
         ntpd -c /etc/ntp-oracle.conf -n -N
       "
     volumes:
-      - ./tests/docker/ntp-oracle.conf:/etc/ntp-oracle.conf:ro
+      - ./ntp-oracle.conf:/etc/ntp-oracle.conf:ro
     networks:
       - ntp-lab
     cap_add:
@@ -31,9 +32,9 @@ services:
       context: ../..
       dockerfile: tests/docker/Dockerfile.ntpsec-rs
     command: >
-      ntpd-rs -c /etc/ntp-rs.conf -n -N
+      ntpsec-rs-d -c /etc/ntp-rs.conf -n -N
     volumes:
-      - ./tests/docker/ntp-rs.conf:/etc/ntp-rs.conf:ro
+      - ./ntp-rs.conf:/etc/ntp-rs.conf:ro
     networks:
       - ntp-lab
     cap_add:
@@ -48,8 +49,7 @@ services:
     command: >
       python3 /tests/docker/oracle_harness.py
     volumes:
-      - ./tests/docker:/tests/docker:ro
-      - ./tests/fixtures:/tests/fixtures:ro
+      - .:/tests/docker:ro
     networks:
       - ntp-lab
     depends_on:

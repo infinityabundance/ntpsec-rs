@@ -225,7 +225,7 @@ def main():
         print(f"{var:<20} {o_val:<20} {r_val:<20}{marker}")
 
     # Save detailed report
-    report_path = "/tests/fixtures/oracle-report.json"
+    report_path = "/tmp/oracle-report.json"
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with open(report_path, "w") as f:
         json.dump(results, f, indent=2)
