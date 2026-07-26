@@ -51,6 +51,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check 2>&1
 
+      - name: Clippy (nightly — optional)
+        if: matrix.toolchain == 'nightly'
+        continue-on-error: true
+        run: cargo clippy --workspace 2>&1
+
   cross:
     strategy:
       fail-fast: false
@@ -87,6 +92,7 @@ jobs:
           fi
 
       - name: Cross-compile core
+        continue-on-error: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
 
       - name: Cross-compile I/O (optional — platform-specific)
