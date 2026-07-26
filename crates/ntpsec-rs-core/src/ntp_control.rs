@@ -743,14 +743,14 @@ fn get_hostname() -> String {
 /// Peer variable accessor — retrieves a named peer variable.
 pub fn get_peer_variable(peer: &super::ntp_peer::Peer, name: &str) -> Option<String> {
     match name {
-        "bias" => Some("0.0".to_string()),
+        "bias" => Some(format!("{:.6}", peer.bias)),
         "candidate" => Some("0".to_string()),
-        "clk_jitter" => Some("0.0".to_string()),
+        "clk_jitter" => Some(format!("{:?}", peer.jitter)),
         "clk_wander" => Some("0.0".to_string()),
         "delay" => Some(format!("{:?}", peer.delay)),
         "dispersion" => Some(format!("{:?}", peer.dispersion)),
         "dstadr" => peer.dstadr.map(|sa| crate::ntp_net::socktoa(&sa)),
-        "filterror" => Some("0.0".to_string()),
+        "filterror" => Some(format!("{:?}", peer.dispersion)),
         "flags" => Some(format!("{:x}", peer.flags.bits())),
         "flash" => Some(format!("{:x}", peer.flash)),
         "hmode" => Some(format!("{}", peer.hmode as u8)),
@@ -769,13 +769,17 @@ pub fn get_peer_variable(peer: &super::ntp_peer::Peer, name: &str) -> Option<Str
         "reftime" => Some(crate::ntp_fp::dolfptoa(peer.reference_time, 6)),
         "rootdelay" => Some(format!("{:?}", peer.root_delay)),
         "rootdisp" => Some(format!("{:?}", peer.root_dispersion)),
-        "selbroken" => Some("0".to_string()),
+        "selbroken" => Some(format!("{}", peer.flash)),
         "seldisp" => Some("0.0".to_string()),
         "srcaddr" => Some(crate::ntp_net::socktoa(&peer.srcaddr)),
         "stratum" => Some(format!("{}", peer.stratum)),
         "timer" => Some("0".to_string()),
-        "ttl" => Some("0".to_string()),
-        "unreach" => Some("0".to_string()),
+        "ttl" => Some(format!("{}", peer.retry)),
+        "unreach" => Some(if peer.reach.is_reachable() {
+            "0".to_string()
+        } else {
+            "1".to_string()
+        }),
         "version" => Some(format!("{}", peer.version as u8)),
         "xmt" => Some(crate::ntp_fp::dolfptoa(peer.transmit_time, 6)),
         _ => None,
