@@ -125,7 +125,7 @@ fn main() {
             tm.tm_min,
             tm.tm_sec,
             if nano {
-                now.subsec_nanos() / 1_000_000
+                now.subsec_millis()
             } else {
                 now.subsec_micros()
             },
@@ -156,11 +156,7 @@ fn main() {
     println!(
         "  interval: {} s, sanity: {}",
         tmx.constant,
-        if rc == libc::TIME_OK as i32 {
-            "PASS"
-        } else {
-            "FAIL"
-        }
+        if rc == libc::TIME_OK { "PASS" } else { "FAIL" }
     );
 
     // --- Verbose: ntp_adjtime() equivalent ---

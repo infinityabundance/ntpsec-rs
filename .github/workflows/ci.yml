@@ -91,9 +91,13 @@ jobs:
           fi
 
       - name: Cross-compile core
+        env:
+          RING_PREGENERATE_ASM: "1"
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
 
       - name: Cross-compile I/O
+        env:
+          RING_PREGENERATE_ASM: "1"
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-io 2>&1
 
   oracle:

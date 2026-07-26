@@ -101,8 +101,8 @@ impl ConfigScanner {
                 return self.read_ident_or_keyword();
             }
 
-            // Skip unknown char
-            self.pos += 1;
+            // Skip unknown char (use c.len_utf8() to handle multi-byte UTF-8)
+            self.pos += c.len_utf8();
             self.col += 1;
         }
     }
