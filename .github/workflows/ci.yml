@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
-        toolchain: [stable, nightly]
+        toolchain: [stable, nightly-2025-04-01]
 
     runs-on: ${{ matrix.os }}
 
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
@@ -76,8 +76,7 @@ jobs:
             sudo apt-get install -y -qq \
               gcc-aarch64-linux-gnu \
               g++-aarch64-linux-gnu \
-              binutils-aarch64-linux-gnu \
-              libc6-dev-arm64-cross
+              binutils-aarch64-linux-gnu
           fi
           if [[ "${{ matrix.target }}" == *-linux-musl ]]; then
             sudo apt-get update -qq
@@ -91,13 +90,9 @@ jobs:
           fi
 
       - name: Cross-compile core
-        env:
-          RING_PREGENERATE_ASM: "1"
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
 
       - name: Cross-compile I/O
-        env:
-          RING_PREGENERATE_ASM: "1"
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-io 2>&1
 
   oracle:
@@ -116,17 +111,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
+      - name: Install Rust nightly-2025-04-01
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: nightly-2025-04-01
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      - name: Run fuzz targets (smoke test — 60s each)
+      - name: Verify cargo-fuzz
+        run: cargo fuzz --help
+
+      - name: Run fuzz targets (smoke test)
         run: |
-          cargo fuzz run --manifest-path fuzz/Cargo.toml ntp_packet_decode -- -max_total_time=60 2>&1
-          cargo fuzz run --manifest-path fuzz/Cargo.toml mode6_decode -- -max_total_time=60 2>&1
-          cargo fuzz run --manifest-path fuzz/Cargo.toml config_parser -- -max_total_time=60 2>&1
-          cargo fuzz run --manifest-path fuzz/Cargo.toml extension_fields -- -max_total_time=60 2>&1
+          cd fuzz
+          cargo fuzz run ntp_packet_decode -- -max_total_time=60 2>&1
+          cargo fuzz run mode6_decode -- -max_total_time=60 2>&1
+          cargo fuzz run config_parser -- -max_total_time=60 2>&1
+          cargo fuzz run extension_fields -- -max_total_time=60 2>&1
