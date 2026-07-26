@@ -519,10 +519,11 @@ impl ControlExchange {
         buf.extend_from_slice(&resp_header.encode());
         buf.extend_from_slice(resp_data);
 
+        // Mode 6 requires 4-octet boundary for all responses (RFC 5905 style)
+        let pad = (4 - (buf.len() & 3)) & 3;
+        buf.resize(buf.len() + pad, 0);
+
         if let Some(key) = auth_key {
-            // Pad to 4-octet boundary for MAC (per NTPsec MODE_SIX_ALIGNMENT=4).
-            let pad = (4 - (buf.len() & 3)) & 3;
-            buf.resize(buf.len() + pad, 0);
             if let Some(mac) = key.mac(&buf) {
                 buf.extend_from_slice(&key.id.to_be_bytes());
                 buf.extend_from_slice(&mac);

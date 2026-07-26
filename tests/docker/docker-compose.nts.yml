@@ -1,0 +1,35 @@
+services:
+  chrony-nts:
+    image: ntp-nts-test
+    networks:
+      nts-lab:
+        ipv4_address: 10.200.0.10
+    cap_add:
+      - SYS_TIME
+
+  ntpsec-rs:
+    image: ntpsec-rs-package
+    command: ntpd-rs -c /dev/null -n -I 0.0.0.0
+    networks:
+      nts-lab:
+        ipv4_address: 10.200.0.20
+    cap_add:
+      - NET_BIND_SERVICE
+
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.runner
+    networks:
+      nts-lab:
+        ipv4_address: 10.200.0.30
+    depends_on:
+      - chrony-nts
+      - ntpsec-rs
+
+networks:
+  nts-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.200.0.0/24

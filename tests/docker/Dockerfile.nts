@@ -1,0 +1,12 @@
+FROM ubuntu:24.04
+RUN apt-get update -qq && \
+    apt-get install -y -qq chrony python3 && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /etc/chrony /var/lib/chrony /var/log/chrony
+RUN openssl req -x509 -newkey rsa:2048 -keyout /etc/chrony/nts-key.pem \
+    -out /etc/chrony/nts-cert.pem -days 365 -nodes \
+    -subj "/CN=nts-test.example.com" && \
+    chmod 644 /etc/chrony/nts-key.pem /etc/chrony/nts-cert.pem
+COPY tests/docker/nts-test.sh /nts-test.sh
+RUN chmod +x /nts-test.sh
+CMD ["/nts-test.sh"]

@@ -1,0 +1,5 @@
+FROM ubuntu:24.04
+RUN apt-get update -qq && apt-get install -y -qq python3 ntpsec && rm -rf /var/lib/apt/lists/*
+COPY tests/docker/test-runner.sh /test-runner.sh
+RUN chmod +x /test-runner.sh
+CMD ["/test-runner.sh"]
