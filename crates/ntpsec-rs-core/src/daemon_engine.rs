@@ -1190,6 +1190,14 @@ impl DaemonEngine {
                 | ConfigOption::Pool {
                     ref addr,
                     ref options,
+                }
+                | ConfigOption::Broadcast {
+                    ref addr,
+                    ref options,
+                }
+                | ConfigOption::Epeer {
+                    ref addr,
+                    ref options,
                 } => {
                     let mode = match opt.directive_name() {
                         "peer" => NtpMode::SymActive,

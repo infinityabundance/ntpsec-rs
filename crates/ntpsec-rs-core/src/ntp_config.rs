@@ -466,6 +466,22 @@ pub enum ConfigOption {
     Mruterlist(bool),
     /// mssntp bool
     Mssntp(bool),
+    /// broadcast address [options]
+    Broadcast {
+        addr: String,
+        options: Vec<String>,
+    },
+    /// broadcastclient [options]
+    BroadcastClient {
+        options: Vec<String>,
+    },
+    /// epeer address [options] (ephemeral symmetric peer)
+    Epeer {
+        addr: String,
+        options: Vec<String>,
+    },
+    /// ident string (identification string)
+    Ident(String),
     /// ntpsigndsocket path
     NtpSigndSocket(String),
     /// pps [unit N] [assert] [clear] [prefer]
@@ -522,6 +538,10 @@ impl ConfigOption {
             Self::BroadcastDelay(_) => "broadcastdelay",
             Self::CallDelay(_) => "calldelay",
             Self::Mruterlist(_) => "mruterlist",
+            Self::Broadcast { .. } => "broadcast",
+            Self::BroadcastClient { .. } => "broadcastclient",
+            Self::Epeer { .. } => "epeer",
+            Self::Ident(_) => "ident",
             Self::Mssntp(_) => "mssntp",
             Self::NtpSigndSocket(_) => "ntpsigndsocket",
             Self::Pps { .. } => "pps",
@@ -892,7 +912,7 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
         return Err(format!("unknown directive '{d}'"));
     }
     match d {
-        "server" | "peer" | "pool" => {
+        "server" | "peer" | "pool" | "broadcast" | "epeer" => {
             if args.is_empty() {
                 return Err(format!("{d} requires an address"));
             }
@@ -911,20 +931,33 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
                     }
                 }
             }
-            let opts: Vec<String> = args[1..].iter().map(|s| s.to_lowercase()).collect();
-            match d {
-                "server" => Ok(ConfigOption::Server {
-                    addr,
-                    options: opts,
-                }),
-                "peer" => Ok(ConfigOption::Peer {
-                    addr,
-                    options: opts,
-                }),
-                _ => Ok(ConfigOption::Pool {
-                    addr,
-                    options: opts,
-                }),
+            if addr.parse::<std::net::IpAddr>().is_ok() || !crate::is_ip_address(&addr) {
+                // IP literal or hostname — parse association options
+                let opts: Vec<String> = args[1..].iter().map(|s| s.to_lowercase()).collect();
+                match d {
+                    "server" => Ok(ConfigOption::Server {
+                        addr,
+                        options: opts,
+                    }),
+                    "peer" => Ok(ConfigOption::Peer {
+                        addr,
+                        options: opts,
+                    }),
+                    "broadcast" => Ok(ConfigOption::Broadcast {
+                        addr,
+                        options: opts,
+                    }),
+                    "epeer" => Ok(ConfigOption::Epeer {
+                        addr,
+                        options: opts,
+                    }),
+                    _ => Ok(ConfigOption::Pool {
+                        addr,
+                        options: opts,
+                    }),
+                }
+            } else {
+                Err(format!("invalid address '{addr}' for directive '{d}'"))
             }
         }
         "restrict" => {
@@ -1395,6 +1428,13 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
                 ConfigOption::Mssntp(v)
             })
             .ok_or("mssntp requires a yes/no value".to_string()),
+        "broadcastclient" => Ok(ConfigOption::BroadcastClient {
+            options: args.to_vec(),
+        }),
+        "ident" => args
+            .first()
+            .ok_or("ident requires a string value".to_string())
+            .map(|s| ConfigOption::Ident(s.clone())),
         "ntpsigndsocket" => args
             .first()
             .ok_or("ntpsigndsocket requires a socket path".to_string())
