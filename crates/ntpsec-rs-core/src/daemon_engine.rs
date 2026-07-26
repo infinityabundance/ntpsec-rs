@@ -800,7 +800,7 @@ pub fn parsed_timecode_to_sample(
 
 /// State for a pooled DNS entry — tracks resolved addresses and refresh timing.
 #[derive(Debug, Clone)]
-struct PoolState {
+pub struct PoolState {
     /// The pool hostname.
     hostname: String,
     /// Port for NTP (123).
@@ -817,17 +817,17 @@ struct PoolState {
 /// Stored in the engine until the shell resolves the hostname
 /// and feeds back the result as DnsResolved/DnsFailed.
 #[derive(Debug, Clone)]
-struct PendingDns {
+pub struct PendingDns {
     /// Unique request ID for matching the resolution result.
-    request_id: u64,
+    pub request_id: u64,
     /// The hostname to resolve.
-    hostname: String,
+    pub hostname: String,
     /// Port for NTP.
-    port: u16,
+    pub port: u16,
     /// Association options parsed from config.
-    opts: AssocOptions,
+    pub opts: AssocOptions,
     /// Whether this was a pool (multiple addresses) or server/peer (single).
-    is_pool: bool,
+    pub is_pool: bool,
 }
 
 /// An NTS-KE handshake job awaiting execution.
