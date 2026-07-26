@@ -647,7 +647,7 @@ fn main() {
                             }
                             Err(IoError::RecvFailed(_)) => break, // EAGAIN — drained
                             Err(e) => {
-                                if iteration.is_multiple_of(100) {
+                                if (iteration) % 100 == 0 {
                                     tracing::debug!("Recv error: {e}");
                                 }
                                 break;
@@ -661,7 +661,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                if iteration.is_multiple_of(100) {
+                if (iteration) % 100 == 0 {
                     tracing::debug!("Poll error: {e}");
                 }
             }
@@ -704,7 +704,7 @@ fn main() {
         }
 
         // ── 3. Periodic status & statistics (every ~10 sec real time) ──
-        if iteration.is_multiple_of(100) {
+        if (iteration) % 100 == 0 {
             tracing::info!(
                 "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm",
                 engine.system.peer_count,

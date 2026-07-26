@@ -345,7 +345,7 @@ pub fn build_control_fragments(
             count: 0,
         };
         let mut buf = msg.encode().to_vec();
-        while !buf.len().is_multiple_of(4) {
+        while (buf.len()) % 4 != 0 {
             buf.push(0);
         }
         fragments.push(buf);
@@ -372,7 +372,7 @@ pub fn build_control_fragments(
         buf.extend_from_slice(&data[offset..offset + chunk_size]);
 
         // Pad to 4-byte boundary (NTPsec MODE_SIX_ALIGNMENT)
-        while !buf.len().is_multiple_of(4) {
+        while (buf.len()) % 4 != 0 {
             buf.push(0);
         }
 

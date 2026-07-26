@@ -250,7 +250,7 @@ impl AuthKeyStore {
         //   ≤ 20 characters → printable ASCII key (used as-is)
         //   > 20 characters → hex-encoded binary key (must be valid hex, or error)
         let key_data = if parts[2].len() > 20 {
-            if parts[2].chars().all(|c| c.is_ascii_hexdigit()) && parts[2].len().is_multiple_of(2) {
+            if parts[2].chars().all(|c| c.is_ascii_hexdigit()) && parts[2].len() % 2 == 0 {
                 hex_decode(parts[2])
                     .map_err(|e| format!("hex decode error for '{}': {}", parts[2], e))?
             } else {

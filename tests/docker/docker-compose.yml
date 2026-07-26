@@ -36,7 +36,7 @@ services:
       context: ../..
       dockerfile: tests/docker/Dockerfile.ntpsec-rs
     command: >
-      ntpd-rs -c /etc/ntp-rs.conf -n -N -I 10.100.0.20
+      ntpd-rs -c /etc/ntp-rs.conf -n -I 10.100.0.20
     volumes:
       - ./ntp-rs.conf:/etc/ntp-rs.conf:ro
     networks:
@@ -45,6 +45,7 @@ services:
     cap_add:
       - SYS_TIME
       - NET_ADMIN
+      - NET_BIND_SERVICE
     depends_on:
       - ntpsec-oracle
 

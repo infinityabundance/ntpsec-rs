@@ -25,6 +25,7 @@ use std::time::Duration;
 
 /// Port for the daemon (must be > 1024 since we're not root)
 const DAEMON_PORT: u16 = 12345;
+const DAEMON_PORT2: u16 = 12347;
 
 /// Port for our fake NTP server
 const SERVER_PORT: u16 = 12346;
@@ -255,6 +256,34 @@ fn test_daemon_binary_responds_to_ntp_query() {
         "Mode 6 response must contain version=: {body_str}"
     );
 
+    // Test: reference ntpq binary (informational — format parity check)
+    if std::process::Command::new("which")
+        .arg("ntpq")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let rv_out = std::process::Command::new("ntpq")
+            .arg("-c")
+            .arg("rv")
+            .arg(format!("127.0.0.1:{DAEMON_PORT}"))
+            .output();
+        match rv_out {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                eprintln!(
+                    "  Reference ntpq rv: {}",
+                    if text.is_empty() {
+                        "(empty — likely port syntax not supported)"
+                    } else {
+                        &text
+                    }
+                );
+            }
+            Err(e) => eprintln!("  Reference ntpq error: {e}"),
+        }
+    }
+
     // Kill daemon
     daemon.kill().ok();
     daemon.wait().ok();
@@ -266,12 +295,12 @@ fn test_daemon_binary_responds_to_ntp_query() {
 
 #[test]
 fn test_daemon_binary_starts_with_minimal_config() {
-    // Create minimal config
-    let config = r#"
-server 127.0.0.1 minpoll 6 maxpoll 6
+    // Create minimal config with high port
+    let config = r#"server 127.0.0.1 minpoll 6 maxpoll 6
 restrict default ignore
 restrict 127.0.0.1
-"#;
+"#
+    .to_string();
     let config_dir = std::env::temp_dir().join("ntp-test-minimal");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_path = config_dir.join("ntp.conf");
@@ -283,7 +312,7 @@ restrict 127.0.0.1
         .arg(config_path.to_str().unwrap())
         .arg("-n")
         .arg("-I")
-        .arg(format!("127.0.0.1:{DAEMON_PORT}"))
+        .arg(format!("127.0.0.1:{DAEMON_PORT2}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

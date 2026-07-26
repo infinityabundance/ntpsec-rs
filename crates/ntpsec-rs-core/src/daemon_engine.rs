@@ -1912,7 +1912,7 @@ impl DaemonEngine {
         // ── Periodic stats writes (every 10 iterations) ───────────────
         // Emit AppendStatistic actions for the shell to handle.
         self.stats_write_counter += 1;
-        if self.stats_write_counter.is_multiple_of(10) {
+        if (self.stats_write_counter) % 10 == 0 {
             if let Some(ref _stats_dir) = self.stats_dir {
                 // Format loopstats line
                 let loop_line = self
@@ -2308,12 +2308,12 @@ impl DaemonEngine {
             self.system.sys_wander = self.loop_filter.wander;
 
             // Persist drift periodically
-            if self.loop_filter.update_count.is_multiple_of(100) {
+            if (self.loop_filter.update_count) % 100 == 0 {
                 actions.push(DaemonAction::PersistDrift(self.loop_filter.frequency_ppm()));
             }
 
             // Log status periodically
-            if self.loop_filter.update_count.is_multiple_of(10) {
+            if (self.loop_filter.update_count) % 10 == 0 {
                 actions.push(DaemonAction::Log(format!(
                     "status peers={} stratum={} offset={:.6}s freq={:.3}ppm jitter={:.6}s",
                     self.system.peer_count,
@@ -5187,7 +5187,7 @@ mod tests {
         let mut packet = header.to_vec();
         packet.extend_from_slice(&body);
         // Pad to 4-byte boundary
-        while !packet.len().is_multiple_of(4) {
+        while (packet.len()) % 4 != 0 {
             packet.push(0);
         }
         // Append key ID and MAC
@@ -6820,7 +6820,7 @@ mod tests {
         let mut packet = msg.encode().to_vec();
         packet.extend_from_slice(body.as_bytes());
         // Pad to 4-byte boundary
-        while !packet.len().is_multiple_of(4) {
+        while (packet.len()) % 4 != 0 {
             packet.push(0);
         }
 
@@ -6840,7 +6840,7 @@ mod tests {
 
         let mut packet2 = msg2.encode().to_vec();
         packet2.extend_from_slice(body.as_bytes());
-        while !packet2.len().is_multiple_of(4) {
+        while (packet2.len()) % 4 != 0 {
             packet2.push(0);
         }
 
@@ -6860,7 +6860,7 @@ mod tests {
 
         let mut packet3 = msg3.encode().to_vec();
         packet3.extend_from_slice(body.as_bytes());
-        while !packet3.len().is_multiple_of(4) {
+        while (packet3.len()) % 4 != 0 {
             packet3.push(0);
         }
 
@@ -6881,7 +6881,7 @@ mod tests {
 
         let mut packet4 = msg4.encode().to_vec();
         packet4.extend_from_slice(body.as_bytes());
-        while !packet4.len().is_multiple_of(4) {
+        while (packet4.len()) % 4 != 0 {
             packet4.push(0);
         }
 

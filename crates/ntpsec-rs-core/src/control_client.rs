@@ -275,7 +275,7 @@ pub struct AssociationStatus {
 
 impl AssociationStatus {
     pub fn from_bytes(data: &[u8]) -> Result<Vec<Self>, QueryError> {
-        if !data.len().is_multiple_of(4) {
+        if (data.len()) % 4 != 0 {
             return Err(QueryError::BadResponse(format!(
                 "READSTAT data length {} not multiple of 4",
                 data.len()

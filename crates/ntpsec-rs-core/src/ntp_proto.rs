@@ -1121,7 +1121,7 @@ pub fn split_packet_tail(
         // Validate extension field length (RFC 5905 §7.3):
         // - Must be >= 4 (the length includes the 4-byte type+length header)
         // - Must be a multiple of 4 (4-byte alignment)
-        if length < 4 || !(length as usize).is_multiple_of(4) {
+        if length < 4 || (length as usize) % 4 != 0 {
             break;
         }
 
