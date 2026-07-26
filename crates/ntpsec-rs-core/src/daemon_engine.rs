@@ -2494,13 +2494,9 @@ impl DaemonEngine {
 
         // 5. Branch on mode with contextual expectations
         match mode {
-            // ─── Client request → respond as server ────────────────────────
+            // ─── Client request → respond as server (matching NTPsec: always
+            //     respond even when unsynchronized, with stratum=16, leap=alarm)
             NtpMode::Client | NtpMode::SymActive => {
-                if self.system.stratum >= NTP_MAXSTRAT {
-                    self.system.server_counters.declined =
-                        self.system.server_counters.declined.saturating_add(1);
-                    return vec![]; // Not synchronized yet
-                }
                 self.system.server_counters.received =
                     self.system.server_counters.received.saturating_add(1);
 
