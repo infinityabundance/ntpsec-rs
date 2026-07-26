@@ -7,6 +7,8 @@
 #   cd ntpsec-rs
 #   docker compose -f tests/docker/docker-compose.yml up --build
 #   docker compose -f tests/docker/docker-compose.yml logs -f oracle
+#
+# CI: Runs as part of the oracle job in .github/workflows/ci.yml
 
 services:
   # NTPsec reference daemon (the oracle)
@@ -15,13 +17,15 @@ services:
     command: >
       bash -c "
         apt-get update -qq &&
-        apt-get install -y -qq ntpsec ntpsec-ntpdig python3 &&
+        apt-get install -y -qq ntpsec python3 &&
+        sleep 2 &&
         ntpd -c /etc/ntp-oracle.conf -n -N
       "
     volumes:
       - ./ntp-oracle.conf:/etc/ntp-oracle.conf:ro
     networks:
-      - ntp-lab
+      ntp-lab:
+        ipv4_address: 10.100.0.10
     cap_add:
       - SYS_TIME
       - NET_ADMIN
@@ -32,26 +36,26 @@ services:
       context: ../..
       dockerfile: tests/docker/Dockerfile.ntpsec-rs
     command: >
-      ntpsec-rs-d -c /etc/ntp-rs.conf -n -N
+      ntpd-rs -c /etc/ntp-rs.conf -n -N -I 10.100.0.20
     volumes:
       - ./ntp-rs.conf:/etc/ntp-rs.conf:ro
     networks:
-      - ntp-lab
+      ntp-lab:
+        ipv4_address: 10.100.0.20
     cap_add:
       - SYS_TIME
       - NET_ADMIN
+    depends_on:
+      - ntpsec-oracle
 
   # Synthetic packet generator for differential testing
   harness:
     build:
       context: ../..
-      dockerfile: tests/docker/Dockerfile.ntpsec-rs
-    command: >
-      python3 /tests/docker/oracle_harness.py
-    volumes:
-      - .:/tests/docker:ro
+      dockerfile: tests/docker/Dockerfile.harness
     networks:
-      - ntp-lab
+      ntp-lab:
+        ipv4_address: 10.100.0.30
     depends_on:
       - ntpsec-oracle
       - ntpsec-rs

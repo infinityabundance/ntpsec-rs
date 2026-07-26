@@ -1,7 +1,7 @@
-FROM rust:1.75-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p ntpsec-rs-d -p ntpsec-rs-query -p ntpsec-rs-dig
+RUN cargo build --release -p ntpsec-rs-d -p ntpsec-rs-query -p ntpsec-rs-dig 2>&1
 
 FROM debian:bookworm-slim
 RUN apt-get update -qq && apt-get install -y -qq libc6 python3 && rm -rf /var/lib/apt/lists/*

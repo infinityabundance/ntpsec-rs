@@ -24,6 +24,9 @@
 //
 // =============================================================================
 
+// Allow manual is_multiple_of (stable Rust doesn't have the fn, nightly clippy wants it)
+#![allow(clippy::manual_is_multiple_of)]
+
 // ──── Re-exports ────────────────────────────────────────────────────────────
 // The facade crate re-exports the public API.  Here we just define it.
 

@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)]
+
 // ──── ntpd-rs — NTPsec daemon ────────────────────────────────────────────
 //
 // Forensic Rust reconstruction of ntpd.  Phase 2.5A: process lifecycle,

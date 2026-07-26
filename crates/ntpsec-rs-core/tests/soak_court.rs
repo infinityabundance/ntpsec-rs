@@ -39,8 +39,8 @@ struct PeerSpec {
 struct MockClock {
     now: NtpTs64,
     freq_ppm: f64,
-    adjustments: u64,
-    steps: u64,
+    corrections: u64, // total non-step corrections (slew/kernelslew)
+    steps: u64,       // total step corrections
     last_offset: f64,
 }
 
@@ -49,7 +49,7 @@ impl MockClock {
         Self {
             now: start,
             freq_ppm: 0.0,
-            adjustments: 0,
+            corrections: 0,
             steps: 0,
             last_offset: 0.0,
         }
@@ -64,15 +64,8 @@ impl MockClock {
             self.now.seconds += 1;
         }
     }
-}
 
-impl SystemClock for MockClock {
-    fn now(&self) -> NtpTs64 {
-        self.now
-    }
-    fn step(&mut self, offset: f64) -> Result<(), IoError> {
-        self.steps += 1;
-        self.last_offset = offset;
+    fn apply_ntp_offset(&mut self, offset: f64) {
         let s = offset.trunc() as i64;
         let f = (offset.fract() * NTP_FRAC_PER_SEC as f64) as i64;
         self.now.seconds += s;
@@ -86,13 +79,25 @@ impl SystemClock for MockClock {
             let ff = (-f) as u32;
             self.now.fraction = self.now.fraction.wrapping_sub(ff);
         }
+    }
+}
+
+impl SystemClock for MockClock {
+    fn now(&self) -> NtpTs64 {
+        self.now
+    }
+    fn step(&mut self, offset: f64) -> Result<(), IoError> {
+        self.steps += 1;
+        self.last_offset = offset;
+        self.apply_ntp_offset(offset);
         Ok(())
     }
     fn slew(&mut self, offset: f64, freq: f64) -> Result<(), IoError> {
-        self.adjustments += 1;
+        self.corrections += 1;
         self.last_offset = offset;
         self.freq_ppm = freq;
-        self.step(offset)
+        self.apply_ntp_offset(offset);
+        Ok(())
     }
     fn read_frequency(&self) -> Result<f64, IoError> {
         Ok(self.freq_ppm)
@@ -266,14 +271,19 @@ fn test_soak_10000_cycles() {
                         for r in &results {
                             if let DaemonAction::AdjustClock(adj) = r {
                                 match adj {
-                                    Adjustment::Step(offset)
-                                    | Adjustment::Slew(offset, _)
-                                    | Adjustment::KernelSlew(offset, _) => {
+                                    Adjustment::Step(offset) => {
                                         total_adjustments += 1;
-                                        if let Adjustment::Step(_) = adj {
-                                            total_steps += 1;
-                                        }
+                                        total_steps += 1;
                                         let _ = clock.step(*offset);
+                                        let abs_off = offset.abs();
+                                        if abs_off > max_offset {
+                                            max_offset = abs_off;
+                                        }
+                                    }
+                                    Adjustment::Slew(offset, freq)
+                                    | Adjustment::KernelSlew(offset, freq) => {
+                                        total_adjustments += 1;
+                                        let _ = clock.slew(*offset, *freq);
                                         let abs_off = offset.abs();
                                         if abs_off > max_offset {
                                             max_offset = abs_off;
@@ -289,14 +299,18 @@ fn test_soak_10000_cycles() {
                     }
                 }
                 DaemonAction::AdjustClock(adj) => match adj {
-                    Adjustment::Step(offset)
-                    | Adjustment::Slew(offset, _)
-                    | Adjustment::KernelSlew(offset, _) => {
+                    Adjustment::Step(offset) => {
                         total_adjustments += 1;
-                        if let Adjustment::Step(_) = adj {
-                            total_steps += 1;
-                        }
+                        total_steps += 1;
                         let _ = clock.step(*offset);
+                        let abs_off = offset.abs();
+                        if abs_off > max_offset {
+                            max_offset = abs_off;
+                        }
+                    }
+                    Adjustment::Slew(offset, freq) | Adjustment::KernelSlew(offset, freq) => {
+                        total_adjustments += 1;
+                        let _ = clock.slew(*offset, *freq);
                         let abs_off = offset.abs();
                         if abs_off > max_offset {
                             max_offset = abs_off;
@@ -582,7 +596,7 @@ fn test_soak_holdover_500_cycles() {
     }
     assert!(synced, "sync before holdover");
     let holdover_start = clock.now().seconds;
-    let pre_holdover_calls = clock.adjustments;
+    let pre_holdover_calls = clock.corrections;
 
     // Phase 2: 500 cycles with no responses (holdover)
     for cycle in 0..500 {
@@ -612,7 +626,7 @@ fn test_soak_holdover_500_cycles() {
     let holdover_secs = holdover_end - holdover_start;
     eprintln!(
         "✓ Holdover: {holdover_secs}s simulated ({holdover_secs}s real, adj={}, sync={})",
-        clock.adjustments - pre_holdover_calls,
+        clock.corrections - pre_holdover_calls,
         engine.system.sys_peer_associd,
     );
 

@@ -1,7 +1,8 @@
 // ──── tests/daemon_process_court.rs ──────────────────────────────────────
-// Gate 1: Real daemon process court
+// Gate 1: Full daemon-stack hermetic integration court
 //
-// Proves the COMPLETE daemon path through actual trait boundaries:
+// Proves the COMPLETE daemon path through actual trait boundaries
+// (SystemClock, NetworkIo, StateStore), not direct event injection:
 //
 //   configuration → peer mobilization → timer expiry
 //   → engine.tick() produces Send action
@@ -11,6 +12,10 @@
 //   → engine.handle() processes response
 //   → offset/delay calculation → clock filter → selection
 //   → system peer → discipline → clock adjustment (exactly once)
+//
+// NOTE: This is an in-process hermetic court — it does NOT spawn
+// the actual ntpd-rs binary. The true daemon-process-level court
+// requires Docker/VM infrastructure (tests/docker/).
 //
 // Run: cargo test --test daemon_process_court -p ntpsec-rs-core -- --nocapture
 // =============================================================================
