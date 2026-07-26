@@ -72,7 +72,7 @@ signal handling (SIGHUP reopen, SIGTERM clean shutdown), privilege dropping
 full signal-handling coverage and some paths/log-file rotation behaviors.
 
 **Surface 6 — Observable compatibility (82-88%)**
-Packet-level byte parity is verified through the Docker oracle (25+ scenarios).
+Packet-level byte parity is verified through the Docker oracle (40+ scenarios).
 ntpq output parity is verified against reference NTPsec ntpd. The `ntpdig`
 output format matches NTPsec. Exit codes follow NTPsec conventions. Remaining
 gap: formatted output differences in edge cases and deprecated output modes.
@@ -81,7 +81,7 @@ gap: formatted output differences in edge cases and deprecated output modes.
 
 The following concrete evidence supports the surfaces above:
 
-- **Docker oracle (two-sided)**: 25+ scenarios comparing ntpsec-rs against NTPsec
+- **Docker oracle (two-sided)**: 40+ scenarios comparing ntpsec-rs against NTPsec
   byte-for-byte in isolated network namespaces. Each scenario exercises a specific
   combination of protocol, configuration, and authentication mode. See
   [`tests/docker/docker-compose.yml`](../tests/docker/docker-compose.yml).

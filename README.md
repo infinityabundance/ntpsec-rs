@@ -21,9 +21,10 @@ to classify where NTPsec policy differs from generic protocol truth.
 
 ## Project status: Release candidate — ~96% implementation completeness
 
-`ntpsec-rs` v0.3.48 is a **late-stage NTPsec replacement candidate**. Every
-core timediscipline path — client, server, symmetric peer, broadcast, NTS,
-Mode 6 control — is ported, tested, and differentially verified.
+`ntpsec-rs` v0.3.48 is a **late-stage NTPsec replacement candidate**. Core
+client, server, selection, discipline, Mode 6, authentication, DNS, and NTS
+paths are implemented and tested. Twenty-five high-value behaviors are
+currently sealed through two-sided NTPsec differential oracle courts.
 
 **Key milestones achieved:**
 
@@ -33,7 +34,7 @@ Mode 6 control — is ported, tested, and differentially verified.
 | Autonomous peer loss and reacquisition | ✅ | Soak court verifies peer lifecycle without external orchestration |
 | Exactly-once clock boundary | ✅ | Clock step/slew boundary verified: no missed ticks, no double-apply |
 | Real daemon binary process court | ✅ | Daemon binary court exercises full init→serve→shutdown cycle |
-| Docker oracle (two-sided comparison) | ✅ | 25+ scenarios: ntpsec-rs vs NTPsec byte-for-byte comparison |
+| Docker oracle (two-sided comparison) | ✅ | 40+ scenarios: ntpsec-rs vs NTPsec byte-for-byte comparison |
 | Package swap proven | ✅ | CI job installs ntpsec-rs .deb packages over NTPsec, verifies protocol equivalence |
 | NTS-KE interop with chrony | ✅ | Docker topology validates NTS-KE handshake with chrony as reference |
 | Reference ntpq connectivity | ✅ | ntpq output parity verified against real NTPsec ntpd |
@@ -210,7 +211,7 @@ All gates are hard — a failure in any job blocks the PR.
 ### Docker Oracle Laboratory
 
 ```bash
-# Two-sided comparison (ntpsec-rs vs NTPsec, 25+ scenarios)
+# Two-sided comparison (ntpsec-rs vs NTPsec, 40+ scenarios)
 docker compose -f tests/docker/docker-compose.yml up --build
 docker compose -f tests/docker/docker-compose.yml logs -f oracle
 

@@ -66,6 +66,26 @@ def make_ntp_packet(mode=3, version=4, stratum=2, poll=6, precision=-20,
 # ---- Mode 6 helpers ----
 
 
+def make_mode6_packet(opcode=2, seq=1, associd=0, data=b"", key_id=None):
+    """Build a Mode 6 query packet as raw bytes, optionally with auth.
+
+    Returns a byte string suitable for sending over UDP.
+    """
+    pkt = struct.pack("!BBHHHH",
+                      0x1E,  # LI=0, VN=4, mode=6
+                      opcode,
+                      0,     # seq hi
+                      seq,   # seq lo
+                      0,     # status
+                      associd)
+    pkt += struct.pack("!HH", 0, len(data))
+    pkt += data
+    if key_id is not None:
+        # Append 20-byte auth: 4-byte key ID + 16-byte MAC (MD5-size)
+        pkt += struct.pack("!I", key_id) + b"\x00" * 16
+    return pkt
+
+
 def query_mode6(host, port=123, associd=0):
     """Send Mode 6 READVAR, return parsed response."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -106,12 +126,16 @@ def query_mode6(host, port=123, associd=0):
         return {"error": str(e)}
 
 
-def send_mode6(host, port=123, opcode=2, associd=0, data=b""):
+def send_mode6(host, port=123, opcode=2, associd=0, data=b"", seq=1, key_id=None):
     """Send a generic Mode 6 query and return parsed response.
 
     Supports arbitrary opcodes (READVAR=2, READ_ORDLIST_A=5, WRITEVAR=6, etc.)
     and optional payload bytes in *data* (appended after the offset/count
     header fields).
+
+    *seq* controls the sequence number in the packet header.
+    If *key_id* is not None, a 20-byte authentication block
+    (key_id + 16-byte MD5-size MAC) is appended.
 
     Returns a dict with keys:
       - on success: status, associd, raw_length, raw_data (hex),
@@ -120,7 +144,6 @@ def send_mode6(host, port=123, opcode=2, associd=0, data=b""):
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(5)
-    seq = 1
     msg = struct.pack("!BBHHHH",
                       0x1E,  # LI=0, VN=4, mode=6
                       opcode,
@@ -130,6 +153,8 @@ def send_mode6(host, port=123, opcode=2, associd=0, data=b""):
                       associd)
     msg += struct.pack("!HH", 0, len(data))
     msg += data
+    if key_id is not None:
+        msg += struct.pack("!I", key_id) + b"\x00" * 16
     try:
         sock.sendto(msg, (host, port))
         resp, _ = sock.recvfrom(4096)
@@ -296,12 +321,13 @@ def test_scenario(name, pkt, oracle_host, candidate_host):
     return scenario_result, entries
 
 
-def test_mode6_scenario(name, oracle_host, candidate_host, opcode=2, associd=0, data=b""):
+def test_mode6_scenario(name, oracle_host, candidate_host, opcode=2, associd=0, data=b"",
+                       seq=1, key_id=None):
     """Run a Mode 6 query scenario, comparing responses from both daemons."""
     print(f"  [{name}] ", end="", flush=True)
 
-    oracle_resp = send_mode6(oracle_host, MODE6_PORT, opcode, associd, data)
-    candidate_resp = send_mode6(candidate_host, MODE6_PORT, opcode, associd, data)
+    oracle_resp = send_mode6(oracle_host, MODE6_PORT, opcode, associd, data, seq, key_id)
+    candidate_resp = send_mode6(candidate_host, MODE6_PORT, opcode, associd, data, seq, key_id)
 
     entries = []
     scenario_result = {"scenario": name, "fields": []}
@@ -477,6 +503,40 @@ def main():
         # Reserved extension field type 0xFFFF
         ("Packet with reserved extension field type",
          make_ntp_packet(mode=3, transmit_ts=1014.0) + struct.pack("!HH", 0xFFFF, 4)),
+
+        # --- 30-31: Reserved version numbers ---
+        ("Packet with VN=0 (reserved)",
+         make_ntp_packet(mode=3, version=0, transmit_ts=1015.0)),
+        ("Packet with VN=7 (reserved)",
+         make_ntp_packet(mode=3, version=7, transmit_ts=1016.0)),
+
+        # --- 32: Reserved mode ---
+        ("Packet with mode=0 (reserved)",
+         make_ntp_packet(mode=0, transmit_ts=1017.0)),
+
+        # --- 33-34: Timestamp edge cases ---
+        # Patch transmit timestamp to wire-protocol 0
+        ("Very old timestamp (timestamp=0)",
+         make_ntp_packet(mode=3, transmit_ts=1018.0)[:40] + struct.pack("!II", 0, 0)),
+        # Patch transmit timestamp seconds to max u32
+        ("Very future timestamp (timestamp=4294967295, max u32)",
+         make_ntp_packet(mode=3, transmit_ts=1019.0)[:40] + struct.pack("!II", 4294967295, 0)),
+
+        # --- 35: Root delay saturation ---
+        ("Root delay = max u32 (saturated)",
+         make_ntp_packet(mode=3, transmit_ts=1020.0)[:4] + struct.pack("!I", 4294967295) + make_ntp_packet(mode=3, transmit_ts=1020.0)[8:]),
+
+        # --- 36-37: Poll interval edge cases ---
+        ("Poll interval = 0 (min)",
+         make_ntp_packet(mode=3, poll=0, transmit_ts=1021.0)),
+        ("Poll interval = 255 (max)",
+         make_ntp_packet(mode=3, poll=255, transmit_ts=1022.0)),
+
+        # --- 38-39: All-zero and all-ones headers ---
+        ("Packet with all-zero header",
+         b"\x00" * 48),
+        ("Packet with all-ones header",
+         b"\xff" * 48),
     ]
 
     all_entries = []
@@ -491,6 +551,15 @@ def main():
     time.sleep(1)
 
     mode6_scenarios = [
+        # --- 26-27: Authenticated Mode 6 queries ---
+        ("Authenticated Mode 6 READVAR with correct keyid", 2, 0, b"", 1, 1),
+        ("Authenticated Mode 6 READVAR with wrong key", 2, 0, b"", 1, 99999),
+
+        # --- 28-29: Mode 6 sequence number edge cases ---
+        ("Mode 6 with invalid seq number (SEQ=0)", 2, 0, b"", 0),
+        ("Mode 6 with max seq number (SEQ=65535)", 2, 0, b"", 65535),
+
+        # --- 18-23: Original Mode 6 query scenarios ---
         ("Mode 6 READVAR (associd=0) — system variables", 2, 0, b""),
         ("Mode 6 READVAR (associd=1) — peer variables", 2, 1, b""),
         ("Mode 6 READVAR (associd=65535) — invalid associd", 2, 65535, b""),
@@ -499,10 +568,17 @@ def main():
         ("Mode 6 unauthenticated WRITEVAR", 6, 0, b"minpoll=4"),
     ]
 
-    for m6_name, opcode, associd, data in mode6_scenarios:
+    for item in mode6_scenarios:
+        m6_name = item[0]
+        opcode = item[1]
+        associd = item[2]
+        data = item[3]
+        seq = item[4] if len(item) > 4 else 1
+        key_id = item[5] if len(item) > 5 else None
         time.sleep(0.3)
         result, entries = test_mode6_scenario(m6_name, ORACLE_HOST, RS_HOST,
-                                              opcode=opcode, associd=associd, data=data)
+                                              opcode=opcode, associd=associd,
+                                              data=data, seq=seq, key_id=key_id)
         ledger["scenarios"].append(result)
         all_entries.extend(entries)
 
@@ -559,6 +635,18 @@ def main():
         multi_pkts, ORACLE_HOST, RS_HOST)
     ledger["scenarios"].append(result_25)
     all_entries.extend(entries_25)
+
+    # --- 40: Multiple back-to-back queries (3 packets with 10ms gaps) ---
+    print("\n[2d] Running back-to-back query scenario...")
+    time.sleep(0.5)
+    b2b_pkts = []
+    for i, ts in enumerate([3001.0, 3002.0, 3003.0]):
+        b2b_pkts.append((f"ts={ts}", make_ntp_packet(mode=3, transmit_ts=ts)))
+    result_40, entries_40 = test_multi_packet_scenario(
+        "Multiple back-to-back queries (3 packets with 10ms gaps)",
+        b2b_pkts, ORACLE_HOST, RS_HOST)
+    ledger["scenarios"].append(result_40)
+    all_entries.extend(entries_40)
 
     # Query synchronized state
     print("\n[3] Querying system state via Mode 6...")

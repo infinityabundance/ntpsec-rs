@@ -204,7 +204,7 @@ The Docker oracle runs side-by-side comparison in three configurations:
 
 The oracle harness (`oracle_harness.py`) feeds identical synthetic NTP packet
 streams to both daemons and compares their state transitions and responses.
-25+ scenarios covering:
+40+ scenarios covering:
 - Basic client/server synchronization
 - Symmetric peer mode
 - NTS-KE + NTP-over-NTS
@@ -213,6 +213,14 @@ streams to both daemons and compares their state transitions and responses.
 - Broadcast client mode
 - Authentication (symmetric key)
 - Multiple server selection
+- Reserved/edge version numbers (VN=0, VN=7)
+- Reserved mode (mode=0)
+- Timestamp edge cases (epoch 0, max u32)
+- Protocol field saturations (root delay, poll interval)
+- All-zero and all-ones headers
+- Sequence number edge cases (SEQ=0, SEQ=65535)
+- Authenticated and unauthenticated Mode 6 queries
+- Back-to-back packet bursts
 - Pool DNS resolution
 
 ### 2. NTS-KE interop (docker-compose.nts.yml)
