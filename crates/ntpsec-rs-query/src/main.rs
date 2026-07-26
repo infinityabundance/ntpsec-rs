@@ -66,10 +66,15 @@ enum CliCommand {
     ReadVar { associd: u16 },
     Associations,
     Peers,
+    ActivePeers,
+    ListPeers,
     MruList,
     Monitor,
     Trace,
     SysInfo,
+    KernInfo,
+    AuthInfo,
+    ClockVar { associd: u16 },
 }
 
 fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
@@ -78,7 +83,6 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
 
     match command {
         "rv" => {
-            // Extra arguments are an error
             let associd_str = words.next();
             if words.next().is_some() {
                 return Err(format!(
@@ -101,10 +105,29 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
         }
         "associations" | "as" => Ok(CliCommand::Associations),
         "peers" | "pe" => Ok(CliCommand::Peers),
+        "apeers" | "ape" => Ok(CliCommand::ActivePeers),
+        "lpeers" | "lpe" => Ok(CliCommand::ListPeers),
         "mrulist" => Ok(CliCommand::MruList),
         "monitor" | "ntpmon" => Ok(CliCommand::Monitor),
         "trace" | "ntptrace" => Ok(CliCommand::Trace),
         "sysinfo" => Ok(CliCommand::SysInfo),
+        "kerninfo" => Ok(CliCommand::KernInfo),
+        "authinfo" => Ok(CliCommand::AuthInfo),
+        "clockvar" | "cv" => {
+            let associd_str = words.next();
+            if words.next().is_some() {
+                return Err(format!(
+                    "too many arguments for 'clockvar': expected 0 or 1 associd"
+                ));
+            }
+            let associd = match associd_str {
+                Some(a) => a
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid associd: '{a}'"))?,
+                None => 0u16,
+            };
+            Ok(CliCommand::ClockVar { associd })
+        }
         _ => Err(format!("unknown command: {command}")),
     }
 }
@@ -273,6 +296,107 @@ fn main() {
                 .read_system_vars(&cli.host, cli.port)
                 .map(|sys| format_sysinfo(&sys))
                 .map_err(|e| format!("{e}")),
+            Ok(CliCommand::ActivePeers) => {
+                let assoc_result = client.read_associations(&cli.host, cli.port);
+                match assoc_result {
+                    Ok(assocs) => {
+                        let mut rows = Vec::new();
+                        for a in &assocs {
+                            if !a.reachable {
+                                continue;
+                            }
+                            match client.read_peer_vars(&cli.host, cli.port, a.associd) {
+                                Ok(pv) => rows.push(PeerRow::from_association(&pv, a)),
+                                Err(_) => {}
+                            }
+                        }
+                        Ok(format_peers(&rows))
+                    }
+                    Err(e) => Err(format!("{e}")),
+                }
+            }
+            Ok(CliCommand::ListPeers) => {
+                let assoc_result = client.read_associations(&cli.host, cli.port);
+                match assoc_result {
+                    Ok(assocs) => {
+                        let mut rows = Vec::new();
+                        for a in &assocs {
+                            match client.read_peer_vars(&cli.host, cli.port, a.associd) {
+                                Ok(pv) => rows.push(PeerRow::from_association(&pv, a)),
+                                Err(_) => {}
+                            }
+                        }
+                        Ok(format_peers(&rows))
+                    }
+                    Err(e) => Err(format!("{e}")),
+                }
+            }
+            Ok(CliCommand::KernInfo) => client
+                .read_system_vars(&cli.host, cli.port)
+                .map(|sys| {
+                    let mut out = String::from("=== Kernel Information ===\n");
+                    let fields = [
+                        "offset",
+                        "frequency",
+                        "sys_jitter",
+                        "clk_wander",
+                        "rootdelay",
+                        "rootdisp",
+                        "tc",
+                        "mintc",
+                        "precision",
+                        "stratum",
+                    ];
+                    for k in &fields {
+                        if let Some(v) = sys.get(k) {
+                            out.push_str(&format!("  {:<20} = {}\n", k, v));
+                        }
+                    }
+                    out
+                })
+                .map_err(|e| format!("{e}")),
+            Ok(CliCommand::AuthInfo) => client
+                .read_system_vars(&cli.host, cli.port)
+                .map(|sys| {
+                    let mut out = String::from("=== Authentication Information ===\n");
+                    let fields = [
+                        "auth_badauth",
+                        "auth_badkey",
+                        "auth_decrypts",
+                        "auth_encrypts",
+                        "auth_foundkey",
+                        "auth_notfound",
+                        "auth_reset",
+                        "auth_type",
+                        "auth_flags",
+                        "auth_keys",
+                        "auth_keyno",
+                    ];
+                    for k in &fields {
+                        if let Some(v) = sys.get(k) {
+                            out.push_str(&format!("  {:<20} = {}\n", k, v));
+                        }
+                    }
+                    out
+                })
+                .map_err(|e| format!("{e}")),
+            Ok(CliCommand::ClockVar { associd }) => if associd == 0 {
+                client
+                    .read_system_vars(&cli.host, cli.port)
+                    .map(|sys| format_readvar(&sys))
+            } else {
+                client
+                    .read_peer_vars(&cli.host, cli.port, associd)
+                    .map(|pv| {
+                        format!(
+                            "associd={} {} {}",
+                            associd,
+                            pv.get("offset").unwrap_or("?"),
+                            pv.get("delay").unwrap_or("?")
+                        )
+                    })
+            }
+            .map_err(|e| format!("{e}")),
         };
 
         match result {
