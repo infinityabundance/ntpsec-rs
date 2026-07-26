@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.29"
+version = "0.3.32"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ntpsec-rs contributors"]
