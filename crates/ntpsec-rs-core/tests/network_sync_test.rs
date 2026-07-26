@@ -596,3 +596,122 @@ fn test_network_sync_offset_trajectory_converges() {
         "At least one clock adjustment must be emitted"
     );
 }
+
+// ──── Workstream 8: DNS and pool lifecycle courts ─────────────────────
+
+#[test]
+fn test_dns_resolved_creates_peer() {
+    // Verifies that a DnsResolved event creates a peer association
+    let config = make_config("127.0.0.1");
+    let mut engine = DaemonEngine::new(config);
+    // Manually add a pending DNS entry
+    let addr = "pool.example.org".to_string();
+    let request_id = 42;
+    engine.pending_dns.push_back(PendingDns {
+        request_id,
+        hostname: addr.clone(),
+        port: 123,
+        opts: AssocOptions::default(),
+        is_pool: true,
+    });
+    let initial_count = engine.peers.len();
+    let resolved_addr = NetAddr::ipv4(0x01010101, 123); // 1.1.1.1
+    let _actions = engine.handle(DaemonEvent::DnsResolved {
+        request_id,
+        addresses: vec![resolved_addr],
+    });
+    assert!(
+        engine.peers.len() > initial_count,
+        "DnsResolved must create a peer"
+    );
+    // Verify the peer was added to the pool resolver
+    assert!(
+        engine.pool_resolver.contains_key(&addr),
+        "Pool hostname must be registered in pool_resolver"
+    );
+}
+
+#[test]
+fn test_dns_resolved_multiple_addresses() {
+    // Verifies that DNS resolution with multiple addresses creates multiple peers
+    let config = make_config("127.0.0.1");
+    let mut engine = DaemonEngine::new(config);
+    let request_id = 43;
+    engine.pending_dns.push_back(PendingDns {
+        request_id,
+        hostname: "pool.example.org".to_string(),
+        port: 123,
+        opts: AssocOptions::default(),
+        is_pool: true,
+    });
+    let initial_count = engine.peers.len();
+    let addrs = vec![
+        NetAddr::ipv4(0x01010101, 123),
+        NetAddr::ipv4(0x02020202, 123),
+        NetAddr::ipv4(0x03030303, 123),
+    ];
+    let _actions = engine.handle(DaemonEvent::DnsResolved {
+        request_id,
+        addresses: addrs,
+    });
+    assert_eq!(
+        engine.peers.len(),
+        initial_count + 3,
+        "DnsResolved with 3 addresses must create 3 peers"
+    );
+}
+
+#[test]
+fn test_dns_failed_removes_pending() {
+    // Verifies that DnsFailed removes the pending DNS entry
+    let config = make_config("127.0.0.1");
+    let mut engine = DaemonEngine::new(config);
+    let request_id = 44;
+    engine.pending_dns.push_back(PendingDns {
+        request_id,
+        hostname: "nonexistent.example.org".to_string(),
+        port: 123,
+        opts: AssocOptions::default(),
+        is_pool: false,
+    });
+    assert_eq!(engine.pending_dns.len(), 1, "Must have 1 pending DNS");
+    let _actions = engine.handle(DaemonEvent::DnsFailed {
+        request_id,
+        error: "NXDOMAIN".to_string(),
+    });
+    assert_eq!(
+        engine.pending_dns.len(),
+        0,
+        "DnsFailed must remove pending entry"
+    );
+}
+
+#[test]
+fn test_pool_refresh_emitted_in_tick() {
+    // Verifies that tick() emits ResolveHostname actions for stale pool entries
+    let config = make_config("127.0.0.1");
+    let mut engine = DaemonEngine::new(config);
+    // Register a pool with expired refresh
+    engine.pool_resolver.insert(
+        "pool.example.org".to_string(),
+        PoolState {
+            hostname: "pool.example.org".to_string(),
+            port: 123,
+            last_refresh: 0,
+            refresh_interval: 10,
+            associds: vec![],
+        },
+    );
+    let now = NtpTs64 {
+        seconds: 100,
+        fraction: 0,
+    };
+    let actions = engine.tick(now);
+    let has_refresh = actions.iter().any(|a| {
+        matches!(a, DaemonAction::ResolveHostname { hostname, .. } if hostname == "pool.example.org")
+    });
+    assert!(
+        has_refresh,
+        "tick() must emit ResolveHostname for stale pool entries"
+    );
+}
