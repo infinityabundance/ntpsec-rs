@@ -7,9 +7,9 @@ Wants=network-online.target
 [Service]
 Type=forking
 EnvironmentFile=-/etc/default/ntpsec-rs
-ExecStart=/usr/sbin/ntpd-rs -c /etc/ntp.conf -p /run/ntpd-rs.pid $DAEMON_OPTS
+ExecStart=/usr/sbin/ntpsec-rs-d -c /etc/ntp.conf -p /run/ntpsec-rs-d.pid $DAEMON_OPTS
 ExecReload=/bin/kill -HUP $MAINPID
-PIDFile=/run/ntpd-rs.pid
+PIDFile=/run/ntpsec-rs-d.pid
 Restart=on-failure
 RestartSec=5
 # Security hardening

@@ -1,0 +1,30 @@
+#!/bin/sh
+# postinst script for ntpsec-rs compatibility symlinks
+#
+# Creates compatibility symlinks so that existing NTPsec-aware scripts
+# and tools work without modification.
+
+set -e
+
+case "$1" in
+    configure)
+        # Daemon compatibility name
+        ln -sf /usr/bin/ntpsec-rs-d /usr/bin/ntpd 2>/dev/null || true
+        ln -sf /usr/sbin/ntpsec-rs-d /usr/sbin/ntpd 2>/dev/null || true
+
+        # Query tool compatibility name
+        ln -sf /usr/bin/ntpsec-rs-query /usr/bin/ntpq 2>/dev/null || true
+
+        # Diagnostics tool compatibility name
+        ln -sf /usr/bin/ntpsec-rs-dig /usr/bin/ntpdig 2>/dev/null || true
+
+        # Monitor tool compatibility name
+        ln -sf /usr/bin/ntpsec-rs-mon /usr/bin/ntpmon 2>/dev/null || true
+
+        # Key generation tool compatibility name
+        ln -sf /usr/bin/ntpsec-rs-keygen /usr/bin/ntpkeygen 2>/dev/null || true
+
+        # Leap file fetch tool
+        ln -sf /usr/bin/ntpsec-rs-leapfetch /usr/bin/ntpleapfetch 2>/dev/null || true
+        ;;
+esac
