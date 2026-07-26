@@ -38,5 +38,9 @@ fn test_version_output() {
         .expect("failed to execute ntpd-rs --version");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("0.3.25"), "version should contain 0.3.25");
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "version should contain {}",
+        env!("CARGO_PKG_VERSION")
+    );
 }
