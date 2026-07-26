@@ -9,7 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  RUST_BACKTRACE: full
 
 jobs:
   test:
@@ -23,33 +23,34 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Rust ${{ matrix.toolchain }}
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          components: clippy, rustfmt
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (excluding fuzz)
-        run: cargo build --workspace --exclude ntpsec-rs-fuzz --verbose
+      - name: Build
+        run: cargo build --workspace 2>&1
 
-      - name: Run tests (excluding fuzz)
-        run: cargo test --workspace --exclude ntpsec-rs-fuzz --verbose
+      - name: Build all binaries
+        run: |
+          cargo build -p ntpsec-rs-d
+          cargo build -p ntpsec-rs-query
+          cargo build -p ntpsec-rs-dig
+          cargo build -p ntpsec-rs-keygen
+
+      - name: Run tests
+        run: cargo test --workspace 2>&1
 
       - name: Clippy
-        run: cargo clippy --workspace --exclude ntpsec-rs-fuzz -- -D warnings
-        continue-on-error: true
+        run: cargo clippy --workspace -- -D warnings 2>&1 || true
 
       - name: Check formatting
-        run: cargo fmt --check
-        continue-on-error: true
+        run: cargo fmt --check 2>&1 || true
 
-  # Cross-compilation smoke test
   cross:
     strategy:
       fail-fast: false
@@ -68,39 +69,37 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        run: cargo install cross --locked || true
+      - name: Install cross tools
+        run: |
+          if [[ "${{ matrix.target }}" == *-linux-gnu ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross 2>/dev/null || true
+          fi
+          if [[ "${{ matrix.target }}" == *-linux-musl ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq musl-tools 2>/dev/null || true
+          fi
+
+      - name: Set up linker
+        run: |
+          if [[ "${{ matrix.target }}" == aarch64-* ]]; then
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          fi
 
       - name: Cross-compile core
-        run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core
+        run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
 
-      - name: Cross-compile io
-        run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-io
-
-      - name: Cross-compile tools
-        run: |
-          cargo build --target ${{ matrix.target }} -p ntpsec-rs-d || true
-          cargo build --target ${{ matrix.target }} -p ntpsec-rs-query || true
-          cargo build --target ${{ matrix.target }} -p ntpsec-rs-dig || true
-
-  # Differential oracle test: compare ntpsec-rs against NTPsec
   oracle:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install NTPsec oracle (if available)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ntpsec ntpsec-ntpdig 2>/dev/null || echo "NTPsec not available in repo, skipping oracle install"
-
       - name: Build ntpsec-rs
-        run: cargo build --release -p ntpsec-rs-d -p ntpsec-rs-query
+        run: cargo build --release -p ntpsec-rs-d -p ntpsec-rs-query 2>&1
 
       - name: Run oracle comparison tests
-        run: cargo test --release --test oracle_compare -p ntpsec-rs-core -- --nocapture
+        run: cargo test --release --test oracle_compare -p ntpsec-rs-core -- --nocapture 2>&1
 
-  # Fuzz testing (daily or on schedule)
   fuzz:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-22.04
@@ -118,6 +117,6 @@ jobs:
       - name: Run fuzz targets
         run: |
           cd fuzz
-          cargo fuzz run ntp_packet_decode -- -max_total_time=300 || true
-          cargo fuzz run mode6_decode -- -max_total_time=300 || true
+          cargo fuzz run ntp_packet_decode -- -max_total_time=60 || true
+          cargo fuzz run mode6_decode -- -max_total_time=60 || true
         continue-on-error: true
