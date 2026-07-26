@@ -4,6 +4,10 @@ services:
     networks:
       nts-lab:
         ipv4_address: 10.200.0.10
+    ports:
+      - "4460:4460"
+    volumes:
+      - nts-certs:/nts-certs:rw
     cap_add:
       - SYS_TIME
 
@@ -23,9 +27,14 @@ services:
     networks:
       nts-lab:
         ipv4_address: 10.200.0.30
+    volumes:
+      - nts-certs:/nts-certs:ro
     depends_on:
       - chrony-nts
       - ntpsec-rs
+
+volumes:
+  nts-certs:
 
 networks:
   nts-lab:

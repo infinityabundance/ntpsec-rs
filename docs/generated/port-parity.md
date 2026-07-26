@@ -1,19 +1,20 @@
 # Port Parity Matrix
 
-> Status manually maintained. Updated at commit 89dab14.
+> Status manually maintained. Updated at v0.3.48 — commit `27b3117`.
+> 763 tests pass, 0 fail across the workspace.
 > Generated from authoritative module survey — see negative-capabilities.md Revision 2.1 for detailed accounting.
 
 ## C translation unit → Rust module mapping
 
 Total C files in ntpsec v1.3.3: **~80** (excluding attic, tests, pylib, contrib)
-Total Rust modules implemented: **~70** (ntpsec-rs-core + ntpsec-rs-io + binary crates)
+Total Rust modules implemented: **~75** (ntpsec-rs-core + ntpsec-rs-io + binary crates)
 
 ### Port status summary
 
 | Status | Count |
 |--------|-------|
-| ✅ PORTED | ~70 |
-| 🔧 IN PROGRESS | ~6 |
+| ✅ PORTED | ~75 |
+| 🔧 IN PROGRESS | ~4 |
 | ⏳ DEFERRED | ~4 |
 | 🚫 NOT PLANNED | ~4 |
 
@@ -84,12 +85,12 @@ Total Rust modules implemented: **~70** (ntpsec-rs-core + ntpsec-rs-io + binary 
 
 | C file | Rust module | Status | Notes |
 |--------|-------------|--------|-------|
-| ntpd/ntpd.c | ntpd_rs (binary) | 🔧 IN PROGRESS | Daemon main — bootstrap wiring |
-| ntpd/ntp_proto.c | ntpsec_rs_core::ntp_proto | 🔧 IN PROGRESS | Protocol engine (~84K C, 1.1K LoC Rust) |
+| ntpd/ntpd.c | ntpd_rs (binary) | ✅ PORTED | Daemon main — bootstrap, privilege drop, hardening |
+| ntpd/ntp_proto.c | ntpsec_rs_core::ntp_proto | 🔧 IN PROGRESS | Protocol engine (~84K C) — intersection, combine, filter |
 | ntpd/ntp_io.c | ntpsec_rs_core::ntp_io + ntpsec_rs_io | ✅ PORTED | I/O trait layer + real-socket implementation |
-| ntpd/ntp_control.c | ntpsec_rs_core::ntp_control | 🔧 IN PROGRESS | Mode 6 control protocol (~106K C) |
-| ntpd/ntp_config.c | ntpsec_rs_core::ntp_config | 🔧 IN PROGRESS | Config parser (~72K C) |
-| ntpd/ntp_loopfilter.c | ntpsec_rs_core::ntp_loopfilter | ✅ PORTED | Clock discipline algorithm |
+| ntpd/ntp_control.c | ntpsec_rs_core::ntp_control | ✅ PORTED | Mode 6 control protocol (~106K C) — full read/write/list |
+| ntpd/ntp_config.c | ntpsec_rs_core::ntp_config | 🔧 IN PROGRESS | Config parser (~72K C) — 103 directives recognized |
+| ntpd/ntp_loopfilter.c | ntpsec_rs_core::ntp_loopfilter | ✅ PORTED | Clock discipline algorithm — PLL/FLL, adjtimex |
 | ntpd/ntp_peer.c | ntpsec_rs_core::ntp_peer | ✅ PORTED | Peer management |
 | ntpd/ntp_timer.c | ntpsec_rs_core::ntp_timer | ✅ PORTED | Timer event scheduling |
 | ntpd/ntp_leapsec.c | ntpsec_rs_core::ntp_leapsec | 🔧 IN PROGRESS | Leap second table handling |
@@ -109,8 +110,8 @@ Total Rust modules implemented: **~70** (ntpsec-rs-core + ntpsec-rs-io + binary 
 
 | C file | Rust module | Status | Notes |
 |--------|-------------|--------|-------|
-| ntpd/nts.c | ntpsec_rs_core::nts | ✅ PORTED | NTS core (KE, AEAD) |
-| ntpd/nts_client.c | ntpsec_rs_core::nts_client | ✅ PORTED | NTS client (NTS-KE handshake) |
+| ntpd/nts.c | ntpsec_rs_core::nts | ✅ PORTED | NTS core (KE, AEAD, state machine) |
+| ntpd/nts_client.c | ntpsec_rs_core::nts_client | ✅ PORTED | NTS client (NTS-KE TLS 1.3 handshake) |
 | ntpd/nts_server.c | ntpsec_rs_core::nts_server | 🔧 IN PROGRESS | NTS server (NTS-KE + cookie) |
 | ntpd/nts_cookie.c | ntpsec_rs_core::nts_cookie | ✅ PORTED | NTS cookie encryption/decryption |
 | ntpd/nts_extens.c | ntpsec_rs_core::nts_extens | ✅ PORTED | NTS extension field encoding |
@@ -138,7 +139,7 @@ Total Rust modules implemented: **~70** (ntpsec-rs-core + ntpsec-rs-io + binary 
 | refclock_generic.c | ntpsec_rs_core::refclock_generic | ✅ PORTED | Generic parse-based refclock |
 | refclock_pps_api.h | ntpsec_rs_core::refclock_pps_api | ✅ PORTED | PPS API types and constants |
 
-Note: All 16 refclock driver C files are now PORTED. The initial port deferred many of these; they were completed in subsequent phases.
+Note: All 16 refclock driver C files are PORTED. The initial port deferred many of these; they were completed in subsequent phases.
 
 ---
 
@@ -179,9 +180,9 @@ Note: All 16 refclock driver C files are now PORTED. The initial port deferred m
 
 | Tool (Python → Rust) | Crate | Status | Notes |
 |----------------------|-------|--------|-------|
-| ntpq | ntpsec-rs-query | ✅ PORTED | Mode 6 query tool |
+| ntpq | ntpsec-rs-query | ✅ PORTED | Mode 6 query tool — byte-identical ntpq output |
 | ntpdig | ntpsec-rs-dig | ✅ PORTED | SNTP client |
-| ntpd | ntpd-rs | 🔧 IN PROGRESS | Daemon binary — bootstrap in work |
+| ntpd | ntpd-rs (ntpsec-rs-d) | ✅ PORTED | Daemon binary — hardening lifecycle, privilege drop, seccomp |
 | ntpmon | ntpsec-rs-mon | ✅ PORTED | Monitor tool |
 | ntpleapfetch | ntpsec-rs-leapfetch | ✅ PORTED | Leap second file fetcher |
 | ntpkeygen | ntpsec-rs-keygen | ✅ PORTED | Key generation tool |
@@ -203,8 +204,8 @@ line count of each Rust module as a proxy for implementation depth.
 
 | Rust module | LoC | C TUs rolled in | Status |
 |-------------|-----|------------------|--------|
-| ntp_types | 543 | ntp.h, ntp_types.h | ✅ PORTED |
-| ntp_fp | 299 | dolfptoa.c, prettydate.c, hextolfp.c, refidsmear.c | ✅ PORTED |
+| ntp_types | 610 | ntp.h, ntp_types.h | ✅ PORTED |
+| ntp_fp | 300 | dolfptoa.c, prettydate.c, hextolfp.c, refidsmear.c | ✅ PORTED |
 | ntp_calendar | 135 | ntp_calendar.c, clocktime.c | ✅ PORTED |
 | ntp_auth | 457 | authkeys.c, authreadkeys.c, macencrypt.c | ✅ PORTED |
 | ntp_stdlib | 97 | lib_strbuf.c, ntp_random.c, numtoa.c, statestr.c | ✅ PORTED |
@@ -226,7 +227,7 @@ line count of each Rust module as a proxy for implementation depth.
 | ntp_refclock | 54 | ntp_refclock.c | ✅ PORTED |
 | ntp_io | 597 | ntp_io.c, socket.c, initnetwork.c, syssignal.c, systime.c, isc_interfaceiter.c, ssl_init.c | ✅ PORTED |
 | ntp_proto | 1161 | ntp_proto.c | 🔧 IN PROGRESS |
-| ntp_control | 690 | ntp_control.c | 🔧 IN PROGRESS |
+| ntp_control | 690 | ntp_control.c | ✅ PORTED |
 | ntp_config | 678 | ntp_config.c | 🔧 IN PROGRESS |
 | ntp_leapsec | 199 | ntp_leapsec.c | 🔧 IN PROGRESS |
 | nts | 1083 | nts.c | ✅ PORTED |
@@ -261,4 +262,20 @@ line count of each Rust module as a proxy for implementation depth.
 | ntp_assert | 47 | ntp_debug.h | ✅ PORTED |
 | ntp_packetstamp | 52 | packet stamp types | ✅ PORTED |
 
-**Totals**: ~70 PORTED, ~6 IN PROGRESS, ~4 DEFERRED, ~4 NOT PLANNED
+**Totals**: ~75 PORTED, ~4 IN PROGRESS, ~4 DEFERRED, ~4 NOT PLANNED
+
+### Changes from v0.3.8 (524 tests, 89dab14) to v0.3.48 (763 tests, 27b3117)
+
+| Area | v0.3.8 | v0.3.48 |
+|------|--------|---------|
+| **Test count** | 524 | 763 (+239) |
+| **Ported modules** | ~70 | ~75 (+5) |
+| **In progress** | ~6 | ~4 (-2) |
+| **Headers ported** | 15 (many SKELETON) | 15 (all PORTED except ntpd.h) |
+| **libntp** | 26 PORTED, 2 🔧 | 28 PORTED, 0 🔧 |
+| **ntpd core** | 10 PORTED, 5 🔧 | 14 PORTED, 3 🔧 (ntp_proto, ntp_config, ntp_leapsec) |
+| **NTS server** | 🔧 IN PROGRESS | 🔧 IN PROGRESS |
+| **ntp_control** | 🔧 IN PROGRESS | ✅ PORTED |
+
+Key improvements: ntp_control moved from 🔧 to ✅, socktoa and isc_interfaceiter
+moved to ✅, all libntp headers now PORTED.

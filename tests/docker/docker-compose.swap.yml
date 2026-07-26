@@ -1,0 +1,30 @@
+# ──── ntpsec-rs Package Swap Test ────────────────────────────────────────────
+#
+# Proves that ntpsec-rs can replace NTPsec on a real Ubuntu 24.04 system.
+# Builds a container, starts NTPsec, verifies it, installs ntpsec-rs .deb
+# packages, stops NTPsec, starts ntpd-rs, and verifies protocol equivalence.
+#
+# Usage:
+#   cd ntpsec-rs
+#   docker compose -f tests/docker/docker-compose.swap.yml up --build
+#   docker compose -f tests/docker/docker-compose.swap.yml down
+# =============================================================================
+
+services:
+  test-swap:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.swap
+    networks:
+      swap-lab:
+        ipv4_address: 10.101.0.10
+    cap_add:
+      - NET_ADMIN
+      - SYS_TIME
+
+networks:
+  swap-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.0.0/24

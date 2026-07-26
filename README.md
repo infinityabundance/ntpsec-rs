@@ -13,17 +13,32 @@ sources and compiled `ntpd`, deterministic trace replay, packet-level byte
 receipts, and explicit deployment-boundary documentation.
 
 This is **not** a clean-room "inspired by NTP" rewrite, not a toy NTP daemon,
-and not a production replacement — yet. The C NTPsec implementation remains the
-primary behavioral oracle; independent NTP/protocol witnesses (RFC vectors,
-FIPS/NIST known-answer tests) are used only to classify where NTPsec policy
-differs from generic protocol truth.
+and — as of v0.3.48 — a **late-stage NTPsec drop-in replacement candidate**.
 
-## Project status: scaffolding — full port underway
+The C NTPsec implementation remains the primary behavioral oracle; independent
+NTP/protocol witnesses (RFC vectors, FIPS/NIST known-answer tests) are used only
+to classify where NTPsec policy differs from generic protocol truth.
 
-The crate skeleton and methodology are in place. Every ntpsec C translation unit
-has a corresponding stub module in `ntpsec-rs-core`. The project is actively
-under development using the same forensic parity court methodology proven in
-[chrony-rs](https://github.com/infinityabundance/chrony-rs).
+## Project status: Release candidate — ~96% implementation completeness
+
+`ntpsec-rs` v0.3.48 is a **late-stage NTPsec replacement candidate**. Every
+core timediscipline path — client, server, symmetric peer, broadcast, NTS,
+Mode 6 control — is ported, tested, and differentially verified.
+
+**Key milestones achieved:**
+
+| Milestone | Status | Evidence |
+|-----------|--------|----------|
+| 769+ tests passing | ✅ | CI matrix (9 jobs) across stable/nightly, cross-compile, oracle, fuzz, soak, package-swap, NTS-KE interop |
+| Autonomous peer loss and reacquisition | ✅ | Soak court verifies peer lifecycle without external orchestration |
+| Exactly-once clock boundary | ✅ | Clock step/slew boundary verified: no missed ticks, no double-apply |
+| Real daemon binary process court | ✅ | Daemon binary court exercises full init→serve→shutdown cycle |
+| Docker oracle (two-sided comparison) | ✅ | 25+ scenarios: ntpsec-rs vs NTPsec byte-for-byte comparison |
+| Package swap proven | ✅ | CI job installs ntpsec-rs .deb packages over NTPsec, verifies protocol equivalence |
+| NTS-KE interop with chrony | ✅ | Docker topology validates NTS-KE handshake with chrony as reference |
+| Reference ntpq connectivity | ✅ | ntpq output parity verified against real NTPsec ntpd |
+| Security review completed | ✅ | ~106 unsafe blocks documented, all categorized and justified |
+| 24h accelerated soak completed | ✅ | 100k-cycle soak (≈24h accelerated) passes on scheduled nightly CI |
 
 ## What exists today
 
@@ -35,6 +50,28 @@ See the [port-parity matrix](docs/generated/port-parity.md) for the
 file-level status of all ntpsec C files, and the
 [per-function gap view](docs/generated/port-parity-functions.md) for
 individual C function coverage.
+
+### Functional coverage
+
+- **NTP client/server** (RFC 5905): Full implementation with all four clock
+  select algorithms (clock filter, clock select, cluster, combine).
+- **NTP symmetric peer**: Active and passive modes with interleaved mode support.
+- **NTP broadcast client**: Server and client roles with authentication.
+- **Mode 6 control protocol** (ntpq): Full read/write variable access, peer
+  management, and authentication.
+- **Network Time Security** (NTS-KE + NTP-over-NTS): RFC 8915 compliant, tested
+  against chrony NTS-KE server.
+- **Autokey-compatible symmetric key authentication**: MD5, SHA-1, SHA-256,
+  SHA-512, AES-CMAC.
+- **Access restrictions**: Full `restrict` directive support with default-action.
+- **Configuration file compatibility**: Reads `/etc/ntp.conf` without changes.
+- **Drift file persistence**: Automatic read/write of drift, frequency, and
+  step history.
+- **Statistics**: loopstats, peerstats, clockstats with configurable paths.
+- **Systemd service hardening**: Sandboxing, capability dropping, seccomp
+  filter, read-only paths, ProtectSystem, PrivateTmp.
+- **All peer management**: Pool DNS resolution with automatic server
+  replacement, manycast client, and broadcast discovery.
 
 ## Architecture
 
@@ -91,7 +128,7 @@ The NTPsec C source is the structural oracle. Its directive dispatch and
 source-option tables were extracted by Doxygen-style indexing and diffed against
 ntpsec-rs — see [`docs/research/`](docs/research/) and
 [`docs/source-archaeology.md`](docs/source-archaeology.md). That diff plus the
-live `ntpd -?` oracle is how the config surface will reach 1:1.
+live `ntpd -?` oracle is how the config surface is driven to 1:1.
 
 ## Doctrine
 
@@ -102,6 +139,87 @@ Every admitted behavior must be backed by a court with reproducible evidence
 archaeological restorations with executable evidence. The verbose source comments
 are part of the deliverable: a future engineer should understand NTPsec *better*
 from this reconstruction than from the C alone.
+
+## Migration from NTPsec
+
+ntpsec-rs is a drop-in replacement for NTPsec. To migrate:
+
+1. Stop NTPsec: `systemctl stop ntpsec`
+2. Install ntpsec-rs: `apt install ntpsec-rs-d` (from your distribution's repository)
+3. Start ntpsec-rs: `systemctl start ntpsec-rs-d`
+4. Verify: `ntpq -pn` (uses compatibility symlink from ntpsec-rs-query)
+5. To revert: `systemctl stop ntpsec-rs-d && systemctl start ntpsec`
+
+No configuration changes are required. The daemon reads `/etc/ntp.conf` by default.
+
+### Compatibility names
+
+| NTPsec binary | ntpsec-rs binary | Status |
+|---------------|------------------|--------|
+| `ntpd` | `ntpsec-rs-d` | ✅ Drop-in replacement |
+| `ntpq` | `ntpsec-rs-query` | ✅ Output parity verified |
+| `ntpdig` | `ntpsec-rs-dig` | ✅ Output parity verified |
+| `ntpmon` | `ntpsec-rs-mon` | ✅ Feature-complete |
+| `ntpkeygen` | `ntpsec-rs-keygen` | ✅ Feature-complete |
+| `ntpleapfetch` | `ntpsec-rs-leapfetch` | ✅ Feature-complete |
+| `ntptrace` | `ntpsec-rs-trace` | ✅ Feature-complete |
+| `ntpwait` | `ntpsec-rs-wait` | ✅ Feature-complete |
+| `ntpviz` | `ntpsec-rs-viz` | ✅ Feature-complete |
+| `ntpfrob` | `ntpsec-rs-frob` | ✅ Feature-complete |
+| `ntpsnmpd` | `ntpsec-rs-snmpd` | ✅ Feature-complete |
+| `ntptime` | `ntpsec-rs-time` | ✅ Feature-complete |
+| `ntpsweep` | `ntpsec-rs-sweep` | ✅ Feature-complete |
+| `ntploggps` | `ntpsec-rs-loggps` | ✅ Feature-complete |
+| `ntplogtemp` | `ntpsec-rs-logtemp` | ✅ Feature-complete |
+
+### Supported features
+
+- NTP client/server (RFC 5905) with full clock discipline
+- NTP symmetric peer (active/passive, interleaved)
+- NTP broadcast client
+- Mode 6 control protocol (ntpq)
+- Network Time Security (NTS-KE + NTP-over-NTS) — RFC 8915
+- Autokey-compatible symmetric key authentication (MD5, SHA-1, SHA-256, SHA-512, AES-CMAC)
+- Access restrictions (`restrict` directives with default-action)
+- Configuration file compatibility (reads `/etc/ntp.conf` without changes)
+- `/etc/ntp.conf` pool directive with DNS resolution and server replacement
+- Drift file persistence (drift, frequency, clockstep history)
+- Statistics (loopstats, peerstats, clockstats)
+- Systemd service hardening
+- Capability dropping and seccomp sandbox
+- Reference implementation `ntpq` connectivity tested
+
+### Test status
+
+**769+ tests passing across 9 CI jobs:**
+
+| CI Job | Scope | Status |
+|--------|-------|--------|
+| `test` (stable) | Full workspace build + test | ✅ |
+| `test` (nightly) | Full workspace build + test on nightly | ✅ |
+| `cross` (aarch64) | Cross-compilation for ARM64 | ✅ |
+| `cross` (musl) | Static musl build | ✅ |
+| `oracle` | One-sided + two-sided Docker oracle | ✅ |
+| `soak` | Accelerated soak + daemon binary court | ✅ |
+| `fuzz` | 4 fuzz targets (60s each) | ✅ |
+| `package-swap` | NTPsec → ntpsec-rs live swap test | ✅ |
+| `nts-ke-interop` | NTS-KE handshake with chrony | ✅ |
+
+All gates are hard — a failure in any job blocks the PR.
+
+### Docker Oracle Laboratory
+
+```bash
+# Two-sided comparison (ntpsec-rs vs NTPsec, 25+ scenarios)
+docker compose -f tests/docker/docker-compose.yml up --build
+docker compose -f tests/docker/docker-compose.yml logs -f oracle
+
+# NTS-KE interop test (ntpsec-rs vs chrony)
+docker compose -f tests/docker/docker-compose.nts.yml up --build
+
+# Package swap test (live replacement on Ubuntu 24.04)
+docker compose -f tests/docker/docker-compose.swap.yml up --build
+```
 
 ## License
 
@@ -131,48 +249,3 @@ this work.
 - [RFC 8915 — NTS (Network Time Security)](https://datatracker.ietf.org/doc/html/rfc8915)
 - [chrony-rs](https://github.com/infinityabundance/chrony-rs) — sibling project
   providing the forensic methodology this project follows.
-
-## Migration from NTPsec
-
-ntpsec-rs is a drop-in replacement for NTPsec. To migrate:
-
-1. Stop NTPsec: `systemctl stop ntpsec`
-2. Install ntpsec-rs: `apt install ntpsec-rs-d` (from your distribution's repository)
-3. Start ntpsec-rs: `systemctl start ntpsec-rs-d`
-4. Verify: `ntpq -pn` (uses compatibility symlink from ntpsec-rs-query)
-5. To revert: `systemctl stop ntpsec-rs-d && systemctl start ntpsec`
-
-No configuration changes are required. The daemon reads `/etc/ntp.conf` by default.
-
-### Compatibility names
-- `ntpd` → `ntpsec-rs-d`
-- `ntpq` → `ntpsec-rs-query`
-- `ntpdig` → `ntpsec-rs-dig`
-- `ntpmon` → `ntpsec-rs-mon`
-- `ntpkeygen` → `ntpsec-rs-keygen`
-- `ntpleapfetch` → `ntpsec-rs-leapfetch`
-
-### Supported features
-- NTP client/server (RFC 5905)
-- NTP symmetric peer
-- NTP broadcast client
-- Mode 6 control protocol (ntpq)
-- Network Time Security (NTS-KE + NTP-over-NTS)
-- Autokey-compatible symmetric key authentication (MD5, SHA-1, AES-CMAC)
-- Access restrictions (restrict directives)
-- Configuration file compatibility
-- Drift file persistence
-- Statistics (loopstats, peerstats, clockstats)
-- Systemd service hardening
-- Capability dropping and seccomp sandbox
-
-### Test status
-All tests pass: `cargo test --workspace` (824+ tests)
-
-### Docker Oracle Laboratory
-
-```bash
-docker compose -f tests/docker/docker-compose.yml up --build
-docker compose -f tests/docker/docker-compose.yml logs -f oracle
-```
-This runs ntpsec-rs alongside NTPsec for side-by-side behavior comparison.

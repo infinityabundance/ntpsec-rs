@@ -1,0 +1,31 @@
+# ──── ntpsec-rs Package Swap Test Dockerfile ─────────────────────────────────
+#
+# Builds an image that tests replacing NTPsec with ntpsec-rs on Ubuntu 24.04.
+#
+# Build context: project root (../../ from tests/docker/)
+#
+# Usage:
+#   docker compose -f tests/docker/docker-compose.swap.yml up --build
+# =============================================================================
+
+FROM ubuntu:24.04
+
+# Install dependencies: python3 for scripting, ntpsec for reference ntpd/ntpq,
+# xz-utils and gpg for potential future package verification
+RUN apt-get update -qq && \
+    apt-get install -y -qq python3 ntpsec xz-utils gpg && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create directory for incoming .deb packages
+RUN mkdir -p /tmp/packages
+
+# Copy ntpsec-rs .deb packages from the build context
+# Paths are relative to build context (project root)
+COPY tests/docker/ntpsec-rs-*.deb /tmp/packages/
+
+# Copy the swap test script
+COPY tests/docker/test-package-swap.sh /test-package-swap.sh
+
+RUN chmod +x /test-package-swap.sh
+
+CMD ["/test-package-swap.sh"]

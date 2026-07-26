@@ -42,6 +42,12 @@ struct MockClock {
     corrections: u64, // total non-step corrections (slew/kernelslew)
     steps: u64,       // total step corrections
     last_offset: f64,
+    /// Accumulated but not yet applied slew offset
+    pending_slew_offset: f64,
+    /// How much of the pending offset to apply per advance() call
+    slew_rate_per_sec: f64,
+    /// Last advance duration for computing slew application
+    last_advance_secs: f64,
 }
 
 impl MockClock {
@@ -52,10 +58,27 @@ impl MockClock {
             corrections: 0,
             steps: 0,
             last_offset: 0.0,
+            pending_slew_offset: 0.0,
+            // Default: apply up to 1ms of slew per second of simulated time
+            // This represents a reasonable ~1000ppm maximum slew rate
+            slew_rate_per_sec: 0.001,
+            last_advance_secs: 0.0,
         }
     }
 
     fn advance(&mut self, secs: f64) {
+        self.last_advance_secs = secs;
+        // Apply a bounded fraction of pending slew offset
+        if self.pending_slew_offset != 0.0 {
+            let max_correction = self.slew_rate_per_sec * secs;
+            let correction = if self.pending_slew_offset.abs() <= max_correction {
+                self.pending_slew_offset
+            } else {
+                max_correction.copysign(self.pending_slew_offset)
+            };
+            self.apply_ntp_offset(correction);
+            self.pending_slew_offset -= correction;
+        }
         let s = secs.trunc() as i64;
         let f = (secs.fract() * NTP_FRAC_PER_SEC as f64) as u32;
         self.now.seconds += s;
@@ -96,7 +119,8 @@ impl SystemClock for MockClock {
         self.corrections += 1;
         self.last_offset = offset;
         self.freq_ppm = freq;
-        self.apply_ntp_offset(offset);
+        // Accumulate the offset for gradual application during advance()
+        self.pending_slew_offset += offset;
         Ok(())
     }
     fn read_frequency(&self) -> Result<f64, IoError> {
@@ -423,11 +447,13 @@ fn test_soak_peer_churn_dns_refresh() {
                 for r in &results {
                     if let DaemonAction::AdjustClock(adj) = r {
                         match adj {
-                            Adjustment::Step(off)
-                            | Adjustment::Slew(off, _)
-                            | Adjustment::KernelSlew(off, _) => {
+                            Adjustment::Step(off) => {
                                 adjustments.push(*off);
                                 let _ = clock.step(*off);
+                            }
+                            Adjustment::Slew(off, _) | Adjustment::KernelSlew(off, _) => {
+                                adjustments.push(*off);
+                                let _ = clock.slew(*off, 0.0);
                             }
                             Adjustment::Panic(_) => panic!("panic at {} cycles", cycle),
                             Adjustment::Ignore => {}
@@ -469,11 +495,13 @@ fn test_soak_peer_churn_dns_refresh() {
                 for r in &results {
                     if let DaemonAction::AdjustClock(adj) = r {
                         match adj {
-                            Adjustment::Step(off)
-                            | Adjustment::Slew(off, _)
-                            | Adjustment::KernelSlew(off, _) => {
+                            Adjustment::Step(off) => {
                                 adjustments.push(*off);
                                 let _ = clock.step(*off);
+                            }
+                            Adjustment::Slew(off, _) | Adjustment::KernelSlew(off, _) => {
+                                adjustments.push(*off);
+                                let _ = clock.slew(*off, 0.0);
                             }
                             Adjustment::Panic(_) => panic!("panic"),
                             Adjustment::Ignore => {}
@@ -519,11 +547,13 @@ fn test_soak_peer_churn_dns_refresh() {
                 for r in &results {
                     if let DaemonAction::AdjustClock(adj) = r {
                         match adj {
-                            Adjustment::Step(off)
-                            | Adjustment::Slew(off, _)
-                            | Adjustment::KernelSlew(off, _) => {
+                            Adjustment::Step(off) => {
                                 adjustments.push(*off);
                                 let _ = clock.step(*off);
+                            }
+                            Adjustment::Slew(off, _) | Adjustment::KernelSlew(off, _) => {
+                                adjustments.push(*off);
+                                let _ = clock.slew(*off, 0.0);
                             }
                             Adjustment::Panic(_) => panic!("panic"),
                             Adjustment::Ignore => {}
@@ -577,10 +607,11 @@ fn test_soak_holdover_500_cycles() {
                 for r in &results {
                     if let DaemonAction::AdjustClock(adj) = r {
                         match adj {
-                            Adjustment::Step(off)
-                            | Adjustment::Slew(off, _)
-                            | Adjustment::KernelSlew(off, _) => {
+                            Adjustment::Step(off) => {
                                 let _ = clock.step(*off);
+                            }
+                            Adjustment::Slew(off, _) | Adjustment::KernelSlew(off, _) => {
+                                let _ = clock.slew(*off, 0.0);
                             }
                             Adjustment::Panic(_) => panic!("panic"),
                             Adjustment::Ignore => {}
@@ -606,10 +637,11 @@ fn test_soak_holdover_500_cycles() {
         for action in &actions {
             if let DaemonAction::AdjustClock(adj) = action {
                 match adj {
-                    Adjustment::Step(off)
-                    | Adjustment::Slew(off, _)
-                    | Adjustment::KernelSlew(off, _) => {
+                    Adjustment::Step(off) => {
                         let _ = clock.step(*off);
+                    }
+                    Adjustment::Slew(off, _) | Adjustment::KernelSlew(off, _) => {
+                        let _ = clock.slew(*off, 0.0);
                     }
                     Adjustment::Panic(_) => {
                         panic!("panic during holdover at cycle {cycle}");
@@ -643,10 +675,11 @@ fn test_soak_holdover_500_cycles() {
                 for r in &results {
                     if let DaemonAction::AdjustClock(adj) = r {
                         match adj {
-                            Adjustment::Step(off)
-                            | Adjustment::Slew(off, _)
-                            | Adjustment::KernelSlew(off, _) => {
+                            Adjustment::Step(off) => {
                                 let _ = clock.step(*off);
+                            }
+                            Adjustment::Slew(off, _) | Adjustment::KernelSlew(off, _) => {
+                                let _ = clock.slew(*off, 0.0);
                             }
                             Adjustment::Panic(_) => panic!("panic during reacq"),
                             Adjustment::Ignore => {}

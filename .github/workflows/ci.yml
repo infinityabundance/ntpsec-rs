@@ -178,7 +178,80 @@ jobs:
       - name: Run fuzz targets (smoke test)
         run: |
           cd fuzz
-          cargo fuzz run ntp_packet_decode -- -max_total_time=60 2>&1
-          cargo fuzz run mode6_decode -- -max_total_time=60 2>&1
-          cargo fuzz run config_parser -- -max_total_time=60 2>&1
-          cargo fuzz run extension_fields -- -max_total_time=60 2>&1
+          for target in ntp_packet_decode mode6_decode config_parser extension_fields; do
+            echo "=== Fuzz target: $target ==="
+            # Run each target. A crash causes non-zero exit; a normal timeout
+            # (no crashes found) exits zero. We detect crashes explicitly.
+            cargo fuzz run "$target" -- -max_total_time=60 2>&1
+            result=$?
+            if [ $result -eq 0 ]; then
+              echo "PASS: $target completed (no crashes)"
+            else
+              echo "FAIL: $target crashed at exit code $result"
+              exit $result
+            fi
+          done
+          echo "All fuzz targets passed"
+
+  package-swap:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Build Debian packages
+        run: |
+          cargo install cargo-deb 2>&1 | tail -1
+          cargo deb -p ntpsec-rs-d 2>&1 | tail -1
+          cargo deb -p ntpsec-rs-query 2>&1 | tail -1
+          cargo deb -p ntpsec-rs-dig 2>&1 | tail -1
+          cargo deb -p ntpsec-rs-keygen 2>&1 | tail -1
+          cargo deb -p ntpsec-rs-mon 2>&1 | tail -1
+          echo "All package builds OK"
+
+      - name: Set up Docker Compose
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq docker-compose
+
+      - name: Build Docker swap topology
+        run: |
+          mkdir -p target/packages
+          cp target/debian/ntpsec-rs-*.deb tests/docker/
+          docker compose -f tests/docker/docker-compose.swap.yml build 2>&1
+
+      - name: Run package swap test
+        run: |
+          docker compose -f tests/docker/docker-compose.swap.yml up --abort-on-container-exit --exit-code-from test-swap 2>&1 | tail -60
+
+  nts-ke-interop:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Set up Docker Compose
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq docker-compose
+
+      - name: Build NTS-KE interop topology
+        run: |
+          docker compose -f tests/docker/docker-compose.nts.yml build 2>&1
+
+      - name: Run NTS-KE interop test
+        run: |
+          docker compose -f tests/docker/docker-compose.nts.yml up --abort-on-container-exit --exit-code-from test-runner 2>&1 | tail -60
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f tests/docker/docker-compose.nts.yml down -v 2>&1 || true

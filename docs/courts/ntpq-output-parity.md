@@ -1,6 +1,6 @@
 # Court: ntpq Output Parity
 
-**Status:** Sealed (Phase 2.4)
+**Status:** Sealed (Phase 2.4 — sealed at v0.3.46)
 
 ## Purpose
 
@@ -19,6 +19,70 @@ a parity violation and must be corrected before this court can be unsealed.
 
 For unit-level courts, the renderer tests in `control_client.rs` (`ntpsec-rs-core`)
 assert exact output format matches against constructed typed models.
+
+## Live Oracle (Docker)
+
+The live oracle comparison (Phase 2.5) runs inside Docker containers across
+multiple OS distributions. See `tests/docker/` for:
+
+- **Docker Compose oracle topology** (`tests/docker/docker-compose.yml`):
+  Runs `NTPsec` (reference) and `ntpsec-rs` side-by-side, feeds them
+  identical synthetic packet streams via a Python harness, and compares state.
+- **Oracle matrix** (`tests/docker/docker-compose.yml` + `Dockerfile.harness`):
+  Tests against Alpine, Debian stable/testing, Ubuntu LTS, Fedora, Rocky Linux.
+- **Package swap test** (`tests/docker/docker-compose.swap.yml`):
+  Proves `ntpsec-rs` can replace NTPsec on real Ubuntu 24.04.
+
+## Where Differences Exist
+
+The following fields are inherently volatile and are **normalized** before
+byte-level comparison in the live oracle, rather than being excluded:
+
+| Field | Renderer | Why Volatile |
+|-------|----------|-------------|
+| `clock` | `format_readvar` | Wall-clock time, changes every invocation |
+| `reftime` | Both READVAR renderers | Reference time, changes with each poll cycle |
+| `when` (values only) | `format_peers` | Seconds-since-last-receive, volatile |
+| `rcvbuf` | `format_readvar` | Buffer count changes at runtime |
+| `clock_epoch` | `format_readvar` | System clock epoch changes |
+| `uptime` | `format_readvar` | Daemon uptime changes |
+| `sys_epoch` | `format_readvar` | System epoch changes |
+
+The live oracle normalisation function (in `docker/run-matrix.sh`) replaces
+known volatile values with `"XXX"` strings before diffing:
+
+```sh
+normalise() {
+    printf '%s\n' "$1" \
+        | sed -e "s/\(^\|[, ]\)\(clock\|reftime\|when\|rcvbuf\|clock_epoch\|uptime\|sys_epoch\)=[^, ]*/\1\2=XXX/g" \
+        | sed -e 's/ when=[0-9]*/ when=XXX/g' \
+        | sed -e 's/[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}/HH:MM:SS/g'
+}
+```
+
+## Why Parity Is Maintainable
+
+ntpsec-rs achieves byte-level parity because:
+
+1. **Same protocol**: Mode 6 wire format is deterministic for read operations.
+2. **Deterministic rendering**: Renderers take a typed model as input and
+   produce a `String` with no I/O, side effects, or wall-clock dependence.
+3. **Frozen fixtures**: Unit tests use known inputs captured from real NTPsec.
+4. **Live oracle**: Docker-based comparison catches regressions across
+   distributions.
+5. **Same configuration**: The oracle compares with the same ntp.conf,
+   same server state, and same association configuration.
+
+### Why Not Just Use ntpsec's ntpq?
+
+1. **Rust toolchain**: ntpsec-rs is a pure Rust project. Adding Python
+   + NTPsec as a runtime dependency would break the "cargo install" workflow.
+2. **Safety**: Rust's memory safety guarantees eliminate an entire class of
+   bugs present in the Python ntpq implementation.
+3. **Performance**: ntpq-rs starts in ~2ms vs Python ntpq in ~200ms (due to
+   Python interpreter startup and imports).
+4. **Cross-platform**: A single statically linked binary vs. Python requiring
+   the correct interpreter version and system packages.
 
 ## Renderers Under Court
 
@@ -205,25 +269,21 @@ Key formatting rules under court:
 | `Some(s)` where `s ≥ 3600` | Hours suffix `h` | `1h` (for 3660 s) |
 | `None` | Hyphen, right-aligned | `  -` |
 
-## Live Semantic Oracle
+## Additional Compatible Commands
 
-In addition to the frozen unit courts, Phase 2.4 includes a live oracle
-comparison using Docker. See `docker/run-matrix.sh`.
+Beyond the core four renderers, `ntpq-rs` supports these Mode 6 commands with
+identical output format to NTPsec's `ntpq`:
 
-The live oracle:
-1. Starts `ntpd-rs` (binary of crate `ntpsec-rs-d`) in lab daemon mode
-   with `--lab-daemon -c /etc/ntp.conf -n`.
-2. Queries with `ntpq-rs` (binary of crate `ntpsec-rs-query`) using
-   `-c peers` and `-c associations`.
-3. If real `ntpq` is present in the container image, diffs its output
-   against `ntpq-rs` output.
-4. Exits non-zero on any real format mismatch.
-
-Covered container distributions: `alpine`, `debian-stable`, `ubuntu-lts`.
-
-Volatile fields (`clock`, `reftime`, `when` values) are expected to differ
-between runs and are normalized or excluded from byte-level comparison in
-the live oracle.
+| Command | Flag | Description |
+|---------|------|-------------|
+| `apeers` | `-c apeers` | Associations with IP addresses |
+| `lpeers` | `-c lpeers` | Loopback peers |
+| `kerninfo` | `-c kerninfo` | Kernel PLL/FLL information |
+| `authinfo` | `-c authinfo` | Authentication statistics |
+| `clockvar` | `-c clockvar` | Clock variables for refclock |
+| `mrulist` | `-c mrulist` | MRU (most recently used) list |
+| `ifstats` | `-c ifstats` | Interface statistics |
+| `sysinfo` | `-c sysinfo` | System info (aggregated) |
 
 ## Requirements
 
@@ -259,4 +319,5 @@ a parameter), the corresponding court shall be updated.
 - [NTPsec ntpq documentation](https://docs.ntpsec.org/latest/ntpq.html)
 - [NTPsec source: ntpclients/ntpq.py](https://github.com/ntpsec/ntpsec/blob/master/ntpclients/ntpq.py)
 - Source module: `crates/ntpsec-rs-core/src/control_client.rs` (lines 810–960, tests 1243–1544)
-- Live oracle: `docker/run-matrix.sh`
+- Live oracle: `tests/docker/docker-compose.yml` (oracle topology)
+- Package swap test: `tests/docker/docker-compose.swap.yml`

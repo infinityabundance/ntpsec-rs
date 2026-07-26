@@ -3,6 +3,12 @@ set -e
 
 echo "=== Starting chronyd with NTS ==="
 
+# Copy self-signed certificate to shared volume for interop test
+if [ -d /nts-certs ]; then
+    cp /etc/chrony/nts-cert.pem /nts-certs/nts-cert.pem
+    echo "Copied NTS cert to shared volume /nts-certs/"
+fi
+
 cat > /etc/chrony/chrony.conf << 'CHRONYCONF'
 # NTS-KE test configuration
 ntsservercert /etc/chrony/nts-cert.pem
