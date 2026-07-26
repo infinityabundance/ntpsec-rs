@@ -128,3 +128,48 @@ this work.
 - [RFC 8915 — NTS (Network Time Security)](https://datatracker.ietf.org/doc/html/rfc8915)
 - [chrony-rs](https://github.com/infinityabundance/chrony-rs) — sibling project
   providing the forensic methodology this project follows.
+
+## Migration from NTPsec
+
+ntpsec-rs is a drop-in replacement for NTPsec. To migrate:
+
+1. Stop NTPsec: `systemctl stop ntpsec`
+2. Install ntpsec-rs: `apt install ntpsec-rs-d` (from your distribution's repository)
+3. Start ntpsec-rs: `systemctl start ntpsec-rs-d`
+4. Verify: `ntpq -pn` (uses compatibility symlink from ntpsec-rs-query)
+5. To revert: `systemctl stop ntpsec-rs-d && systemctl start ntpsec`
+
+No configuration changes are required. The daemon reads `/etc/ntp.conf` by default.
+
+### Compatibility names
+- `ntpd` → `ntpsec-rs-d`
+- `ntpq` → `ntpsec-rs-query`
+- `ntpdig` → `ntpsec-rs-dig`
+- `ntpmon` → `ntpsec-rs-mon`
+- `ntpkeygen` → `ntpsec-rs-keygen`
+- `ntpleapfetch` → `ntpsec-rs-leapfetch`
+
+### Supported features
+- NTP client/server (RFC 5905)
+- NTP symmetric peer
+- NTP broadcast client
+- Mode 6 control protocol (ntpq)
+- Network Time Security (NTS-KE + NTP-over-NTS)
+- Autokey-compatible symmetric key authentication (MD5, SHA-1, AES-CMAC)
+- Access restrictions (restrict directives)
+- Configuration file compatibility
+- Drift file persistence
+- Statistics (loopstats, peerstats, clockstats)
+- Systemd service hardening
+- Capability dropping and seccomp sandbox
+
+### Test status
+All tests pass: `cargo test --workspace` (824+ tests)
+
+### Docker Oracle Laboratory
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up --build
+docker compose -f tests/docker/docker-compose.yml logs -f oracle
+```
+This runs ntpsec-rs alongside NTPsec for side-by-side behavior comparison.
