@@ -51,11 +51,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check 2>&1
 
-      - name: Clippy (nightly — optional)
-        if: matrix.toolchain == 'nightly'
-        continue-on-error: true
-        run: cargo clippy --workspace 2>&1
-
   cross:
     strategy:
       fail-fast: false
@@ -78,11 +73,15 @@ jobs:
         run: |
           if [[ "${{ matrix.target }}" == *-linux-gnu ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross 2>/dev/null || true
+            sudo apt-get install -y -qq \
+              gcc-aarch64-linux-gnu \
+              g++-aarch64-linux-gnu \
+              binutils-aarch64-linux-gnu \
+              libc6-dev-arm64-cross
           fi
           if [[ "${{ matrix.target }}" == *-linux-musl ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq musl-tools 2>/dev/null || true
+            sudo apt-get install -y -qq musl-tools
           fi
 
       - name: Set up linker
@@ -92,11 +91,9 @@ jobs:
           fi
 
       - name: Cross-compile core
-        continue-on-error: ${{ matrix.target == 'aarch64-unknown-linux-gnu' }}
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
 
-      - name: Cross-compile I/O (optional — platform-specific)
-        continue-on-error: true
+      - name: Cross-compile I/O
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-io 2>&1
 
   oracle:
@@ -121,10 +118,11 @@ jobs:
           toolchain: nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked || true
+        run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz targets (smoke test — 60s each)
         run: |
-          cargo fuzz run ntp_packet_decode -- -max_total_time=60 2>&1 || echo "fuzz target ntp_packet_decode done"
-          cargo fuzz run mode6_decode -- -max_total_time=60 2>&1 || echo "fuzz target mode6_decode done"
-        continue-on-error: false
+          cargo fuzz run --manifest-path fuzz/Cargo.toml ntp_packet_decode -- -max_total_time=60 2>&1
+          cargo fuzz run --manifest-path fuzz/Cargo.toml mode6_decode -- -max_total_time=60 2>&1
+          cargo fuzz run --manifest-path fuzz/Cargo.toml config_parser -- -max_total_time=60 2>&1
+          cargo fuzz run --manifest-path fuzz/Cargo.toml extension_fields -- -max_total_time=60 2>&1
