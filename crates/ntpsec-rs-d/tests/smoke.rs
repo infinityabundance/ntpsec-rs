@@ -8,12 +8,12 @@ fn binary_path() -> std::path::PathBuf {
     path.pop(); // remove crates — now at workspace root
     path.push("target");
     path.push("debug");
-    path.push("ntpsec-rs-d");
+    path.push("ntpd-rs");
     if path.exists() {
         return path;
     }
     // Fallback: try the name directly (for cargo install --path)
-    std::path::PathBuf::from("ntpsec-rs-d")
+    std::path::PathBuf::from("ntpd-rs")
 }
 
 #[test]
@@ -38,5 +38,5 @@ fn test_version_output() {
         .expect("failed to execute ntpd-rs --version");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("1.3.3"), "version should contain 1.3.3");
+    assert!(stdout.contains("0.3.25"), "version should contain 0.3.25");
 }

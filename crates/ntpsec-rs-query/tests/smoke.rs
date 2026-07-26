@@ -2,10 +2,15 @@ use std::process::Command;
 
 fn binary_path() -> std::path::PathBuf {
     let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); path.pop(); // workspace root
-    path.push("target"); path.push("debug"); path.push("ntpsec-rs-query");
-    if path.exists() { return path; }
-    std::path::PathBuf::from("ntpsec-rs-query")
+    path.pop();
+    path.pop(); // workspace root
+    path.push("target");
+    path.push("debug");
+    path.push("ntpq-rs");
+    if path.exists() {
+        return path;
+    }
+    std::path::PathBuf::from("ntpq-rs")
 }
 
 #[test]
