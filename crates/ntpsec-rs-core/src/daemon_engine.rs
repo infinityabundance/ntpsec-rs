@@ -1826,6 +1826,16 @@ impl DaemonEngine {
                             NtpMode::Server
                         };
 
+                        // If the previous pending request for this peer is still
+                        // outstanding, it means the last poll went unanswered.
+                        // Record a reachability failure to match NTPsec's per-poll
+                        // reach register decay (instead of waiting for the 64-second
+                        // reachability timer).
+                        let has_stale = self.pending_requests.iter().any(|pr| pr.peer_id == id);
+                        if has_stale {
+                            peer.reach.record_failure();
+                        }
+
                         self.pending_requests.push(PendingRequest {
                             peer_id: id,
                             wire_t1: pkt.transmit_ts,
@@ -1850,6 +1860,20 @@ impl DaemonEngine {
                 }
                 TimerEvent::Housekeeping => {
                     actions.extend(self.run_selection(now));
+                    let reach_val = self
+                        .peers
+                        .iter()
+                        .next()
+                        .map(|p| p.reach.register())
+                        .unwrap_or(0);
+                    let peer_id = self.system.sys_peer_associd;
+                    eprintln!(
+                        "  DEBUG Housekeeping: t={}, reachable={}, sys_peer={}, reach={:#04x}",
+                        now.seconds,
+                        self.peers.iter().any(|p| p.reach.is_reachable()),
+                        peer_id,
+                        reach_val
+                    );
                 }
                 TimerEvent::Reachability => {
                     for i in 0..self.peers.len() {
