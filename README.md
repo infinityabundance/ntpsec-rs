@@ -188,6 +188,7 @@ No configuration changes are required. The daemon reads `/etc/ntp.conf` by defau
 - Statistics (loopstats, peerstats, clockstats)
 - Systemd service hardening
 - Capability dropping and seccomp sandbox
+- Prometheus metrics endpoint (`--metrics-port`): exposes daemon runtime metrics at `/metrics` — see [docs/metrics.md](docs/metrics.md)
 - Reference implementation `ntpq` connectivity tested
 
 ### Test status

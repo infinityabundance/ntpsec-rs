@@ -102,6 +102,7 @@ The main event loop uses `epoll` (Linux) to multiplex:
 | `--nice <level>` | Set nice priority level |
 | `--trace` | Enable protocol trace |
 | `--seccomp` | Enable seccomp BPF sandboxing |
+| `--metrics-port <port>` | Prometheus metrics HTTP endpoint port (e.g., 9090) |
 
 ### Usage Examples
 
@@ -123,6 +124,11 @@ ntpd-rs -4 -l /var/log/ntp.log
 Drop privileges and use seccomp:
 ```bash
 ntpd-rs -u ntp --seccomp
+```
+
+Enable Prometheus metrics on port 9090:
+```bash
+ntpd-rs --metrics-port 9090
 ```
 
 ---
@@ -239,6 +245,7 @@ All crates in the ntpsec-rs workspace on crates.io:
 | [ntpsec-rs-io](https://crates.io/crates/ntpsec-rs-io) | Real I/O layer (system clock, network, state store) | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-io.svg)](https://crates.io/crates/ntpsec-rs-io) |
 | [ntpsec-rs](https://crates.io/crates/ntpsec-rs) | Umbrella facade crate | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs.svg)](https://crates.io/crates/ntpsec-rs) |
 | [ntpsec-rs-d](https://crates.io/crates/ntpsec-rs-d) | ntpd-rs — NTP daemon binary | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-d.svg)](https://crates.io/crates/ntpsec-rs-d) |
+| [ntpsec-rs-metrics](https://crates.io/crates/ntpsec-rs-metrics) | Prometheus metrics endpoint | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-metrics.svg)](https://crates.io/crates/ntpsec-rs-metrics) |
 | [ntpsec-rs-query](https://crates.io/crates/ntpsec-rs-query) | ntpq-rs — Mode 6 query client | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-query.svg)](https://crates.io/crates/ntpsec-rs-query) |
 | [ntpsec-rs-dig](https://crates.io/crates/ntpsec-rs-dig) | ntpdig-rs — NTP query tool | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-dig.svg)](https://crates.io/crates/ntpsec-rs-dig) |
 | [ntpsec-rs-keygen](https://crates.io/crates/ntpsec-rs-keygen) | NTP key generation | [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-keygen.svg)](https://crates.io/crates/ntpsec-rs-keygen) |

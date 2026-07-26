@@ -6,6 +6,7 @@ members = [
     "crates/ntpsec-rs-io",
     "crates/ntpsec-rs",
     "crates/ntpsec-rs-d",
+    "crates/ntpsec-rs-metrics",
     "crates/ntpsec-rs-query",
     "crates/ntpsec-rs-dig",
     "crates/ntpsec-rs-keygen",

@@ -597,6 +597,7 @@ dependencies = [
  "libc",
  "ntpsec-rs-core",
  "ntpsec-rs-io",
+ "ntpsec-rs-metrics",
  "signal-hook",
  "tracing",
  "tracing-subscriber",
@@ -659,6 +660,14 @@ version = "0.3.48"
 dependencies = [
  "clap",
  "ntpsec-rs-core",
+]
+
+[[package]]
+name = "ntpsec-rs-metrics"
+version = "0.3.48"
+dependencies = [
+ "ntpsec-rs-core",
+ "tracing",
 ]
 
 [[package]]

@@ -34,3 +34,9 @@ name = "extension_fields"
 path = "fuzz_targets/extension_fields.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
