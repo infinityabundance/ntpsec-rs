@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
-        toolchain: [stable, nightly-2025-04-01]
+        toolchain: [stable, nightly-2025-09-01]
 
     runs-on: ${{ matrix.os }}
 
@@ -89,6 +89,12 @@ jobs:
             echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           fi
 
+      - name: Verify cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          which aarch64-linux-gnu-gcc || echo "WARNING: aarch64-linux-gnu-gcc not found"
+          aarch64-linux-gnu-gcc --version || true
+
       - name: Cross-compile core
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
 
@@ -111,16 +117,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly-2025-04-01
+      - name: Install Rust nightly-2025-09-01
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-04-01
+          toolchain: nightly-2025-09-01
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-
-      - name: Verify cargo-fuzz
-        run: cargo fuzz --help
 
       - name: Run fuzz targets (smoke test)
         run: |
