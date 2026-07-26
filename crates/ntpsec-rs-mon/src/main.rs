@@ -192,11 +192,7 @@ fn main() {
                     if let Ok(pv) = client.read_peer_vars(&cli.host, cli.port, a.associd) {
                         println!("    {}", format_peer_line(&pv, a));
                     } else {
-                        println!(
-                            "    {} associd={} (query error)",
-                            a.tally_char(),
-                            a.associd
-                        );
+                        println!("    {} associd={} (query error)", a.tally_char(), a.associd);
                     }
                 }
             }

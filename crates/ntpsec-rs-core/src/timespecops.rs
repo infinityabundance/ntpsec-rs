@@ -16,7 +16,10 @@ pub struct NtpTimespec {
 
 impl NtpTimespec {
     pub fn new(secs: i64, nanos: i64) -> Self {
-        let mut ts = Self { seconds: secs, nanos };
+        let mut ts = Self {
+            seconds: secs,
+            nanos,
+        };
         ts.normalize();
         ts
     }

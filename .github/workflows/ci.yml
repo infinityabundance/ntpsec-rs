@@ -86,10 +86,12 @@ jobs:
             echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           fi
 
-      - name: Cross-compile core + I/O
-        run: |
-          cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
-          cargo build --target ${{ matrix.target }} -p ntpsec-rs-io 2>&1 || echo "ntpsec-rs-io cross-compile skipped (platform-specific)"
+      - name: Cross-compile core
+        run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1
+
+      - name: Cross-compile I/O (optional — platform-specific)
+        continue-on-error: true
+        run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-io 2>&1
 
   oracle:
     runs-on: ubuntu-22.04

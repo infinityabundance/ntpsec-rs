@@ -836,6 +836,7 @@ fn init_signal_handlers(
     let mut term_sig = signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGTERM])
         .expect("Failed to register SIGTERM handler");
     std::thread::spawn(move || {
+        #[allow(clippy::never_loop)]
         for _ in term_sig.forever() {
             tracing::info!("Received SIGTERM");
             r.store(false, Ordering::Relaxed);
@@ -851,6 +852,7 @@ fn init_signal_handlers(
     let mut int_sig = signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGINT])
         .expect("Failed to register SIGINT handler");
     std::thread::spawn(move || {
+        #[allow(clippy::never_loop)]
         for _ in int_sig.forever() {
             tracing::info!("Received SIGINT");
             r.store(false, Ordering::Relaxed);

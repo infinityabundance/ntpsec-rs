@@ -32,7 +32,10 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    println!("ntpwait-rs v{} — NTP wait tool (Rust)", env!("CARGO_PKG_VERSION"));
+    println!(
+        "ntpwait-rs v{} — NTP wait tool (Rust)",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("Waiting up to {} seconds for NTP sync...", cli.timeout);
     println!("(Stub — will poll ntpq in Phase 2)");
 }
