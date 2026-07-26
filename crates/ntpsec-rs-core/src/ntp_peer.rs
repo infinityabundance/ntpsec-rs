@@ -58,6 +58,8 @@ pub struct Peer {
     pub retry: u8, // remaining retry attempts
     /// Stable association ID (1-based, immutable after creation).
     pub associd: u16,
+    /// Fixed offset bias (seconds) — added to measured offset.
+    pub bias: f64,
 }
 
 bitflags::bitflags! {
@@ -136,6 +138,7 @@ impl Peer {
             burst: 0,
             retry: 0,
             associd: 0,
+            bias: 0.0,
         }
     }
 

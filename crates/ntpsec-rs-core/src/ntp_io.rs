@@ -162,9 +162,9 @@ pub fn sockaddr_to_netaddr(ss: &libc::sockaddr_storage) -> Option<NetAddr> {
         libc::AF_INET => {
             let sin: &libc::sockaddr_in = unsafe { &*(ss as *const _ as *const libc::sockaddr_in) };
             let mut addr = [0u8; 16];
-            // sin_addr.s_addr is already in network byte order (big-endian) on all platforms.
-            // Use to_ne_bytes() to get the raw bytes in host order, then place them.
-            addr[..4].copy_from_slice(&sin.sin_addr.s_addr.to_ne_bytes());
+            // sin_addr.s_addr is in network byte order (big-endian) per POSIX.
+            // Use to_be_bytes() to extract octets in correct (big-endian) order.
+            addr[..4].copy_from_slice(&sin.sin_addr.s_addr.to_be_bytes());
             Some(NetAddr {
                 family: 4,
                 addr,

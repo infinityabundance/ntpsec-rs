@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["fuzz"]
 members = [
     "crates/ntpsec-rs-core",
     "crates/ntpsec-rs-io",

@@ -974,9 +974,9 @@ pub fn accept_sample(peer: &mut Peer, offset: f64, delay: f64, dispersion: f64, 
         time: now,
     });
 
-    // Update peer variables from the filter
+    // Update peer variables from the filter, adding fixed bias
     if let Some(filtered) = peer.clock_filter.filter() {
-        peer.offset = filtered.offset;
+        peer.offset = filtered.offset + peer.bias;
         peer.delay = filtered.delay;
         peer.dispersion = filtered.dispersion;
     }
@@ -1443,6 +1443,18 @@ pub struct SystemState {
     // ── Gate 10: Previous selection state ─────────────────────────────────
     /// Previous sys_peer associd (for selpeer_previous).
     pub selpeer_previous: u16,
+    /// Clock bias from `tos` configuration (for `bias` variable).
+    pub clock_bias: f64,
+    /// Previous offset value (for `old_offset` variable).
+    pub old_offset: f64,
+    /// Min time constant from `tinker mintc` config.
+    pub mintc: f64,
+    /// Local address (for `dstadr` variable).
+    pub dstadr: String,
+    /// Whether a refclock is in use (for `refclock` variable).
+    pub refclock: String,
+    /// Server-side counter reset indicator.
+    pub ss_reset: u32,
 }
 
 impl Default for SystemState {
@@ -1521,6 +1533,12 @@ impl Default for SystemState {
             orph_stratum: 0,
             orphwait: 300,
             selpeer_previous: 0,
+            clock_bias: 0.0,
+            old_offset: 0.0,
+            mintc: 3.0,
+            dstadr: String::new(),
+            refclock: String::new(),
+            ss_reset: 0,
         }
     }
 }

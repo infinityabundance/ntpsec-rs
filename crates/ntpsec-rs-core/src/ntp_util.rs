@@ -59,7 +59,7 @@ pub fn refid_from_addr(addr: &SockAddr) -> u32 {
                 let mut hasher = md5::Md5::new();
                 hasher.update(&addr_bytes[..16]);
                 let result = hasher.finalize();
-                u32::from_ne_bytes([result[0], result[1], result[2], result[3]])
+                u32::from_be_bytes([result[0], result[1], result[2], result[3]])
             }
             _ => 0,
         }

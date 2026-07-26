@@ -405,11 +405,20 @@ pub enum ConfigOption {
         minpoll: Option<i32>,
         maxpoll: Option<i32>,
     },
-    /// tos [minsane N] [minclock N] [maxdist f64]
+    /// tos [minsane N] [minclock N] [maxdist f64] [orphan N] [mintc f64]
+    ///     [mindist f64] [maxclock N] [ceil N] [floor f64] [coeff f64] [beep f64]
     Tos {
         minsane: Option<usize>,
         minclock: Option<usize>,
         maxdist: Option<f64>,
+        orphan: Option<u8>,
+        mintc: Option<f64>,
+        mindist: Option<f64>,
+        maxclock: Option<usize>,
+        ceil: Option<usize>,
+        floor: Option<f64>,
+        coeff: Option<f64>,
+        beep: Option<f64>,
     },
     /// mru [maxdepth N] [maxage N]
     Mru {
@@ -833,6 +842,7 @@ pub fn parse_config(input: &str) -> ConfigTree {
             minsane,
             minclock,
             maxdist,
+            ..
         } = opt
         {
             if let Some(v) = minsane {
@@ -1129,10 +1139,19 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
             })
         }
         "tos" => {
-            // tos [minsane N] [minclock N] [maxdist f64]
+            // tos [minsane N] [minclock N] [maxdist f64] [orphan N] [mintc f64]
+            //     [mindist f64] [maxclock N] [ceil N] [floor f64] [coeff f64] [beep f64]
             let mut minsane: Option<usize> = None;
             let mut minclock: Option<usize> = None;
             let mut maxdist: Option<f64> = None;
+            let mut orphan: Option<u8> = None;
+            let mut mintc: Option<f64> = None;
+            let mut mindist: Option<f64> = None;
+            let mut maxclock: Option<usize> = None;
+            let mut ceil: Option<usize> = None;
+            let mut floor: Option<f64> = None;
+            let mut coeff: Option<f64> = None;
+            let mut beep: Option<f64> = None;
             let mut i = 0;
             while i < args.len() {
                 match args[i].as_str() {
@@ -1154,6 +1173,54 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
                             maxdist = args[i].parse::<f64>().ok();
                         }
                     }
+                    "orphan" => {
+                        i += 1;
+                        if i < args.len() {
+                            orphan = args[i].parse::<u8>().ok();
+                        }
+                    }
+                    "mintc" => {
+                        i += 1;
+                        if i < args.len() {
+                            mintc = args[i].parse::<f64>().ok();
+                        }
+                    }
+                    "mindist" => {
+                        i += 1;
+                        if i < args.len() {
+                            mindist = args[i].parse::<f64>().ok();
+                        }
+                    }
+                    "maxclock" => {
+                        i += 1;
+                        if i < args.len() {
+                            maxclock = args[i].parse::<usize>().ok();
+                        }
+                    }
+                    "ceil" => {
+                        i += 1;
+                        if i < args.len() {
+                            ceil = args[i].parse::<usize>().ok();
+                        }
+                    }
+                    "floor" => {
+                        i += 1;
+                        if i < args.len() {
+                            floor = args[i].parse::<f64>().ok();
+                        }
+                    }
+                    "coeff" => {
+                        i += 1;
+                        if i < args.len() {
+                            coeff = args[i].parse::<f64>().ok();
+                        }
+                    }
+                    "beep" => {
+                        i += 1;
+                        if i < args.len() {
+                            beep = args[i].parse::<f64>().ok();
+                        }
+                    }
                     _ => {}
                 }
                 i += 1;
@@ -1162,6 +1229,14 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
                 minsane,
                 minclock,
                 maxdist,
+                orphan,
+                mintc,
+                mindist,
+                maxclock,
+                ceil,
+                floor,
+                coeff,
+                beep,
             })
         }
         "mru" => {
@@ -1602,6 +1677,7 @@ mod tests {
             minsane,
             minclock,
             maxdist,
+            ..
         } = toses[0]
         {
             assert_eq!(minsane, &Some(2));
@@ -1848,6 +1924,14 @@ mod tests {
                 minsane: None,
                 minclock: None,
                 maxdist: None,
+                orphan: None,
+                mintc: None,
+                mindist: None,
+                maxclock: None,
+                ceil: None,
+                floor: None,
+                coeff: None,
+                beep: None,
             }
             .directive_name(),
             "tos"

@@ -275,7 +275,7 @@ pub fn shm_sample_to_packet(sample: &ShmSample, precision: i8, unit: u8) -> NtpP
 
     // Use unit number in reference ID
     let refid_bytes = [b'S', b'H', b'M', b'0' + unit];
-    pkt.reference_id = u32::from_ne_bytes(refid_bytes);
+    pkt.reference_id = u32::from_be_bytes(refid_bytes);
     pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_wire(sample.clock_time);
     pkt.originate_ts = crate::ntp_fp::ntp_ts64_to_wire(sample.receive_time);
     pkt.receive_ts = crate::ntp_fp::ntp_ts64_to_wire(sample.clock_time);
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(pkt.precision, -6);
         assert_eq!(
             pkt.reference_id,
-            u32::from_ne_bytes([b'S', b'H', b'M', b'0'])
+            u32::from_be_bytes([b'S', b'H', b'M', b'0'])
         );
     }
 

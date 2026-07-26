@@ -733,7 +733,7 @@ fn sample_to_packet(
     pkt.precision = precision;
     pkt.root_delay = 0;
     pkt.root_dispersion = 0;
-    pkt.reference_id = u32::from_ne_bytes(ref_id);
+    pkt.reference_id = u32::from_be_bytes(ref_id);
     pkt.reference_ts = crate::ntp_fp::ntp_ts64_to_wire(sample.time);
     // The refclock sample's time goes into transmit_ts — the
     // handle_refclock_sample pipeline computes offset as T3 - T4.
@@ -1255,7 +1255,7 @@ impl DaemonEngine {
                     sin.sin_family = libc::AF_INET as libc::sa_family_t;
                     sin.sin_port = 123u16.to_be();
                     sin.sin_addr = libc::in_addr {
-                        s_addr: u32::from_ne_bytes(refclock_ip.octets()),
+                        s_addr: u32::from_be_bytes(refclock_ip.octets()),
                     };
 
                     let mut peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
@@ -1311,7 +1311,7 @@ impl DaemonEngine {
                                     };
                                     sin.sin_family = libc::AF_INET as libc::sa_family_t;
                                     sin.sin_addr = libc::in_addr {
-                                        s_addr: u32::from_ne_bytes(v4.octets()),
+                                        s_addr: u32::from_be_bytes(v4.octets()),
                                     };
                                     let mask = unsafe {
                                         &mut *(&mut entry_mask as *mut _ as *mut libc::sockaddr_in)
@@ -1445,6 +1445,9 @@ impl DaemonEngine {
                     minsane,
                     minclock,
                     maxdist,
+                    orphan,
+                    mintc,
+                    ..
                 } => {
                     if let Some(v) = minsane {
                         self.minsane = *v;
@@ -1455,6 +1458,13 @@ impl DaemonEngine {
                     }
                     if let Some(v) = maxdist {
                         self.selection_policy.maxdist = *v;
+                    }
+                    if let Some(v) = orphan {
+                        self.system.orph_stratum = *v;
+                        self.tos_orphan = Some(*v);
+                    }
+                    if let Some(v) = mintc {
+                        self.system.mintc = *v;
                     }
                 }
                 ConfigOption::Mru { maxdepth, maxage } => {
@@ -3178,6 +3188,10 @@ impl DaemonEngine {
                             vars.push((name.to_string(), val));
                         }
                     }
+                    // Include configured sysvars (from `setvar` directives)
+                    for (name, val) in &self.sysvars {
+                        vars.push((name.clone(), val.clone()));
+                    }
                     encode_var_list(
                         &vars
                             .iter()
@@ -3891,7 +3905,7 @@ fn ip_to_sockaddr_storage(ip: std::net::IpAddr) -> libc::sockaddr_storage {
             sin.sin_family = libc::AF_INET as libc::sa_family_t;
             sin.sin_port = 123u16.to_be();
             sin.sin_addr = libc::in_addr {
-                s_addr: u32::from_ne_bytes(v4.octets()),
+                s_addr: u32::from_be_bytes(v4.octets()),
             };
         }
         std::net::IpAddr::V6(v6) => {
@@ -3949,6 +3963,9 @@ fn create_peer_from_template(
     }
     if opts.nts {
         peer.flags |= PeerFlags::NTS;
+    }
+    if opts.bias != 0.0 {
+        peer.bias = opts.bias;
     }
     // Assign a unique association ID (collision-free across wrap)
     let associd = DaemonEngine::allocate_associd_with(next_associd, |candidate| {
@@ -4097,7 +4114,7 @@ mod tests {
         sin.sin_family = libc::AF_INET as libc::sa_family_t;
         sin.sin_port = 123u16.to_be();
         sin.sin_addr = libc::in_addr {
-            s_addr: u32::from_ne_bytes(ip),
+            s_addr: u32::from_be_bytes(ip),
         };
         let id = engine.peers.len();
         engine
@@ -4532,7 +4549,7 @@ mod tests {
         sin.sin_family = libc::AF_INET as libc::sa_family_t;
         sin.sin_port = 123u16.to_be();
         sin.sin_addr = libc::in_addr {
-            s_addr: u32::from_ne_bytes([127, 0, 0, 1]),
+            s_addr: u32::from_be_bytes([127, 0, 0, 1]),
         };
         let peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
         let system = SystemState::new();
@@ -5546,6 +5563,14 @@ mod tests {
             minsane: Some(3),
             minclock: Some(5),
             maxdist: Some(2.0),
+            orphan: None,
+            mintc: None,
+            mindist: None,
+            maxclock: None,
+            ceil: None,
+            floor: None,
+            coeff: None,
+            beep: None,
         });
         let engine = DaemonEngine::new(config);
         assert_eq!(engine.minsane, 3);

@@ -570,14 +570,14 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "auth_foundkey" => Some(format!("{}", sys.auth_counters.foundkey)),
         "auth_notfound" => Some(format!("{}", sys.auth_counters.notfound)),
         "auth_reset" => Some(format!("{}", sys.auth_counters.reset_count)),
-        // ── Auth types (not yet tracked) ─────────────────────────────────
-        "auth_type" => Some("0".to_string()),
-        "auth_flags" => Some("0".to_string()),
-        "auth_keys" => Some("0".to_string()),
-        "auth_keyno" => Some("0".to_string()),
+        // ── Auth types ───────────────────────────────────────────────────
+        "auth_type" => Some(format!("{}", sys.auth_type)),
+        "auth_flags" => Some(format!("{}", sys.auth_flags)),
+        "auth_keys" => Some(format!("{}", sys.auth_keys)),
+        "auth_keyno" => Some(format!("{}", sys.auth_keyno)),
         // ── Clock discipline extensions ─────────────────────────────────
-        "bias" => Some("0.0".to_string()),
-        "candidate" => Some("0".to_string()),
+        "bias" => Some(format!("{:.6}", sys.clock_bias)),
+        "candidate" => Some(format!("{}", sys.survivor_count)),
         "clock" => Some(crate::ntp_fp::dolfptoa(sys.reference_time, 6)),
         "clk_jitter" => Some(format!("{:?}", sys.sys_jitter)),
         "clk_wander" => Some(format!("{:.6}", sys.sys_wander)),
@@ -589,7 +589,13 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
                 Some("0".to_string())
             }
         }
-        "dstadr" => Some("0.0.0.0".to_string()),
+        "dstadr" => Some({
+            if sys.dstadr.is_empty() {
+                "0.0.0.0".to_string()
+            } else {
+                sys.dstadr.clone()
+            }
+        }),
         "dstport" => Some("123".to_string()),
         // ── Leap/expiry ───────────────────────────────────────────────────
         "expire" => {
@@ -620,7 +626,7 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
             }
         }
         // ── Mintc / tinker ───────────────────────────────────────────────
-        "mintc" => Some("3".to_string()),
+        "mintc" => Some(format!("{}", sys.mintc)),
         "minpoll" => Some(format!("{}", crate::ntp_proto::NTP_MINPOLL)),
         "maxpoll" => Some(format!("{}", crate::ntp_proto::NTP_MAXPOLL)),
         // ── MRU list stats ────────────────────────────────────────────
@@ -651,7 +657,7 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "nts_providers" => Some(format!("{}", sys.nts_providers)),
         // ── Offset / discipline ──────────────────────────────────────────
         "offset" => Some(format!("{:?}", sys.sys_offset)),
-        "old_offset" => Some(format!("{:?}", sys.sys_offset)),
+        "old_offset" => Some(format!("{:?}", sys.old_offset)),
         // ── Orphan mode ──────────────────────────────────────────────────
         "orphan" => Some(format!("{}", sys.orph_stratum)),
         "orphwait" => Some(format!("{}", sys.orphwait)),
@@ -665,7 +671,7 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         // ── Reference ────────────────────────────────────────────────────
         "refid" => Some(format_refid(sys.reference_id)),
         "reftime" => Some(crate::ntp_fp::dolfptoa(sys.reference_time, 6)),
-        "refclock" => Some("".to_string()),
+        "refclock" => Some(sys.refclock.clone()),
         // ── Root ─────────────────────────────────────────────────────────
         "rootdelay" => Some(format!("{:?}", sys.root_delay)),
         "rootdisp" => Some(format!("{:?}", sys.root_dispersion)),
@@ -687,7 +693,7 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "ss_oldver" => Some(format!("{}", sys.server_counters.oldver)),
         "ss_received" => Some(format!("{}", sys.server_counters.received)),
         "ss_rejected" => Some(format!("{}", sys.server_counters.rejected)),
-        "ss_reset" => Some("0".to_string()),
+        "ss_reset" => Some(format!("{}", sys.ss_reset)),
         "ss_restricted" => Some(format!("{}", sys.server_counters.restricted)),
         "ss_thisver" => Some(format!("{}", sys.server_counters.thisver)),
         "ss_uptime" => Some(format!("{}", sys.uptime_secs)),
@@ -708,10 +714,10 @@ pub fn get_system_variable(sys: &super::ntp_proto::SystemState, name: &str) -> O
         "tai_offset" => Some(format!("{}", sys.tai_offset as f64)),
         // ── Time constant ────────────────────────────────────────────────
         "tc" => Some(format!("{}", sys.poll)),
-        "tcincrement" => Some("0".to_string()),
+        "tcincrement" => Some(format!("{}", sys.tcincrement)),
         // ── Version / uptime ─────────────────────────────────────────────
-        "version" => Some("ntpsec-rs 1.3.3".to_string()),
-        "version_ver" => Some("1.3.3".to_string()),
+        "version" => Some(format!("ntpsec-rs {}", env!("CARGO_PKG_VERSION"))),
+        "version_ver" => Some(env!("CARGO_PKG_VERSION").to_string()),
         "version_prot" => Some("4".to_string()),
         "uptime" => Some(format!("{}", sys.uptime_secs)),
         _ => None,

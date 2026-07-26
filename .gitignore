@@ -10,3 +10,7 @@ __pycache__
 *.orig
 *.rej
 /ntpsec-oracle/
+/fuzz/target
+/fuzz/corpus
+/fuzz/Cargo.lock
+/fuzz/artifacts

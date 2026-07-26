@@ -467,6 +467,8 @@ fn recvmsg_with_timestamp(
         libc::AF_INET => {
             let sin: &libc::sockaddr_in =
                 unsafe { &*(&src_addr as *const _ as *const libc::sockaddr_in) };
+            // s_addr is in host byte order as returned by the kernel.
+            // to_ne_bytes() extracts octets in the correct (host) order.
             let ip =
                 std::net::IpAddr::V4(std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()));
             std::net::SocketAddr::new(ip, u16::from_be(sin.sin_port))
@@ -589,6 +591,8 @@ fn socket_getsockname(socket: &Socket) -> std::net::SocketAddr {
         libc::AF_INET => {
             let sin: &libc::sockaddr_in =
                 unsafe { &*(&addr as *const _ as *const libc::sockaddr_in) };
+            // s_addr is in host byte order as returned by the kernel.
+            // to_ne_bytes() extracts octets in the correct (host) order.
             let ip =
                 std::net::IpAddr::V4(std::net::Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()));
             std::net::SocketAddr::new(ip, u16::from_be(sin.sin_port))

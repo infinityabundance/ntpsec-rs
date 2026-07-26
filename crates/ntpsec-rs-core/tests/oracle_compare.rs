@@ -35,6 +35,14 @@ fn oracle_config() -> ConfigTree {
         minsane: Some(1),
         minclock: Some(3),
         maxdist: Some(1.5),
+        orphan: None,
+        mintc: None,
+        mindist: None,
+        maxclock: None,
+        ceil: None,
+        floor: None,
+        coeff: None,
+        beep: None,
     });
     config
 }

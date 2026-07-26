@@ -33,6 +33,14 @@ fn make_config() -> ConfigTree {
         minsane: Some(1),
         minclock: Some(1),
         maxdist: Some(5.0),
+        orphan: None,
+        mintc: None,
+        mindist: None,
+        maxclock: None,
+        ceil: None,
+        floor: None,
+        coeff: None,
+        beep: None,
     });
     c.add(ConfigOption::Tinker {
         step: Some(0.5),
