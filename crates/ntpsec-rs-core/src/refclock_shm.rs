@@ -10,7 +10,7 @@
 //   - ntpsec include/ntp_shm.h
 // =============================================================================
 
-use crate::ntp_fp::{self, ts_to_ntp};
+use crate::ntp_fp::ts_to_ntp;
 use crate::ntp_types::*;
 
 /// SHM refclock unit number maximum (0-3, matching ntpsec default).
@@ -109,7 +109,7 @@ pub struct ShmSample {
 #[derive(Debug)]
 pub struct ShmRefclock {
     unit: u8,
-    fd: Option<i32>,
+    _fd: Option<i32>,
     shm_id: Option<i32>,
     mapped: Option<*mut u8>,
     last_count: i32,
@@ -125,7 +125,7 @@ impl ShmRefclock {
     pub fn new(unit: u8) -> Self {
         Self {
             unit,
-            fd: None,
+            _fd: None,
             shm_id: None,
             mapped: None,
             last_count: -1,

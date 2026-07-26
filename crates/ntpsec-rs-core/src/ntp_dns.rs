@@ -123,7 +123,7 @@ fn resolve_blocking(addr_str: &str, hostname: &str) -> Result<Vec<SocketAddr>, D
         // Classify the error for richer diagnostics.
         // We check the error string for known patterns since
         // std::io::Error does not carry DNS-specific error codes.
-        let kind = if err_msg.contains("Not found")
+        if err_msg.contains("Not found")
             || err_msg.contains("No address")
             || err_msg.contains("nodename nor servname")
             || err_msg.contains("Name or service not known")
@@ -147,8 +147,7 @@ fn resolve_blocking(addr_str: &str, hostname: &str) -> Result<Vec<SocketAddr>, D
                 hostname: hostname.to_string(),
                 detail: err_msg,
             }
-        };
-        kind
+        }
     })?;
 
     let mut results: Vec<SocketAddr> = addrs_iter.collect();

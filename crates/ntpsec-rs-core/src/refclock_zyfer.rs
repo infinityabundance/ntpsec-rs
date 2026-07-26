@@ -148,7 +148,7 @@ impl ZyferRefclock {
                 Err(_) => ts_to_ntp(0, 0),
             };
 
-            let gps_time = ts_to_ntp(unix_secs as i64, 0);
+            let _gps_time = ts_to_ntp(unix_secs, 0);
 
             return Ok(Some(RefClockSample {
                 offset: 0.0,

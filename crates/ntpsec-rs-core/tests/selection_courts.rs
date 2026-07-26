@@ -50,7 +50,7 @@ fn make_peer(offset: f64, delay: f64, dispersion: f64, reachable: bool) -> Peer 
     make_peer_at(offset, delay, dispersion, reachable, false, 2)
 }
 
-fn run_selection(peers: &mut Vec<Peer>, now: NtpTs64, policy: &SelectionPolicy) -> usize {
+fn run_selection(peers: &mut [Peer], now: NtpTs64, policy: &SelectionPolicy) -> usize {
     let mut sys = SystemState::new();
     sys.update_from_peers(peers, now, policy)
 }
@@ -321,7 +321,7 @@ fn test_single_peer_selected() {
 
 #[test]
 fn test_root_distance_growth() {
-    let mut p = make_peer(0.001, 0.010, 0.005, true);
+    let p = make_peer(0.001, 0.010, 0.005, true);
     let now = ntp_fp::ts_to_ntp(1000, 0);
     let dist1 = root_distance(&p, now);
     let later = ntp_fp::ts_to_ntp(2000, 0);

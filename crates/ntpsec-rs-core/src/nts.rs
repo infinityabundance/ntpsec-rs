@@ -32,8 +32,6 @@
 //   - docs/courts/nts.md
 // =============================================================================
 
-use crate::ntp_types::*;
-
 /// NTS-KE default port (RFC 8915 §4).
 pub const NTS_KE_PORT: u16 = 4460;
 

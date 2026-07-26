@@ -29,12 +29,7 @@
 
 use crate::ntp_auth::*;
 use crate::ntp_fp;
-use crate::ntp_leapsec::*;
-use crate::ntp_loopfilter::*;
-use crate::ntp_monitor::*;
 use crate::ntp_peer::*;
-use crate::ntp_recvbuff::*;
-use crate::ntp_restrict::*;
 use crate::ntp_types::*;
 
 // ──── Constants ─────────────────────────────────────────────────────────
@@ -72,7 +67,6 @@ pub const NTP_WEIGHT: f64 = 0.5;
 
 /// Standard Kiss-o'-Death codes as 4-byte ASCII arrays for use with
 /// `build_kod_packet()`.  Each code identifies the reason for the KOD response.
-
 /// Access denied by server.
 pub const KISS_DENY: &[u8; 4] = b"DENY";
 /// Rate limit exceeded — client should reduce polling rate.
@@ -335,6 +329,7 @@ pub struct RateLimit {
     kod_count: u32,
 }
 
+#[allow(clippy::new_without_default)]
 impl RateLimit {
     pub fn new() -> Self {
         Self {
@@ -1001,7 +996,7 @@ pub fn accept_sample(peer: &mut Peer, offset: f64, delay: f64, dispersion: f64, 
 /// intervals by temporarily lowering hpoll to NTP_MINPOLL + 1 (2 seconds).
 /// After the burst completes, hpoll returns to the configured minpoll.
 /// `BURST` mode sends packets at each poll interval, not a rapid burst.
-pub fn poll_update(peer: &mut Peer, now: NtpTs64) {
+pub fn poll_update(peer: &mut Peer, _now: NtpTs64) {
     // ─── Burst/iburst mode (ntpsec behavior) ───────────────────────────
     // IBURST: send 8 packets at 2-second intervals on initial sync
     if peer.flags.contains(PeerFlags::IBURST) {
@@ -1070,6 +1065,7 @@ pub struct ExtensionField {
 ///   - Only known MAC digest lengths are accepted (MD5=16, SHA1=20, AES-128-CMAC=16).
 ///   - A truncated MAC is never interpreted as unauthenticated traffic.
 ///   - Extension fields are validated for bounds and alignment before parsing.
+#[allow(clippy::type_complexity)]
 pub fn split_packet_tail(
     packet: &[u8],
 ) -> Result<(Vec<ExtensionField>, Option<(u32, &[u8])>), String> {
@@ -1125,7 +1121,7 @@ pub fn split_packet_tail(
         // Validate extension field length (RFC 5905 §7.3):
         // - Must be >= 4 (the length includes the 4-byte type+length header)
         // - Must be a multiple of 4 (4-byte alignment)
-        if length < 4 || (length as usize) % 4 != 0 {
+        if length < 4 || !(length as usize).is_multiple_of(4) {
             break;
         }
 
@@ -1204,8 +1200,8 @@ pub fn build_response(
     resp.precision = precision;
 
     // Root delay and dispersion (in NTP short format)
-    resp.root_delay = f64_to_ntp_short(system.root_delay.max(0.0).min(65535.0));
-    resp.root_dispersion = f64_to_ntp_short(system.root_dispersion.max(0.0).min(65535.0));
+    resp.root_delay = f64_to_ntp_short(system.root_delay.clamp(0.0, 65535.0));
+    resp.root_dispersion = f64_to_ntp_short(system.root_dispersion.clamp(0.0, 65535.0));
 
     // Reference ID
     resp.reference_id = system.reference_id;
@@ -1895,7 +1891,7 @@ mod tests {
     fn test_rate_limit_record_kod() {
         let mut rl = RateLimit::new();
         let t1 = ntp_fp::ts_to_ntp(100, 0);
-        let t2 = ntp_fp::ts_to_ntp(200, 0);
+        let _t2 = ntp_fp::ts_to_ntp(200, 0);
 
         // Initially should send KOD
         assert!(rl.should_send_kod(t1));
@@ -2023,7 +2019,7 @@ mod tests {
             make_peer(0.003, 0.005, 0.001, true),
             make_peer(10.0, 0.005, 0.001, true),
         ];
-        for (i, p) in peers.iter_mut().enumerate() {
+        for p in peers.iter_mut() {
             p.flash = FlashBits::PASS.bits();
             p.reference_time = now; // must set so root_distance is small
         }
@@ -2037,8 +2033,8 @@ mod tests {
             outlier_flash
         );
 
-        for i in 0..3 {
-            let f = FlashBits::from_bits_truncate(peers[i].flash);
+        for (i, p) in peers.iter().enumerate().take(3) {
+            let f = FlashBits::from_bits_truncate(p.flash);
             assert!(
                 !f.contains(FlashBits::TEST5),
                 "good peer {} should not be TEST5, flash={:?}",
@@ -2276,8 +2272,8 @@ mod tests {
         );
 
         // The three clustered peers must NOT be TEST5
-        for i in 0..3 {
-            let f = FlashBits::from_bits_truncate(peers[i].flash);
+        for (i, p) in peers.iter().enumerate().take(3) {
+            let f = FlashBits::from_bits_truncate(p.flash);
             assert!(
                 !f.contains(FlashBits::TEST5),
                 "good peer {} should not be TEST5, flash={:?}",
@@ -2541,8 +2537,8 @@ mod tests {
         );
 
         // The 3 agreeing peers must NOT be TEST5
-        for i in 0..3 {
-            let flash = FlashBits::from_bits_truncate(peers[i].flash);
+        for (i, p) in peers.iter().enumerate().take(3) {
+            let flash = FlashBits::from_bits_truncate(p.flash);
             assert!(
                 !flash.contains(FlashBits::TEST5),
                 "agreeing peer {} should not be TEST5, flash={:?}",
@@ -2552,8 +2548,8 @@ mod tests {
         }
 
         // The 2 disjoint peers must be TEST5
-        for i in 3..5 {
-            let flash = FlashBits::from_bits_truncate(peers[i].flash);
+        for (i, p) in peers.iter().enumerate().skip(3).take(2) {
+            let flash = FlashBits::from_bits_truncate(p.flash);
             assert!(
                 flash.contains(FlashBits::TEST5),
                 "disjoint peer {} should be TEST5, flash={:?}",

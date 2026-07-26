@@ -9,7 +9,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,7 @@ pub enum TrueTimeType {
 
 /// State machine states
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum TrueState {
     Base,
     InqTm,
@@ -177,7 +178,7 @@ impl TrueTimeRefclock {
                         _ => LeapIndicator::NoWarning,
                     };
 
-                    let unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
+                    let _unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
 
                     let receive_ts = match now.duration_since(UNIX_EPOCH) {
                         Ok(d) => {

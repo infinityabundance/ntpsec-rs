@@ -513,6 +513,7 @@ fn parse_gpsd_object(v: &Value) -> Option<GpsdFix> {
 ///
 /// This is the legacy interface that expects a JSON line. New code should
 /// use `parse_gpsd_object` which operates on a parsed `Value`.
+#[allow(dead_code)]
 fn parse_time_object(line: &str) -> Option<GpsdFix> {
     let v: Value = serde_json::from_str(line).ok()?;
 
@@ -540,7 +541,7 @@ fn unix_to_ntp_ts64(unix_secs: f64) -> NtpTs64 {
     // Convert nanoseconds to NTP fraction (2^-32 second units)
     // ns / 1e9 * 2^32 = ns * 4294967296 / 1e9
     // Use u64 arithmetic with rounding: (nsecs * 4_294_967_296 + 500_000_000) / 1_000_000_000
-    let frac = ((nsecs as u64 * 4_294_967_296u64 + 500_000_000u64) / 1_000_000_000u64) as u32;
+    let frac = ((nsecs * 4_294_967_296u64 + 500_000_000u64) / 1_000_000_000u64) as u32;
 
     NtpTs64 {
         seconds: secs + NTP_EPOCH_OFFSET as i64,
@@ -549,6 +550,7 @@ fn unix_to_ntp_ts64(unix_secs: f64) -> NtpTs64 {
 }
 
 /// Convert a Unix timestamp (seconds, nanoseconds) to NtpTs64.
+#[allow(dead_code)]
 fn ts_to_ntp(secs: i64, nsecs: i64) -> NtpTs64 {
     let ntp_secs = secs + NTP_EPOCH_OFFSET as i64;
 
@@ -772,11 +774,7 @@ mod tests {
         // Accept within 0.5 microseconds of the ideal value
         let ideal = 429_496_730u32;
         let actual = ntp.fraction;
-        let diff = if actual > ideal {
-            actual - ideal
-        } else {
-            ideal - actual
-        };
+        let diff = actual.abs_diff(ideal);
         assert!(
             diff < 500,
             "fraction {} differs from ideal {} by more than 500 units",
@@ -785,7 +783,7 @@ mod tests {
         );
 
         // 0.333333333 * 2^32 ≈ 1431655764.67 → should round appropriately
-        let ntp2 = unix_to_ntp_ts64(1000000000.333333333);
+        let ntp2 = unix_to_ntp_ts64(1_000_000_000.333_333_4);
         assert!(ntp2.fraction > 1_431_000_000);
     }
 

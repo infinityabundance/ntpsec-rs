@@ -9,7 +9,7 @@
 //   - ntpsec libntp/emalloc.c
 // =============================================================================
 
-use std::alloc::{alloc_zeroed, dealloc, realloc, Layout};
+use std::alloc::{alloc_zeroed, Layout};
 
 /// Zeroed allocation of `size` bytes (matches ntpsec's `emalloc_zeroed()`).
 pub fn emalloc(size: usize) -> *mut u8 {

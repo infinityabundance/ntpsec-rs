@@ -100,26 +100,29 @@ pub mod ntpdig_proto;
 
 pub use binio::*;
 pub use control_client::*;
-pub use daemon_engine::*;
+pub use daemon_engine::{
+    parsed_timecode_to_sample, AssocOptions, DaemonEngine, NtsKeInFlight, NtsKeJob, NtsKeJobState,
+    PendingDns, PoolState, RefclockDriver, RefclockInstance, RefclockManager,
+};
 pub use gpstolfp::*;
 pub use ieee754io::*;
 pub use leap_query::*;
-pub use ntp_assert::*;
+
 pub use ntp_auth::*;
 pub use ntp_calendar::*;
 pub use ntp_config::*;
 pub use ntp_control::*;
-pub use ntp_debug::*;
+
 pub use ntp_dns::*;
 pub use ntp_endian::*;
 pub use ntp_filegen::*;
 pub use ntp_fp::*;
 pub use ntp_io::*;
 pub use ntp_leapsec::*;
-pub use ntp_lists::*;
+
 pub use ntp_loopfilter::*;
 pub use ntp_malloc::*;
-pub use ntp_monitor::*;
+pub use ntp_monitor::{MonEntry, MonList, NonceCache, NonceEntry};
 pub use ntp_net::*;
 pub use ntp_packetstamp::*;
 pub use ntp_peer::*;
@@ -128,7 +131,7 @@ pub use ntp_recvbuff::*;
 pub use ntp_refclock::*;
 pub use ntp_restrict::*;
 pub use ntp_sandbox::*;
-pub use ntp_scanner::*;
+
 pub use ntp_signd::*;
 pub use ntp_stdlib::*;
 pub use ntp_syscall::*;
@@ -140,7 +143,11 @@ pub use ntpdig_proto::*;
 pub use nts::*;
 pub use nts_client::*;
 pub use nts_cookie::*;
-pub use nts_extens::*;
+pub use nts_extens::{
+    validate_extension_fields_total_size, ExtensionFieldHeader, NtsAuthResult, NtsAuthenticator,
+    EXTENSION_FIELD_NTS_AUTHENTICATOR, EXTENSION_FIELD_NTS_AUTH_RESULT, EXTENSION_FIELD_NTS_COOKIE,
+    EXTENSION_FIELD_NTS_COOKIE_PLACEHOLDER, EXTENSION_FIELD_UNIQUE_IDENTIFIER, MAX_TOTAL_SIZE,
+};
 pub use nts_server::*;
 pub use parse::*;
 pub use refclock_arbiter::*;

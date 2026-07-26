@@ -93,11 +93,7 @@ impl NonceCache {
     pub fn verify_nonce(&mut self, nonce: &[u8]) -> bool {
         self.purge_expired();
         let key = hex::encode(nonce);
-        if self.nonces.remove(&key).is_some() {
-            true
-        } else {
-            false
-        }
+        self.nonces.remove(&key).is_some()
     }
 
     /// Purge expired nonces from the cache.
@@ -224,7 +220,7 @@ impl MonList {
     pub fn prune_over_limit(&mut self) {
         if self.entries.len() > self.max_entries as usize {
             self.entries
-                .sort_by(|a, b| b.last_pkt.seconds.cmp(&a.last_pkt.seconds));
+                .sort_by_key(|a| std::cmp::Reverse(a.last_pkt.seconds));
             self.entries.truncate(self.max_entries as usize);
         }
     }
@@ -287,7 +283,7 @@ impl MonList {
     /// Used by daemon_engine for Mode 6 MRU responses.
     pub fn get_entries_snapshot(&self) -> Vec<&MonEntry> {
         let mut sorted: Vec<&MonEntry> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| b.last_pkt.seconds.cmp(&a.last_pkt.seconds));
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.last_pkt.seconds));
         sorted
     }
 
@@ -295,7 +291,7 @@ impl MonList {
     /// Returns the entries in last_pkt order (most recent first).
     pub fn read_mru(&self, limit: usize) -> Vec<&MonEntry> {
         let mut sorted: Vec<&MonEntry> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| b.last_pkt.seconds.cmp(&a.last_pkt.seconds));
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.last_pkt.seconds));
         sorted.truncate(limit);
         sorted
     }
@@ -432,7 +428,7 @@ mod tests {
         let mut mon = MonList::new();
         mon.rate_limit_count = 10;
         let addr = make_sockaddr_v4(192, 168, 1, 1, 123);
-        let now = NtpTs64 {
+        let _now = NtpTs64 {
             seconds: 1_000_000,
             fraction: 0,
         };
@@ -477,7 +473,7 @@ mod tests {
     #[test]
     fn test_nonce_purge_expired() {
         let mut cache = NonceCache::new();
-        let nonce = cache.generate_nonce();
+        let _nonce = cache.generate_nonce();
         assert_eq!(cache.len(), 1);
 
         // Manually expire all entries

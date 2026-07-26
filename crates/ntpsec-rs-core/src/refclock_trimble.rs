@@ -10,7 +10,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -224,7 +224,7 @@ impl TrimbleRefclock {
                             // GPS week * 604800 + TOW/1000 = seconds since GPS epoch
                             // Then add GPS-UTC offset (leap seconds)
                             let gps_epoch_unix: i64 = 315964800; // Jan 6 1980 00:00:00 UTC
-                            let total_secs = gps_epoch_unix
+                            let _total_secs = gps_epoch_unix
                                 + (self.week as i64 * 604800)
                                 + (self.tow as i64 / 1000)
                                 - self.utc_offset as i64;

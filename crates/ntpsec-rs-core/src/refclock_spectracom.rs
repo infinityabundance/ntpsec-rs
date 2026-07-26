@@ -143,7 +143,7 @@ impl SpectracomRefclock {
                         ) {
                             let year = yy + 2000;
 
-                            let leap = if syncchar != ' ' {
+                            let _leap = if syncchar != ' ' {
                                 LeapIndicator::Alarm
                             } else {
                                 LeapIndicator::NoWarning
@@ -158,7 +158,7 @@ impl SpectracomRefclock {
                                 _ => 0.001,
                             };
 
-                            let unix_secs = yday_to_unix(year, yday, hour, min, sec);
+                            let _unix_secs = yday_to_unix(year, yday, hour, min, sec);
 
                             let receive_ts = match now.duration_since(UNIX_EPOCH) {
                                 Ok(d) => {
@@ -174,7 +174,7 @@ impl SpectracomRefclock {
                                 delay: 0.0,
                                 dispersion,
                                 time: receive_ts,
-                                leap,
+                                leap: LeapIndicator::NoWarning,
                             }));
                         }
                     }
@@ -210,7 +210,7 @@ impl SpectracomRefclock {
                             LeapIndicator::NoWarning
                         };
 
-                        let unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
+                        let _unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
 
                         let receive_ts = match now.duration_since(UNIX_EPOCH) {
                             Ok(d) => {

@@ -139,8 +139,6 @@ fn resolve_listen_addresses(cli: &Cli) -> Vec<String> {
         // Default: bind all interfaces with address-family awareness
         if cli.ipv6 {
             vec!["[::]:123".to_string()]
-        } else if cli.ipv4 {
-            vec!["0.0.0.0:123".to_string()]
         } else {
             vec!["0.0.0.0:123".to_string()]
         }
@@ -647,7 +645,7 @@ fn main() {
                             }
                             Err(IoError::RecvFailed(_)) => break, // EAGAIN — drained
                             Err(e) => {
-                                if iteration % 100 == 0 {
+                                if iteration.is_multiple_of(100) {
                                     tracing::debug!("Recv error: {e}");
                                 }
                                 break;
@@ -661,7 +659,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                if iteration % 100 == 0 {
+                if iteration.is_multiple_of(100) {
                     tracing::debug!("Poll error: {e}");
                 }
             }
@@ -704,7 +702,7 @@ fn main() {
         }
 
         // ── 3. Periodic status & statistics (every ~10 sec real time) ──
-        if iteration % 100 == 0 {
+        if iteration.is_multiple_of(100) {
             tracing::info!(
                 "Status: peers={} stratum={} offset={:.6}s freq={:.3}ppm",
                 engine.system.peer_count,
@@ -763,7 +761,7 @@ fn main() {
         if engine
             .timers
             .next_deadline()
-            .map_or(true, |d| d > now.seconds + 60)
+            .is_none_or(|d| d > now.seconds + 60)
         {
             // No timers in the next 60s — brief sleep to avoid busy-wait
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -833,7 +831,7 @@ fn init_signal_handlers(
     // SIGTERM: graceful shutdown, exit 0
     let r = running.clone();
     let ec = exit_code.clone();
-    let mut term_sig = signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGTERM])
+    let mut term_sig = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM])
         .expect("Failed to register SIGTERM handler");
     std::thread::spawn(move || {
         #[allow(clippy::never_loop)]
@@ -849,7 +847,7 @@ fn init_signal_handlers(
     // SIGINT: same as SIGTERM
     let r = running.clone();
     let ec = exit_code.clone();
-    let mut int_sig = signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGINT])
+    let mut int_sig = signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT])
         .expect("Failed to register SIGINT handler");
     std::thread::spawn(move || {
         #[allow(clippy::never_loop)]
@@ -864,7 +862,7 @@ fn init_signal_handlers(
 
     // SIGHUP: reload configuration
     let reload = wants_reload.clone();
-    let mut hup_sig = signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGHUP])
+    let mut hup_sig = signal_hook::iterator::Signals::new([signal_hook::consts::SIGHUP])
         .expect("Failed to register SIGHUP handler");
     std::thread::spawn(move || {
         for _ in hup_sig.forever() {
@@ -1009,10 +1007,10 @@ fn run_query_mode<C: SystemClock, N: NetworkIo, S: StateStore>(
                         tracing::info!("Set clock: offset {:.6}s", offset);
                     }
                 }
-                Adjustment::Slew(offset, freq) | Adjustment::KernelSlew(offset, freq) => {
-                    if clock.slew(offset, freq).is_ok() {
-                        tracing::info!("Slew clock: offset {:.6}s freq {:.3}ppm", offset, freq);
-                    }
+                Adjustment::Slew(offset, freq) | Adjustment::KernelSlew(offset, freq)
+                    if clock.slew(offset, freq).is_ok() =>
+                {
+                    tracing::info!("Slew clock: offset {:.6}s freq {:.3}ppm", offset, freq);
                 }
                 _ => {}
             }
@@ -1404,7 +1402,7 @@ mod tests {
     fn test_execute_actions_no_panic() {
         let mut clock = ntpsec_rs_io::RealSystemClock::new();
         let mut network = ntpsec_rs_io::RealNetworkIo::new();
-        let mut store = ntpsec_rs_io::FileStateStore::new(&std::path::Path::new("/tmp"));
+        let mut store = ntpsec_rs_io::FileStateStore::new(std::path::Path::new("/tmp"));
 
         let actions = vec![
             DaemonAction::Log("test log".to_string()),

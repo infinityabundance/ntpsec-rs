@@ -78,8 +78,7 @@ impl LeapTable {
         // Update TAI offset based on the cumulative leap seconds
         self.tai_offset += entry.offset;
         self.entries.push(entry);
-        self.entries
-            .sort_by(|a, b| a.ntp_time.seconds.cmp(&b.ntp_time.seconds));
+        self.entries.sort_by_key(|a| a.ntp_time.seconds);
     }
 
     /// Parse header lines from a NIST/IERS leapfile.
@@ -90,18 +89,18 @@ impl LeapTable {
 
         for line in content.lines() {
             let line = line.trim();
-            if line.starts_with("#@") {
+            if let Some(rest) = line.strip_prefix("#@") {
                 // #@ expiration_timestamp (NTP timestamp of file expiry)
-                let rest = line[2..].trim();
+                let rest = rest.trim();
                 if let Ok(secs) = rest.parse::<i64>() {
                     expiration = Some(NtpTs64 {
                         seconds: secs,
                         fraction: 0,
                     });
                 }
-            } else if line.starts_with("#$") {
+            } else if let Some(rest) = line.strip_prefix("#$") {
                 // #$ sha1_hash_value
-                let rest = line[2..].trim();
+                let rest = rest.trim();
                 if !rest.is_empty() {
                     hash = Some(rest.to_string());
                 }
@@ -116,8 +115,8 @@ impl LeapTable {
         if expiration.is_none() {
             for line in content.lines() {
                 let line = line.trim();
-                if line.starts_with("#@") {
-                    let rest = line[2..].trim();
+                if let Some(rest) = line.strip_prefix("#@") {
+                    let rest = rest.trim();
                     if let Ok(secs) = rest.parse::<i64>() {
                         expiration = Some(NtpTs64 {
                             seconds: secs,
@@ -220,7 +219,7 @@ impl LeapTable {
         }
 
         // Sort entries by time
-        parsed_entries.sort_by(|a, b| a.ntp_time.seconds.cmp(&b.ntp_time.seconds));
+        parsed_entries.sort_by_key(|a| a.ntp_time.seconds);
         self.entries = parsed_entries;
         self.file_expires = expiration;
 
@@ -334,6 +333,7 @@ impl LeapTable {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     const LEAPFILE_SAMPLE: &str = "\
 #@ 3890592000
 #$ 672b7c6a8a5c6b3f0e1d2c3a4b5f6e7d8c9a0b1c

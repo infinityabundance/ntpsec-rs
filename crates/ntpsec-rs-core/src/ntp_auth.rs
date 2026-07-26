@@ -16,8 +16,6 @@
 //   - docs/courts/ntp_auth.md
 // =============================================================================
 
-use crate::ntp_types::*;
-
 /// Key identifier type (32-bit unsigned, matching ntpsec's `keyid_t`).
 pub type KeyId = u32;
 
@@ -58,7 +56,7 @@ impl DigestType {
     }
 
     /// Parse from ntp.keys format string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_name(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "md5" => Some(DigestType::Md5),
             "sha" | "sha1" | "sha-1" => Some(DigestType::Sha1),
@@ -133,7 +131,7 @@ impl NtpAuthKey {
 
     /// Verify a MAC against a packet (constant-time comparison).
     pub fn verify_mac(&self, pkt: &[u8], expected_mac: &[u8]) -> bool {
-        self.mac(pkt).map_or(false, |computed| {
+        self.mac(pkt).is_some_and(|computed| {
             computed.len() == expected_mac.len()
                 && computed
                     .iter()
@@ -231,7 +229,7 @@ impl AuthKeyStore {
     }
 
     /// Parse a single ntp.keys line.
-    fn parse_key_line(&mut self, line: &str, lineno: usize) -> Result<(), String> {
+    fn parse_key_line(&mut self, line: &str, _lineno: usize) -> Result<(), String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             return Err(format!(
@@ -246,13 +244,13 @@ impl AuthKeyStore {
         if id == 0 {
             return Err("key ID 0 is not allowed".to_string());
         }
-        let digest = DigestType::from_str(parts[1])
+        let digest = DigestType::from_name(parts[1])
             .ok_or_else(|| format!("unknown digest type '{}'", parts[1]))?;
         // NTPsec rule (authreadkeys.c):
         //   ≤ 20 characters → printable ASCII key (used as-is)
         //   > 20 characters → hex-encoded binary key (must be valid hex, or error)
         let key_data = if parts[2].len() > 20 {
-            if parts[2].chars().all(|c| c.is_ascii_hexdigit()) && parts[2].len() % 2 == 0 {
+            if parts[2].chars().all(|c| c.is_ascii_hexdigit()) && parts[2].len().is_multiple_of(2) {
                 hex_decode(parts[2])
                     .map_err(|e| format!("hex decode error for '{}': {}", parts[2], e))?
             } else {
@@ -265,7 +263,7 @@ impl AuthKeyStore {
             parts[2].as_bytes().to_vec()
         };
 
-        let mut key = NtpAuthKey::new(id, digest, key_data);
+        let key = NtpAuthKey::new(id, digest, key_data);
 
         self.add_key(key);
 
@@ -404,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_md5_known_vector() {
-        use digest::{Digest, FixedOutput};
+        use digest::FixedOutput;
         use hex_literal::hex;
         let result = md5::Md5::default().finalize_fixed();
         let expected = hex!("d41d8cd98f00b204e9800998ecf8427e");

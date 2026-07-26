@@ -103,7 +103,7 @@ fn main() {
     });
 
     // Use the signal handler thread handle to detect interrupts
-    let signal_thread = sigint_result;
+    let _signal_thread = sigint_result;
 
     println!(
         "ntpmon-rs v{} — NTP monitor (Rust)",

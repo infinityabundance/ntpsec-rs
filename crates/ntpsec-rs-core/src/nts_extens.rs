@@ -35,8 +35,6 @@
 //   - RFC 7821 (NTP extension field format)
 // =============================================================================
 
-use crate::ntp_types::*;
-
 // ──── NTS Extension Field Type Constants ──────────────────────────────
 //
 // These constants match RFC 8915 §5 and the IANA NTP Extension Field
@@ -282,11 +280,11 @@ impl NtsAuthenticator {
         buf.extend_from_slice(&self.nonce);
         // Pad nonce to 4-byte boundary
         let nonce_pad = (4 - (self.nonce.len() % 4)) % 4;
-        buf.extend(std::iter::repeat(0u8).take(nonce_pad));
+        buf.extend(std::iter::repeat_n(0u8, nonce_pad));
         buf.extend_from_slice(&self.ciphertext);
         // Pad ciphertext to 4-byte boundary
         let ciphertext_pad = (4 - (self.ciphertext.len() % 4)) % 4;
-        buf.extend(std::iter::repeat(0u8).take(ciphertext_pad));
+        buf.extend(std::iter::repeat_n(0u8, ciphertext_pad));
         buf
     }
 

@@ -194,7 +194,7 @@ fn handle_nts_ke_connection(
     //
     // We parse the records, validate them, and select an AEAD algorithm
     // that we support from the client's offered list.
-    let (aead_selected, cookies) = process_nts_ke_request(&request_data, server_config)?;
+    let (aead_selected, _cookies) = process_nts_ke_request(&request_data, server_config)?;
 
     // ── Phase 4: Derive C2S and S2C keys via TLS exporter ───────────
     //
@@ -351,11 +351,8 @@ fn process_nts_ke_request(
                 for chunk in rec.body.chunks_exact(2) {
                     let aead_id = u16::from_be_bytes([chunk[0], chunk[1]]);
                     // Check if the server supports this AEAD
-                    if config.aead_algorithms.contains(&aead_id) {
-                        if selected_aead.is_none() {
-                            selected_aead = Some(aead_id);
-                        }
-                        // Continue iterating but don't overwrite — we take the first match
+                    if config.aead_algorithms.contains(&aead_id) && selected_aead.is_none() {
+                        selected_aead = Some(aead_id);
                     }
                 }
             }
@@ -1192,19 +1189,14 @@ mod tests {
         };
 
         // Build a request with a different protocol ID (not NTPv4 = 0)
-        let mut records: Vec<NtsKeRecord> = Vec::new();
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_NEXT_PROTOCOL,
-            1u16.to_be_bytes().to_vec(), // protocol 1, not NTPv4
-        ));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_AEAD_ALGORITHM,
-            15u16.to_be_bytes().to_vec(),
-        ));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_END_OF_MESSAGE,
-            vec![],
-        ));
+        let records: Vec<NtsKeRecord> = vec![
+            NtsKeRecord::new_critical(
+                NTS_KE_RECORD_NEXT_PROTOCOL,
+                1u16.to_be_bytes().to_vec(), // protocol 1, not NTPv4
+            ),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 15u16.to_be_bytes().to_vec()),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]),
+        ];
         let request: Vec<u8> = records.iter().flat_map(|r| r.encode()).collect();
 
         let result = process_nts_ke_request(&request, &config);
@@ -1230,15 +1222,10 @@ mod tests {
         };
 
         // Request without EOM
-        let mut records: Vec<NtsKeRecord> = Vec::new();
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_NEXT_PROTOCOL,
-            0u16.to_be_bytes().to_vec(),
-        ));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_AEAD_ALGORITHM,
-            15u16.to_be_bytes().to_vec(),
-        ));
+        let records: Vec<NtsKeRecord> = vec![
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec()),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 15u16.to_be_bytes().to_vec()),
+        ];
         let request: Vec<u8> = records.iter().flat_map(|r| r.encode()).collect();
 
         let result = process_nts_ke_request(&request, &config);
@@ -1264,21 +1251,13 @@ mod tests {
         };
 
         // Insert an unknown non-critical record before EOM
-        let mut records: Vec<NtsKeRecord> = Vec::new();
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_NEXT_PROTOCOL,
-            0u16.to_be_bytes().to_vec(),
-        ));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_AEAD_ALGORITHM,
-            15u16.to_be_bytes().to_vec(),
-        ));
-        // Unknown non-critical record (type 99 without critical bit)
-        records.push(NtsKeRecord::new(99, vec![1, 2, 3]));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_END_OF_MESSAGE,
-            vec![],
-        ));
+        let records: Vec<NtsKeRecord> = vec![
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec()),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 15u16.to_be_bytes().to_vec()),
+            // Unknown non-critical record (type 99 without critical bit)
+            NtsKeRecord::new(99, vec![1, 2, 3]),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]),
+        ];
         let request: Vec<u8> = records.iter().flat_map(|r| r.encode()).collect();
 
         let result = process_nts_ke_request(&request, &config);
@@ -1304,20 +1283,12 @@ mod tests {
         };
 
         // Insert an unknown critical record
-        let mut records: Vec<NtsKeRecord> = Vec::new();
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_NEXT_PROTOCOL,
-            0u16.to_be_bytes().to_vec(),
-        ));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_AEAD_ALGORITHM,
-            15u16.to_be_bytes().to_vec(),
-        ));
-        records.push(NtsKeRecord::new_critical(99, vec![]));
-        records.push(NtsKeRecord::new_critical(
-            NTS_KE_RECORD_END_OF_MESSAGE,
-            vec![],
-        ));
+        let records: Vec<NtsKeRecord> = vec![
+            NtsKeRecord::new_critical(NTS_KE_RECORD_NEXT_PROTOCOL, 0u16.to_be_bytes().to_vec()),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_AEAD_ALGORITHM, 15u16.to_be_bytes().to_vec()),
+            NtsKeRecord::new_critical(99, vec![]),
+            NtsKeRecord::new_critical(NTS_KE_RECORD_END_OF_MESSAGE, vec![]),
+        ];
         let request: Vec<u8> = records.iter().flat_map(|r| r.encode()).collect();
 
         let result = process_nts_ke_request(&request, &config);

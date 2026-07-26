@@ -11,7 +11,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -229,7 +229,7 @@ impl JjyRefclock {
 
                     // If we have both date and time, produce a sample
                     if self.receive_seq == 3 && self.year > 0 {
-                        let unix_secs = date_to_unix(
+                        let _unix_secs = date_to_unix(
                             self.year,
                             self.month,
                             self.day,
@@ -274,7 +274,7 @@ impl JjyRefclock {
                             s[12..14].parse::<i32>(),
                         ) {
                             let year = yy + 2000;
-                            let unix_secs = date_to_unix(year, month, day, hour, min, sec);
+                            let _unix_secs = date_to_unix(year, month, day, hour, min, sec);
 
                             let receive_ts = match now.duration_since(UNIX_EPOCH) {
                                 Ok(d) => {
@@ -314,7 +314,7 @@ impl JjyRefclock {
                                     s[time_start + 4..time_start + 6].parse::<i32>(),
                                 ) {
                                     let year = yy + 2000;
-                                    let unix_secs = date_to_unix(year, month, day, hour, min, sec);
+                                    let _unix_secs = date_to_unix(year, month, day, hour, min, sec);
 
                                     let receive_ts = match now.duration_since(UNIX_EPOCH) {
                                         Ok(d) => {
@@ -353,7 +353,7 @@ impl JjyRefclock {
                                     s[10..12].parse::<i32>(),
                                     s[12..14].parse::<i32>(),
                                 ) {
-                                    let unix_secs = date_to_unix(year, month, day, hour, min, sec);
+                                    let _unix_secs = date_to_unix(year, month, day, hour, min, sec);
 
                                     let receive_ts = match now.duration_since(UNIX_EPOCH) {
                                         Ok(d) => {
@@ -397,7 +397,7 @@ impl JjyRefclock {
                                     time_part[4..6].parse::<i32>(),
                                 ) {
                                     let year = yy + 2000;
-                                    let unix_secs = date_to_unix(year, month, day, hour, min, sec);
+                                    let _unix_secs = date_to_unix(year, month, day, hour, min, sec);
 
                                     let receive_ts = match now.duration_since(UNIX_EPOCH) {
                                         Ok(d) => {
@@ -443,7 +443,7 @@ impl JjyRefclock {
                                         rest[2..4].parse::<i32>(),
                                         rest[4..6].parse::<i32>(),
                                     ) {
-                                        let unix_secs =
+                                        let _unix_secs =
                                             date_to_unix(year, month, day, hour, min, sec);
 
                                         let receive_ts = match now.duration_since(UNIX_EPOCH) {

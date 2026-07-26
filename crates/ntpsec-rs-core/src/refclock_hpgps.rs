@@ -9,7 +9,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -119,7 +119,7 @@ impl HpGpsRefclock {
             let s = trimmed;
 
             // Strip leading prompt "scpi > "
-            let s = if s.starts_with("scpi > ") { &s[7..] } else { s };
+            let s = s.strip_prefix("scpi > ").unwrap_or(s);
 
             // Strip leading whitespace/tabs
             let s = s.trim_start();
@@ -184,7 +184,7 @@ impl HpGpsRefclock {
                 };
 
                 // Convert date to Unix timestamp
-                let unix_secs = date_to_unix(year, month, day, hour, min, sec);
+                let _unix_secs = date_to_unix(year, month, day, hour, min, sec);
 
                 // Compute checksum for validation
                 let expected_cs = if chars.len() >= 23 {
@@ -282,11 +282,11 @@ mod tests {
     fn test_checksum() {
         let s = "T22025061512300004300AB";
         let chars: Vec<char> = s.chars().collect();
-        let mut cs: u16 = 0;
+        let mut _cs: u16 = 0;
         for &c in &chars[..21] {
-            cs = cs.wrapping_add(c as u16);
+            _cs = _cs.wrapping_add(c as u16);
         }
-        cs &= 0xff;
+        _cs &= 0xff;
         let expected = u16::from_str_radix("AB", 16).unwrap();
         // Not necessarily matching, just verifying computation
         let _ = expected;

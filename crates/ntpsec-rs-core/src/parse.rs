@@ -249,6 +249,7 @@ pub struct CompositeParser<'a> {
     parsers: Vec<Box<dyn TimecodeParser + 'a>>,
 }
 
+#[allow(clippy::new_without_default)]
 impl<'a> CompositeParser<'a> {
     pub fn new() -> Self {
         Self {
@@ -256,13 +257,14 @@ impl<'a> CompositeParser<'a> {
         }
     }
 
+    /// Add a parser
     /// Add a parser to the end of the try-order.
     pub fn add<P: TimecodeParser + 'a>(&mut self, parser: P) {
         self.parsers.push(Box::new(parser));
     }
 
     /// Create a CompositeParser from an iterator of parsers.
-    pub fn from_iter<I>(iter: I) -> Self
+    pub fn from_parsers<I>(iter: I) -> Self
     where
         I: IntoIterator<Item = Box<dyn TimecodeParser + 'a>>,
     {
@@ -328,8 +330,8 @@ pub fn parse_fixed_width_timecode(s: &str, formats: &[&str]) -> Option<ParsedTim
             let c = chars[i];
             // Count consecutive identical format chars as one field
             let mut count = 0;
-            for j in i..chars.len() {
-                if chars[j] == c {
+            for &c2 in &chars[i..] {
+                if c2 == c {
                     count += 1;
                 } else {
                     break;
@@ -357,52 +359,27 @@ pub fn parse_fixed_width_timecode(s: &str, formats: &[&str]) -> Option<ParsedTim
                         break;
                     }
                 }
-                'M' => {
+                'M' if pos + 2 <= s.len() => {
                     /* 2-digit month */
-                    if pos + 2 <= s.len() {
-                        tc.month = s[pos..pos + 2].parse().ok()?;
-                        pos += 2;
-                    } else {
-                        matched = false;
-                        break;
-                    }
+                    tc.month = s[pos..pos + 2].parse().ok()?;
+                    pos += 2;
                 }
-                'D' => {
+                'D' if pos + 2 <= s.len() => {
                     /* 2-digit day */
-                    if pos + 2 <= s.len() {
-                        tc.day = s[pos..pos + 2].parse().ok()?;
-                        pos += 2;
-                    } else {
-                        matched = false;
-                        break;
-                    }
+                    tc.day = s[pos..pos + 2].parse().ok()?;
+                    pos += 2;
                 }
-                'h' => {
-                    if pos + 2 <= s.len() {
-                        tc.hour = s[pos..pos + 2].parse().ok()?;
-                        pos += 2;
-                    } else {
-                        matched = false;
-                        break;
-                    }
+                'h' if pos + 2 <= s.len() => {
+                    tc.hour = s[pos..pos + 2].parse().ok()?;
+                    pos += 2;
                 }
-                'm' => {
-                    if pos + 2 <= s.len() {
-                        tc.minute = s[pos..pos + 2].parse().ok()?;
-                        pos += 2;
-                    } else {
-                        matched = false;
-                        break;
-                    }
+                'm' if pos + 2 <= s.len() => {
+                    tc.minute = s[pos..pos + 2].parse().ok()?;
+                    pos += 2;
                 }
-                's' => {
-                    if pos + 2 <= s.len() {
-                        tc.second = s[pos..pos + 2].parse().ok()?;
-                        pos += 2;
-                    } else {
-                        matched = false;
-                        break;
-                    }
+                's' if pos + 2 <= s.len() => {
+                    tc.second = s[pos..pos + 2].parse().ok()?;
+                    pos += 2;
                 }
                 _ => {
                     matched = false;
@@ -521,7 +498,7 @@ fn nmea_checksum_ok(line: &str) -> bool {
     };
 
     let mut computed = 0u8;
-    for &b in line[start..star].as_bytes() {
+    for &b in &line.as_bytes()[start..star] {
         computed ^= b;
     }
 
@@ -573,7 +550,7 @@ fn parse_nmea_date(raw: &str) -> Option<(u8, u8, u8)> {
     let dd: u8 = raw[..2].parse().ok()?;
     let mm: u8 = raw[2..4].parse().ok()?;
     let yy: u8 = raw[4..6].parse().ok()?;
-    if dd < 1 || dd > 31 || mm < 1 || mm > 12 {
+    if !(1..=31).contains(&dd) || !(1..=12).contains(&mm) {
         return None;
     }
     Some((dd, mm, yy))
@@ -746,7 +723,7 @@ fn parse_nmea_zda_timecode(fields: &[&str]) -> Result<ParsedTimecodeWithLeap, Pa
         })?
     };
 
-    if day < 1 || day > 31 || month < 1 || month > 12 {
+    if !(1..=31).contains(&day) || !(1..=12).contains(&month) {
         return Err(ParseError::InvalidValue(format!(
             "ZDA invalid date: {year:04}-{month:02}-{day:02}"
         )));
@@ -950,7 +927,7 @@ mod tests {
     fn test_parse_nmea_date_basic() {
         let (dd, mm, yy) = parse_nmea_date("250324").unwrap();
         assert_eq!(dd, 25);
-        assert_eq!(mm, 03);
+        assert_eq!(mm, 3);
         assert_eq!(yy, 24);
     }
 
@@ -1014,7 +991,7 @@ mod tests {
         assert_eq!(result.timecode.year, 2024);
         assert_eq!(result.timecode.month, 12);
         assert_eq!(result.timecode.day, 25);
-        assert_eq!(result.timecode.hour, 08);
+        assert_eq!(result.timecode.hour, 8);
         assert_eq!(result.timecode.minute, 35);
         assert_eq!(result.timecode.second, 59);
     }
@@ -1047,7 +1024,7 @@ mod tests {
         assert_eq!(result.timecode.year, 2024);
         assert_eq!(result.timecode.month, 12);
         assert_eq!(result.timecode.day, 25);
-        assert_eq!(result.timecode.hour, 08);
+        assert_eq!(result.timecode.hour, 8);
         assert_eq!(result.timecode.minute, 35);
         assert_eq!(result.timecode.second, 59);
         assert_eq!(result.timecode.utc_offset, 0);
@@ -1060,7 +1037,7 @@ mod tests {
         assert_eq!(result.timecode.year, 2024);
         assert_eq!(result.timecode.month, 12);
         assert_eq!(result.timecode.day, 25);
-        assert_eq!(result.timecode.hour, 08);
+        assert_eq!(result.timecode.hour, 8);
         assert_eq!(result.timecode.minute, 35);
         assert_eq!(result.timecode.second, 59);
         assert_eq!(result.timecode.utc_offset, 5);

@@ -41,12 +41,14 @@ jobs:
           cargo build -p ntpsec-rs-query
           cargo build -p ntpsec-rs-dig
           cargo build -p ntpsec-rs-keygen
+          cargo build -p ntpsec-rs-mon
+          cargo build -p ntpsec-rs-leapfetch
 
       - name: Run tests
         run: cargo test --workspace 2>&1
 
       - name: Clippy
-        run: cargo clippy --workspace 2>&1
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1
 
       - name: Check formatting
         run: cargo fmt --check 2>&1
@@ -88,12 +90,6 @@ jobs:
           if [[ "${{ matrix.target }}" == aarch64-* ]]; then
             echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           fi
-
-      - name: Verify cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          which aarch64-linux-gnu-gcc || echo "WARNING: aarch64-linux-gnu-gcc not found"
-          aarch64-linux-gnu-gcc --version || true
 
       - name: Cross-compile core
         run: cargo build --target ${{ matrix.target }} -p ntpsec-rs-core 2>&1

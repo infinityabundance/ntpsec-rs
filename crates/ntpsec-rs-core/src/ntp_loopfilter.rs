@@ -170,7 +170,7 @@ impl LoopFilter {
         // Compute elapsed time since last update
         let elapsed = if self.clock_set {
             let dt = ntp_fp::ntp_ts64_to_double(now) - ntp_fp::ntp_ts64_to_double(self.last_update);
-            dt.max(0.0).min(3600.0) // clamp to 1 hour
+            dt.clamp(0.0, 3600.0) // clamp to 1 hour
         } else {
             0.0
         };
@@ -196,7 +196,7 @@ impl LoopFilter {
 
         // Compute the time constant tau = 2^tc
         // ntpsec adjusts tc based on jitter and wander
-        self.tc = self.tc.max(MIN_TC).min(MAX_TC);
+        self.tc = self.tc.clamp(MIN_TC, MAX_TC);
         let tau_sec = (1u64 << self.tc) as f64;
 
         // Panic check

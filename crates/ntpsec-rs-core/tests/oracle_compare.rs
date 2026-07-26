@@ -10,18 +10,14 @@
 
 use ntpsec_rs_core::daemon_engine::*;
 use ntpsec_rs_core::ntp_config::*;
-use ntpsec_rs_core::ntp_control::{
-    self, build_control_fragments, build_error_response, get_system_variable, ControlError,
-    ControlMessage, ControlOpcode,
-};
+use ntpsec_rs_core::ntp_control::{self, get_system_variable, ControlMessage, ControlOpcode};
 use ntpsec_rs_core::ntp_io::*;
-use ntpsec_rs_core::ntp_peer::PeerFlags;
 use ntpsec_rs_core::ntp_types::*;
-use std::collections::HashMap;
 
 // ──── Oracle residual ledger ──────────────────────────────────────────
 
 /// Classification of a divergence between NTPsec and ntpsec-rs.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DivergenceClass {
     /// ntpsec-rs has a bug.
@@ -57,6 +53,7 @@ impl std::fmt::Display for DivergenceClass {
     }
 }
 
+#[allow(dead_code)]
 struct OracleResult {
     scenario: &'static str,
     oracle_behavior: &'static str,
@@ -66,6 +63,7 @@ struct OracleResult {
     details: String,
 }
 
+#[allow(dead_code)]
 impl OracleResult {
     fn pass(scenario: &'static str, oracle: &'static str, details: &str) -> Self {
         Self {
@@ -207,7 +205,7 @@ fn run_sync_cycle(engine: &mut DaemonEngine, cycles: u32) -> Vec<u64> {
 
 #[test]
 fn test_oracle_packet_accept_reject() {
-    let mut results: Vec<OracleResult> = Vec::new();
+    let _results: Vec<OracleResult> = Vec::new();
     let config = oracle_config();
     let mut engine = DaemonEngine::new(config);
 
@@ -338,7 +336,7 @@ fn test_oracle_synchronization_zero_offset() {
     let mut engine = DaemonEngine::new(config);
     let mut time_base = 1_000_000i64;
 
-    for cycle in 0..50 {
+    for _cycle in 0..50 {
         let now = NtpTs64 {
             seconds: time_base,
             fraction: 0,
@@ -560,7 +558,7 @@ fn test_oracle_peer_reachability_evolution() {
     );
 
     let mut time_base = 1_000_000i64;
-    for cycle in 0..8 {
+    for _cycle in 0..8 {
         let now = NtpTs64 {
             seconds: time_base,
             fraction: 0,
@@ -641,10 +639,7 @@ fn test_oracle_residual_summary() {
 
     let passes = tests.iter().filter(|t| t.2 == "✓").count();
     let partials = tests.iter().filter(|t| t.2 == "~").count();
-    eprintln!(
-        "{:<35} {:<55} {}",
-        "Test", "NTPsec Expected Behavior", "Status"
-    );
+    eprintln!("{:<35} {:<55} Status", "Test", "NTPsec Expected Behavior");
     eprintln!("{}", "-".repeat(95));
     for (name, behavior, status) in &tests {
         eprintln!("{:<35} {:<55} {}", name, behavior, status);

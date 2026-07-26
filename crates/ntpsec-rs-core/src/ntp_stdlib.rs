@@ -10,8 +10,6 @@
 //   - ntpsec libntp/numtoa.c
 // =============================================================================
 
-use crate::ntp_types::*;
-
 /// Event/state name table matching ntpsec's event strings.
 pub const EVENT_NAMES: [&str; 8] = [
     "event_at_never",   // 0 — EVNT_UNSPEC
@@ -36,6 +34,7 @@ pub struct NtpStrBuf {
     pos: usize,
 }
 
+#[allow(clippy::new_without_default)]
 impl NtpStrBuf {
     pub const fn new() -> Self {
         Self {
@@ -91,7 +90,7 @@ mod tests {
 
     #[test]
     fn test_strbuf() {
-        let mut buf = NtpStrBuf::new();
+        let buf = NtpStrBuf::new();
         assert_eq!(buf.as_str(), "");
     }
 }

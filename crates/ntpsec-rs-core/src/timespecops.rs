@@ -28,7 +28,7 @@ impl NtpTimespec {
         const NS_PER_SEC: i64 = 1_000_000_000;
         if self.nanos >= NS_PER_SEC || self.nanos <= -NS_PER_SEC {
             self.seconds += self.nanos / NS_PER_SEC;
-            self.nanos = self.nanos % NS_PER_SEC;
+            self.nanos %= NS_PER_SEC;
         }
         if self.seconds > 0 && self.nanos < 0 {
             self.seconds -= 1;
@@ -57,7 +57,7 @@ impl NtpTimespec {
         ts
     }
 
-    pub fn cmp(&self, other: &NtpTimespec) -> std::cmp::Ordering {
+    pub fn compare(&self, other: &NtpTimespec) -> std::cmp::Ordering {
         match self.seconds.cmp(&other.seconds) {
             std::cmp::Ordering::Equal => self.nanos.cmp(&other.nanos),
             ord => ord,

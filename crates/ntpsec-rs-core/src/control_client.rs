@@ -62,6 +62,7 @@ pub struct FragmentCollector {
     pub associd: Option<u16>,
 }
 
+#[allow(clippy::new_without_default)]
 impl FragmentCollector {
     pub fn new() -> Self {
         Self {
@@ -274,7 +275,7 @@ pub struct AssociationStatus {
 
 impl AssociationStatus {
     pub fn from_bytes(data: &[u8]) -> Result<Vec<Self>, QueryError> {
-        if data.len() % 4 != 0 {
+        if !data.len().is_multiple_of(4) {
             return Err(QueryError::BadResponse(format!(
                 "READSTAT data length {} not multiple of 4",
                 data.len()
@@ -745,7 +746,7 @@ impl ControlClient {
 
         let mut request_bytes = req.encode().to_vec();
         request_bytes.extend_from_slice(body.as_bytes());
-        let expected_op = ControlOpcode::from_u8(msg.opcode).op;
+        let _expected_op = ControlOpcode::from_u8(msg.opcode).op;
 
         for attempt in 0..=self.retries {
             if attempt > 0 {
@@ -1729,6 +1730,7 @@ pub(crate) mod test_mode6_server {
         /// Receive multiple requests, each receiving a group of fragments.
         /// The outer Vec is one entry per expected request; each inner Vec
         /// is the fragments to send for that request.
+        #[allow(dead_code)]
         pub fn serve_fragment_groups(groups: Vec<Vec<Vec<u8>>>) -> Self {
             let socket = UdpSocket::bind("127.0.0.1:0").expect("test server bind");
             socket
@@ -2659,7 +2661,7 @@ mod tests {
             count: 0,
         };
 
-        let r1 = client.query("127.0.0.1", server.port, status_msg);
+        let _r1 = client.query("127.0.0.1", server.port, status_msg);
 
         let var_msg = ControlMessage {
             li_vn_mode: 0,

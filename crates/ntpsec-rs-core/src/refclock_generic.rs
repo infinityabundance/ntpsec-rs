@@ -13,7 +13,7 @@ use std::path::Path;
 #[derive(Debug)]
 pub struct GenericRefclock {
     reader: Option<BufReader<std::fs::File>>,
-    unit: u8,
+    _unit: u8,
     format: &'static str,
 }
 
@@ -29,7 +29,7 @@ impl GenericRefclock {
             std::fs::File::open(path).map_err(|e| format!("cannot open {}: {}", device, e))?;
         Ok(Self {
             reader: Some(BufReader::new(file)),
-            unit,
+            _unit: unit,
             format,
         })
     }

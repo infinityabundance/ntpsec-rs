@@ -9,7 +9,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -220,7 +220,7 @@ impl OncoreRefclock {
                         // Convert to UTC
                         // GPS epoch: Jan 6, 1980
                         let gps_epoch_unix: i64 = 315964800;
-                        let total_secs =
+                        let _total_secs =
                             gps_epoch_unix + (self.week as i64 * 604800) + self.tow as i64;
 
                         let receive_ts = match now.duration_since(UNIX_EPOCH) {

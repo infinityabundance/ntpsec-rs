@@ -52,6 +52,7 @@ fn print_hop(host: &str, refid: &str, stratum: u8, offset: f64, delay: f64, dept
 
 /// Format a NTP timestamp value in ntpq style (seconds.fraction).
 /// If the value contains a '.', use it as-is; otherwise append ".0".
+#[allow(dead_code)]
 fn fmt_ntp_value(val: &str) -> String {
     if val.contains('.') {
         val.to_string()

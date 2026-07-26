@@ -3,28 +3,50 @@
 #
 # Creates compatibility symlinks so that existing NTPsec-aware scripts
 # and tools work without modification.
+#
+# Requires: the target binary must exist at link time.
 
 set -e
 
 case "$1" in
     configure)
-        # Daemon compatibility name
-        ln -sf /usr/bin/ntpsec-rs-d /usr/bin/ntpd 2>/dev/null || true
-        ln -sf /usr/sbin/ntpsec-rs-d /usr/sbin/ntpd 2>/dev/null || true
+        # Daemon: cargo produces "ntpd-rs" from package ntpsec-rs-d
+        if [ -x /usr/bin/ntpd-rs ]; then
+            ln -sfn /usr/bin/ntpd-rs /usr/bin/ntpd
+        elif [ -x /usr/sbin/ntpd-rs ]; then
+            ln -sfn /usr/sbin/ntpd-rs /usr/sbin/ntpd
+        else
+            echo "ERROR: ntpd-rs binary not found" >&2
+            exit 1
+        fi
 
-        # Query tool compatibility name
-        ln -sf /usr/bin/ntpsec-rs-query /usr/bin/ntpq 2>/dev/null || true
+        # Query tool: cargo produces "ntpq-rs" from package ntpsec-rs-query
+        if [ -x /usr/bin/ntpq-rs ]; then
+            ln -sfn /usr/bin/ntpq-rs /usr/bin/ntpq
+        else
+            echo "ERROR: ntpq-rs binary not found" >&2
+            exit 1
+        fi
 
-        # Diagnostics tool compatibility name
-        ln -sf /usr/bin/ntpsec-rs-dig /usr/bin/ntpdig 2>/dev/null || true
+        # Diagnostics tool: cargo produces "ntpdig-rs" from package ntpsec-rs-dig
+        if [ -x /usr/bin/ntpdig-rs ]; then
+            ln -sfn /usr/bin/ntpdig-rs /usr/bin/ntpdig
+        else
+            echo "ERROR: ntpdig-rs binary not found" >&2
+            exit 1
+        fi
 
-        # Monitor tool compatibility name
-        ln -sf /usr/bin/ntpsec-rs-mon /usr/bin/ntpmon 2>/dev/null || true
-
-        # Key generation tool compatibility name
-        ln -sf /usr/bin/ntpsec-rs-keygen /usr/bin/ntpkeygen 2>/dev/null || true
-
-        # Leap file fetch tool
-        ln -sf /usr/bin/ntpsec-rs-leapfetch /usr/bin/ntpleapfetch 2>/dev/null || true
+        # Remaining tools use package name as binary name
+        for pair in "ntpsec-rs-mon:ntpmon" "ntpsec-rs-keygen:ntpkeygen" \
+                    "ntpsec-rs-leapfetch:ntpleapfetch"; do
+            src="${pair%%:*}"
+            dst="${pair##*:}"
+            if [ -x "/usr/bin/$src" ]; then
+                ln -sfn "/usr/bin/$src" "/usr/bin/$dst"
+            else
+                echo "ERROR: $src binary not found" >&2
+                exit 1
+            fi
+        done
         ;;
 esac

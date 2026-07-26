@@ -252,14 +252,14 @@ pub fn recv_timestamp_from_cmsg(
         }
 
         // Ensure the reported length is within our buffer.
-        if (cmsg_len as usize) < std::mem::size_of::<libc::cmsghdr>() {
+        if cmsg_len < std::mem::size_of::<libc::cmsghdr>() {
             break;
         }
 
         // Compute the offset of this cmsghdr from the start.
         let offset = (current as usize) - (cmsg_hdr_ptr as usize);
         let data_offset = offset + aligned_cmsg_data_offset();
-        let data_len = (cmsg_len as usize).saturating_sub(std::mem::size_of::<libc::cmsghdr>());
+        let data_len = cmsg_len.saturating_sub(std::mem::size_of::<libc::cmsghdr>());
 
         if cmsg_level == libc::SOL_SOCKET && cmsg_type == libc::SCM_TIMESTAMPNS as libc::c_int {
             // SCM_TIMESTAMPNS: data is a single struct timespec.
@@ -306,7 +306,7 @@ pub fn recv_timestamp_from_cmsg(
 
         // Advance to the next cmsghdr.
         // CMSG_NXTHDR: align cmsg_len to sizeof(cmsghdr), add to pointer.
-        let next_offset = align_cmsg_len(cmsg_len as usize);
+        let next_offset = align_cmsg_len(cmsg_len);
 
         if next_offset < std::mem::size_of::<libc::cmsghdr>() {
             break;
@@ -401,7 +401,7 @@ impl Default for PacketStamp {
 
 /// Convert a `libc::timespec` to an NTP 64-bit fixed-point timestamp.
 fn timespec_to_ntp(ts: &libc::timespec) -> NtpTs64 {
-    ntp_fp::ts_to_ntp(ts.tv_sec, ts.tv_nsec as i64)
+    ntp_fp::ts_to_ntp(ts.tv_sec, ts.tv_nsec)
 }
 
 /// Return the offset from the start of a `cmsghdr` struct to its data.

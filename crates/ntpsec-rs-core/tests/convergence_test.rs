@@ -10,7 +10,6 @@
 
 use ntpsec_rs_core::daemon_engine::*;
 use ntpsec_rs_core::ntp_config::*;
-use ntpsec_rs_core::ntp_fp;
 use ntpsec_rs_core::ntp_io::*;
 use ntpsec_rs_core::ntp_types::*;
 
@@ -88,14 +87,13 @@ fn test_convergence_tracks_measured_offset() {
     let mut engine = DaemonEngine::new(config);
     assert_eq!(engine.system.stratum, 16);
 
-    let mut time_base = 1_000_000i64;
     let mut recorded_offsets: Vec<f64> = Vec::new();
     let mut total_adjustments = 0u32;
 
     // Inject samples with KNOWN initial offset, then a smaller offset
     // to simulate convergence.  Verify that the engine's reported offset
     // follows the injected trajectory.
-    for tick in 0..40 {
+    for (time_base, tick) in (1_000_000i64..).zip(0..40) {
         let now = NtpTs64 {
             seconds: time_base,
             fraction: 0,
@@ -122,7 +120,6 @@ fn test_convergence_tracks_measured_offset() {
         }
 
         recorded_offsets.push(engine.system.sys_offset);
-        time_base += 1;
     }
 
     // Phase 1 assertion: early offsets should reflect the large 50ms input
@@ -256,10 +253,9 @@ fn test_convergence_offset_trajectory_is_monotonic() {
     let config = make_config();
     let mut engine = DaemonEngine::new(config);
 
-    let mut time_base = 1_000_000i64;
     let mut offsets: Vec<f64> = Vec::new();
 
-    for tick in 0..50 {
+    for (time_base, tick) in (1_000_000i64..).zip(0..50) {
         let now = NtpTs64 {
             seconds: time_base,
             fraction: 0,
@@ -274,7 +270,6 @@ fn test_convergence_offset_trajectory_is_monotonic() {
             rx_time: now,
         });
         offsets.push(engine.system.sys_offset);
-        time_base += 1;
     }
 
     // After the initial large offset, the trajectory should converge.

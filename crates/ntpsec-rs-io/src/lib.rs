@@ -23,6 +23,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 #[derive(Debug)]
 pub struct RealSystemClock;
 
+#[allow(clippy::new_without_default)]
 impl RealSystemClock {
     pub fn new() -> Self {
         Self
@@ -118,6 +119,7 @@ pub struct RealNetworkIo {
     socket_fds: Vec<i32>,
 }
 
+#[allow(clippy::new_without_default)]
 impl RealNetworkIo {
     pub fn new() -> Self {
         let epoll_fd = Self::create_epoll();
@@ -198,8 +200,8 @@ impl RealNetworkIo {
         }
         // Collect ALL ready socket indices — not just the first one.
         let mut ready = Vec::with_capacity(nfds as usize);
-        for i in 0..nfds as usize {
-            let fd = events[i].u64 as i32;
+        for event in &events[..nfds as usize] {
+            let fd = event.u64 as i32;
             if let Some(idx) = self.socket_fds.iter().position(|&f| f == fd) {
                 if !ready.contains(&idx) {
                     ready.push(idx);
@@ -547,7 +549,7 @@ fn extract_scm_timestampns_with_source(msg: &libc::msghdr) -> Option<(NtpTs64, T
                     &*(data_ptr as *const [libc::timespec; 3])
                 };
                 // Prefer hardware timestamp (index 0), fall back to software (index 2).
-                let (ts, is_hardware) = if ts_array[0].tv_sec != 0 || ts_array[0].tv_nsec != 0 {
+                let (ts, _is_hardware) = if ts_array[0].tv_sec != 0 || ts_array[0].tv_nsec != 0 {
                     (&ts_array[0], true)
                 } else if ts_array[2].tv_sec != 0 || ts_array[2].tv_nsec != 0 {
                     (&ts_array[2], false)
@@ -556,11 +558,7 @@ fn extract_scm_timestampns_with_source(msg: &libc::msghdr) -> Option<(NtpTs64, T
                 } else {
                     return None;
                 };
-                let source = if is_hardware {
-                    TimestampSource::KernelNanoseconds
-                } else {
-                    TimestampSource::KernelNanoseconds
-                };
+                let source = TimestampSource::KernelNanoseconds;
                 return Some((ntp_fp::ts_to_ntp(ts.tv_sec, ts.tv_nsec), source));
             }
         }

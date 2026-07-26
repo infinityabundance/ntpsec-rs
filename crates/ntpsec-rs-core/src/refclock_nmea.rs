@@ -136,7 +136,7 @@ fn nmea_checksum_ok(line: &str) -> bool {
     };
 
     let mut computed = 0u8;
-    for &b in line[start..star].as_bytes() {
+    for &b in &line.as_bytes()[start..star] {
         computed ^= b;
     }
 
@@ -381,7 +381,7 @@ fn parse_zda(fields: &[&str]) -> Option<NmeaSentence> {
     let year: u32 = year_str.parse().ok()?;
 
     // Basic sanity checks.
-    if day < 1 || day > 31 || month < 1 || month > 12 || year < 1900 || year > 2100 {
+    if !(1..=31).contains(&day) || !(1..=12).contains(&month) || !(1900..=2100).contains(&year) {
         return None;
     }
 
@@ -440,7 +440,7 @@ fn parse_date(raw: &str) -> Option<(u8, u8, u8)> {
     let mm: u8 = raw[2..4].parse().ok()?;
     let yy: u8 = raw[4..6].parse().ok()?;
     // Basic sanity: day 1-31, month 1-12.
-    if dd < 1 || dd > 31 || mm < 1 || mm > 12 {
+    if !(1..=31).contains(&dd) || !(1..=12).contains(&mm) {
         return None;
     }
     Some((dd, mm, yy))
@@ -469,10 +469,7 @@ pub fn parse_nmea_sentence(line: &str) -> Option<NmeaSentence> {
     }
 
     // Split on '*', take the body before the checksum.
-    let body = match trimmed.split('*').next() {
-        Some(b) => b,
-        None => return None,
-    };
+    let body = trimmed.split('*').next()?;
 
     // Split into comma-separated fields.
     let fields: Vec<&str> = body.split(',').collect();
@@ -692,7 +689,7 @@ fn nmea_datetime_to_unix(dd: u8, mm: u8, yy: u8, hh: u8, mn: u8, ss: u8) -> Opti
     let day = dd as u32;
 
     // Basic validity check.
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
@@ -708,7 +705,7 @@ fn nmea_datetime4_to_unix(dd: u8, mm: u8, year: i64, hh: u8, mn: u8, ss: u8) -> 
     let month = mm as u32;
     let day = dd as u32;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
@@ -1640,10 +1637,12 @@ mod tests {
     #[test]
     fn test_nmea_refclock_serial_config() {
         let mut clock = NmeaRefclock::new(0);
-        let mut config = SerialConfig::default();
-        config.baud_rate = 9600;
-        config.parity = Parity::Even;
-        config.stop_bits = StopBits::Two;
+        let config = SerialConfig {
+            baud_rate: 9600,
+            parity: Parity::Even,
+            stop_bits: StopBits::Two,
+            ..Default::default()
+        };
         clock.set_serial_config(config);
         let stored = clock.serial_config();
         assert_eq!(stored.baud_rate, 9600);

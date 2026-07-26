@@ -28,8 +28,10 @@ use rustls::pki_types::ServerName;
 
 use crate::ntp_types::*;
 use crate::nts::*;
-use crate::nts_cookie::*;
 use crate::nts_extens::*;
+
+#[cfg(test)]
+use crate::nts_cookie::{CookieCipher, CookieKeyIndex};
 
 // ──── NTS Association ──────────────────────────────────────────────────────
 
@@ -881,7 +883,7 @@ mod tests {
     fn test_nts_association_needs_replenish() {
         let c2s = [0x11u8; 32];
         let s2c = [0x22u8; 32];
-        let mut assoc = NtsAssociation::new(c2s, s2c, vec![], 15, "host".to_string(), 4460, 0);
+        let assoc = NtsAssociation::new(c2s, s2c, vec![], 15, "host".to_string(), 4460, 0);
         // Empty cookies means needs replenish
         assert!(assoc.needs_replenish());
 
@@ -1566,11 +1568,11 @@ mod tests {
     #[test]
     fn test_nts_ke_tls13_only_config() {
         let root_store = build_root_store().unwrap();
-        let config =
+        let _config =
             rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_root_certificates(root_store)
                 .with_no_client_auth();
-        assert!(!config.alpn_protocols.is_empty() || true);
+        // Config created successfully — TLS 1.3 builder chain compiles and runs
     }
 
     // ── Perform NTS-KE wrapper test (integration path) ─────────────────

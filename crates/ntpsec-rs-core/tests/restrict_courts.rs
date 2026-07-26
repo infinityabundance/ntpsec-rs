@@ -13,7 +13,7 @@
 use ntpsec_rs_core::daemon_engine::*;
 use ntpsec_rs_core::ntp_config::*;
 use ntpsec_rs_core::ntp_io::*;
-use ntpsec_rs_core::ntp_restrict::*;
+
 use ntpsec_rs_core::ntp_types::*;
 
 fn peer_netaddr(ip: [u8; 4], port: u16) -> NetAddr {

@@ -7,8 +7,6 @@
 //   - ntpsec include/ntp_endian.h
 // =============================================================================
 
-use core::mem;
-
 /// Swap bytes in a 16-bit value.
 #[inline]
 pub fn swap_u16(x: u16) -> u16 {

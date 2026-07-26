@@ -345,7 +345,7 @@ pub fn build_control_fragments(
             count: 0,
         };
         let mut buf = msg.encode().to_vec();
-        while buf.len() % 4 != 0 {
+        while !buf.len().is_multiple_of(4) {
             buf.push(0);
         }
         fragments.push(buf);
@@ -372,7 +372,7 @@ pub fn build_control_fragments(
         buf.extend_from_slice(&data[offset..offset + chunk_size]);
 
         // Pad to 4-byte boundary (NTPsec MODE_SIX_ALIGNMENT)
-        while buf.len() % 4 != 0 {
+        while !buf.len().is_multiple_of(4) {
             buf.push(0);
         }
 
@@ -522,9 +522,7 @@ impl ControlExchange {
         if let Some(key) = auth_key {
             // Pad to 4-octet boundary for MAC (per NTPsec MODE_SIX_ALIGNMENT=4).
             let pad = (4 - (buf.len() & 3)) & 3;
-            for _ in 0..pad {
-                buf.push(0);
-            }
+            buf.resize(buf.len() + pad, 0);
             if let Some(mac) = key.mac(&buf) {
                 buf.extend_from_slice(&key.id.to_be_bytes());
                 buf.extend_from_slice(&mac);
@@ -544,9 +542,7 @@ impl ControlExchange {
                 packet.extend_from_slice(&self.data);
                 // Pad to 4-octet boundary for MAC calculation
                 let pad = (4 - (packet.len() & 3)) & 3;
-                for _ in 0..pad {
-                    packet.push(0);
-                }
+                packet.resize(packet.len() + pad, 0);
                 return key.verify_mac(&packet, &self.auth_data);
             }
         }
@@ -1049,8 +1045,8 @@ mod tests {
         let oc = ControlOpcode::new(true, false, false, opcodes::OP_READVAR);
         let encoded = oc.to_u8();
         let decoded = ControlOpcode::from_u8(encoded);
-        assert_eq!(decoded.response, true);
-        assert_eq!(decoded.error, false);
+        assert!(decoded.response);
+        assert!(!decoded.error);
         assert_eq!(decoded.op, opcodes::OP_READVAR);
     }
 

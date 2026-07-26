@@ -14,7 +14,6 @@
 //     calculations verified against ntpsec's compile-time asserts.
 // =============================================================================
 
-use core::fmt;
 use core::ops::{Add, Div, Mul, Sub};
 
 /// A time interval in seconds, as a newtype for dimensional safety.
@@ -76,21 +75,29 @@ impl Ppm {
 // ──── Sized integer types ───────────────────────────────────────────────────
 
 /// NTP signed 8-bit integer.
+#[allow(non_camel_case_types)]
 pub type s_char = i8;
 /// NTP unsigned 8-bit integer.
+#[allow(non_camel_case_types)]
 pub type u_char = u8;
 /// NTP unsigned 16-bit integer (network-order).
+#[allow(non_camel_case_types)]
 pub type u_short = u16;
 /// NTP unsigned 32-bit integer (network-order).
+#[allow(non_camel_case_types)]
 pub type u_int32 = u32;
 /// NTP signed 32-bit integer.
+#[allow(non_camel_case_types)]
 pub type int32 = i32;
 /// NTP unsigned 64-bit integer.
+#[allow(non_camel_case_types)]
 pub type u_int64 = u64;
 /// NTP signed 64-bit integer.
+#[allow(non_camel_case_types)]
 pub type int64 = i64;
 
 /// NTP Boolean type.
+#[allow(non_camel_case_types)]
 pub type ntp_bool = bool;
 
 // ──── NTP Timestamp Format ──────────────────────────────────────────────────
@@ -428,6 +435,7 @@ impl NtpPacket {
     ///   - A MAC is identified by its key-id: if the last 4 bytes of the
     ///     packet look like a plausible key-id and are followed by a digest,
     ///     we treat the trailing data as a MAC.
+    #[allow(clippy::type_complexity)]
     pub fn decode_full(data: &[u8]) -> Option<(Self, &[u8], Option<&[u8]>)> {
         if data.len() < NTP_HEADER_SIZE {
             return None;

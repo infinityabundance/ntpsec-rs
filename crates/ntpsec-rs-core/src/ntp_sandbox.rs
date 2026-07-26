@@ -300,10 +300,7 @@ fn install_seccomp_filter() -> Result<(), String> {
             1,
             0,
         ));
-        filter.push(bpf_stmt(
-            BPF_RET | BPF_K,
-            libc::SECCOMP_RET_KILL_PROCESS as u32,
-        ));
+        filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_KILL_PROCESS));
 
         // ── Syscall number check ───────────────────────────────────────
         load_and_check_syscalls(&mut filter, ALLOWED_SYSCALLS_AARCH64)?;
@@ -323,10 +320,7 @@ fn install_seccomp_filter() -> Result<(), String> {
         // ── Architecture check: kill if not x86_64 ─────────────────────
         filter.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH_OFFSET));
         filter.push(bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0));
-        filter.push(bpf_stmt(
-            BPF_RET | BPF_K,
-            libc::SECCOMP_RET_KILL_PROCESS as u32,
-        ));
+        filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_KILL_PROCESS));
 
         // ── Syscall number check ───────────────────────────────────────
         load_and_check_syscalls(&mut filter, ALLOWED_SYSCALLS)?;
@@ -360,14 +354,11 @@ fn load_and_check_syscalls(
             0, // jt=0: if equal, fall through to ALLOW
             1, // jf=1: if not equal, skip the next ALLOW instruction
         ));
-        filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW as u32));
+        filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW));
     }
 
     // No syscall matched — kill process
-    filter.push(bpf_stmt(
-        BPF_RET | BPF_K,
-        libc::SECCOMP_RET_KILL_PROCESS as u32,
-    ));
+    filter.push(bpf_stmt(BPF_RET | BPF_K, libc::SECCOMP_RET_KILL_PROCESS));
 
     if filter.len() > 256 {
         return Err(format!(

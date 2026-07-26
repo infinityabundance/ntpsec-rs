@@ -555,10 +555,10 @@ fn test_network_sync_offset_trajectory_converges() {
                 let resp_bytes = build_server_response(bytes, offset_s);
                 let source = peer_netaddr([127, 0, 0, 1], 123);
                 let dgram = ReceivedDatagram::test(resp_bytes, source, *destination, now);
-                let resp_actions = engine.handle(DaemonEvent::PacketReceived(dgram));
+                let _resp_actions = engine.handle(DaemonEvent::PacketReceived(dgram));
             }
             if let DaemonAction::AdjustClock(adj) = action {
-                adjustments.push(adj.clone());
+                adjustments.push(*adj);
             }
         }
         // Track peer offset directly from the clock filter (sys_offset only
@@ -592,7 +592,7 @@ fn test_network_sync_offset_trajectory_converges() {
         late_sys_offset
     );
     assert!(
-        adjustments.len() > 0,
+        !adjustments.is_empty(),
         "At least one clock adjustment must be emitted"
     );
 }

@@ -85,9 +85,10 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
         "rv" => {
             let associd_str = words.next();
             if words.next().is_some() {
-                return Err(format!(
+                return Err(
                     "too many arguments for 'rv': expected 0 or 1 associd, got extra arguments"
-                ));
+                        .to_string(),
+                );
             }
             let associd = match associd_str {
                 Some(a) => {
@@ -116,9 +117,9 @@ fn parse_cli_command(input: &str) -> Result<CliCommand, String> {
         "clockvar" | "cv" => {
             let associd_str = words.next();
             if words.next().is_some() {
-                return Err(format!(
-                    "too many arguments for 'clockvar': expected 0 or 1 associd"
-                ));
+                return Err(
+                    "too many arguments for 'clockvar': expected 0 or 1 associd".to_string()
+                );
             }
             let associd = match associd_str {
                 Some(a) => a
@@ -167,7 +168,7 @@ fn format_sysinfo(sys: &SystemVariables) -> String {
 
     let stratum = sys.stratum();
     let leap = sys.leap_str();
-    out.push_str(&format!("─────────────────────────────────\n"));
+    out.push_str("─────────────────────────────────\n");
     out.push_str(&format!("  stratum={} leap={}\n", stratum, leap));
 
     out
@@ -305,9 +306,8 @@ fn main() {
                             if !a.reachable {
                                 continue;
                             }
-                            match client.read_peer_vars(&cli.host, cli.port, a.associd) {
-                                Ok(pv) => rows.push(PeerRow::from_association(&pv, a)),
-                                Err(_) => {}
+                            if let Ok(pv) = client.read_peer_vars(&cli.host, cli.port, a.associd) {
+                                rows.push(PeerRow::from_association(&pv, a));
                             }
                         }
                         Ok(format_peers(&rows))
@@ -321,9 +321,8 @@ fn main() {
                     Ok(assocs) => {
                         let mut rows = Vec::new();
                         for a in &assocs {
-                            match client.read_peer_vars(&cli.host, cli.port, a.associd) {
-                                Ok(pv) => rows.push(PeerRow::from_association(&pv, a)),
-                                Err(_) => {}
+                            if let Ok(pv) = client.read_peer_vars(&cli.host, cli.port, a.associd) {
+                                rows.push(PeerRow::from_association(&pv, a));
                             }
                         }
                         Ok(format_peers(&rows))

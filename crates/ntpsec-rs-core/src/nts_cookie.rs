@@ -154,9 +154,11 @@ impl CookieCipher {
     /// ```
     ///
     /// The associated data (AAD) fed to AES-SIV includes:
+    ///
     ///   - key_id (4 bytes big-endian) — binds the envelope to a specific key
     ///   - nonce (16 bytes) — provides uniqueness
     ///   - server_identity (32 bytes, if set) — binds to the server identity
+    ///
     /// This prevents cross-server replay of cookie envelopes.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         let (key_id, key_bytes) = self
@@ -433,16 +435,16 @@ mod tests {
 
     fn test_key_32() -> [u8; 32] {
         let mut k = [0u8; 32];
-        for i in 0..32 {
-            k[i] = i as u8;
+        for (i, item) in k.iter_mut().enumerate() {
+            *item = i as u8;
         }
         k
     }
 
     fn test_key_32_alt() -> [u8; 32] {
         let mut k = [0u8; 32];
-        for i in 0..32 {
-            k[i] = 0xFFu8.wrapping_sub(i as u8);
+        for (i, item) in k.iter_mut().enumerate() {
+            *item = 0xFFu8.wrapping_sub(i as u8);
         }
         k
     }
@@ -898,7 +900,6 @@ mod tests {
         assert_eq!(cloned.aead, cookie.aead);
     }
 
-    #[test]
     // ── NTPsec cookie interoperability test ─────────────────────────
 
     /// Verifies the cookie envelope format matches NTPsec expectations.

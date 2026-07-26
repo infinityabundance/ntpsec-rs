@@ -8,7 +8,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,7 +38,7 @@ pub struct ArbiterRefclock {
     /// Timecode switch counter
     tcswitch: i32,
     /// Last receive timestamp
-    laststamp: Option<std::time::Instant>,
+    _laststamp: Option<std::time::Instant>,
 }
 
 impl ArbiterRefclock {
@@ -52,7 +52,7 @@ impl ArbiterRefclock {
             status: None,
             latlon: None,
             tcswitch: 0,
-            laststamp: None,
+            _laststamp: None,
         }
     }
 
@@ -89,7 +89,7 @@ impl ArbiterRefclock {
     ///   `arb_receive()` — parses the B5 format timecode and optionally
     ///   extracts the TQ quality character and SR status string.
     pub fn read_sample(&mut self) -> Result<Option<RefClockSample>, String> {
-        const LENARB: usize = 24;
+        const _LENARB: usize = 24;
 
         let reader = match self.reader.as_mut() {
             Some(r) => r,
@@ -158,7 +158,7 @@ impl ArbiterRefclock {
                 Err(_) => ts_to_ntp(0, 0),
             };
 
-            let gps_time = ts_to_ntp(unix_secs as i64, 0);
+            let _gps_time = ts_to_ntp(unix_secs, 0);
 
             // Dispersion based on quality character
             let dispersion = match self.qualchar {

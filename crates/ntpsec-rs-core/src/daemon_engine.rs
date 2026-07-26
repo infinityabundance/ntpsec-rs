@@ -152,6 +152,7 @@ pub struct RefclockManager {
     pub instances: Vec<RefclockInstance>,
 }
 
+#[allow(clippy::new_without_default)]
 impl RefclockManager {
     pub fn new() -> Self {
         Self {
@@ -909,7 +910,7 @@ struct MruFragmentState {
     /// The current offset (entry index) for the next fragment.
     offset: u16,
     /// Total number of entries available at query time.
-    total_entries: usize,
+    _total_entries: usize,
 }
 
 /// Tracks system events for the sys_status word's event count and code.
@@ -926,7 +927,7 @@ struct SystemEventTracker {
     /// Peer count from the previous selection run (for detecting changes).
     last_peer_count: u32,
     /// Previous system peer association ID (for detecting sys_peer changes).
-    last_sys_peer_associd: Option<u16>,
+    _last_sys_peer_associd: Option<u16>,
     /// Previous stratum value.
     last_stratum: u8,
     /// Previous leap indicator value.
@@ -1069,7 +1070,7 @@ impl SystemEventTracker {
             last_event_code: 0,
             event_count: 0,
             last_peer_count: sys.peer_count,
-            last_sys_peer_associd: None,
+            _last_sys_peer_associd: None,
             last_stratum: sys.stratum,
             last_leap: sys.leap,
         }
@@ -1169,7 +1170,7 @@ impl DaemonEngine {
 
         // ── Clear existing dynamic state ──────────────────────────────
         // Remove all existing peers and their poll timers
-        let old_ids: Vec<u16> = self.peers.iter().filter_map(|p| Some(p.associd)).collect();
+        let old_ids: Vec<u16> = self.peers.iter().map(|p| p.associd).collect();
         for associd in &old_ids {
             self.peers.remove_by_associd(*associd);
         }
@@ -1653,7 +1654,7 @@ impl DaemonEngine {
                     // Host and cert are stored for NTS-KE client use
                     let _ = (host, port, cert);
                 }
-                ConfigOption::Include(path) => {
+                ConfigOption::Include(_path) => {
                     // includefile is handled by the config parser at parse time
                     // includefile is handled at parse time by the config parser
                 }
@@ -1710,7 +1711,7 @@ impl DaemonEngine {
                             );
                             // Register in pool_resolver for periodic refresh
                             if pending.is_pool || addresses.len() > 1 {
-                                let pool_entry = self
+                                let _pool_entry = self
                                     .pool_resolver
                                     .entry(pending.hostname.clone())
                                     .or_insert_with(|| PoolState {
@@ -1801,7 +1802,7 @@ impl DaemonEngine {
                             .0;
                             match crate::nts_client::build_nts_request(&pkt, nts) {
                                 Ok(bytes) => (pkt, bytes),
-                                Err(e) => {
+                                Err(_e) => {
                                     // NTS request construction failed — skip this poll.
                                     // The daemon shell layer should log this event
                                     // from the DaemonAction::Log variant.
@@ -1894,7 +1895,7 @@ impl DaemonEngine {
                     // Periodic statistics write — emit AppendStatistic actions
                     // for the shell to handle (keeps I/O out of the engine).
                     if let Some(ref stats_dir) = self.stats_dir {
-                        let path = std::path::Path::new(stats_dir);
+                        let _path = std::path::Path::new(stats_dir);
                         let line = self
                             .filegen
                             .format_loopstats(&self.system, self.loop_filter.frequency_ppm());
@@ -1911,7 +1912,7 @@ impl DaemonEngine {
         // ── Periodic stats writes (every 10 iterations) ───────────────
         // Emit AppendStatistic actions for the shell to handle.
         self.stats_write_counter += 1;
-        if self.stats_write_counter % 10 == 0 {
+        if self.stats_write_counter.is_multiple_of(10) {
             if let Some(ref _stats_dir) = self.stats_dir {
                 // Format loopstats line
                 let loop_line = self
@@ -1958,7 +1959,7 @@ impl DaemonEngine {
         // distinguish refresh requests from initial resolution requests.
         let mut refresh_ids: Vec<(u64, String, u16)> = Vec::new();
         for (hostname, pool) in &self.pool_resolver {
-            if now.seconds > pool.last_refresh + pool.refresh_interval as i64 {
+            if now.seconds > pool.last_refresh + pool.refresh_interval {
                 let request_id = u64::MAX / 2 + refresh_ids.len() as u64;
                 refresh_ids.push((request_id, hostname.clone(), pool.port));
             }
@@ -2307,12 +2308,12 @@ impl DaemonEngine {
             self.system.sys_wander = self.loop_filter.wander;
 
             // Persist drift periodically
-            if self.loop_filter.update_count % 100 == 0 {
+            if self.loop_filter.update_count.is_multiple_of(100) {
                 actions.push(DaemonAction::PersistDrift(self.loop_filter.frequency_ppm()));
             }
 
             // Log status periodically
-            if self.loop_filter.update_count % 10 == 0 {
+            if self.loop_filter.update_count.is_multiple_of(10) {
                 actions.push(DaemonAction::Log(format!(
                     "status peers={} stratum={} offset={:.6}s freq={:.3}ppm jitter={:.6}s",
                     self.system.peer_count,
@@ -2519,15 +2520,13 @@ impl DaemonEngine {
 
                 // Enforce NOTRUST: unauthenticated packets from NOTRUST sources
                 // are rejected regardless of whether the packet carries a MAC.
-                if restrict_flags.contains(RestrictFlags::NOTRUST) {
-                    if request_keyid.is_none() {
-                        // NOTRUST requires authentication — no MAC present
-                        self.system.server_counters.restricted =
-                            self.system.server_counters.restricted.saturating_add(1);
-                        return vec![DaemonAction::Log(
-                            "NOTRUST: unauthenticated packet rejected".to_string(),
-                        )];
-                    }
+                if restrict_flags.contains(RestrictFlags::NOTRUST) && request_keyid.is_none() {
+                    // NOTRUST requires authentication — no MAC present
+                    self.system.server_counters.restricted =
+                        self.system.server_counters.restricted.saturating_add(1);
+                    return vec![DaemonAction::Log(
+                        "NOTRUST: unauthenticated packet rejected".to_string(),
+                    )];
                 }
 
                 // If the request carries a MAC, verify it before responding.
@@ -2570,17 +2569,17 @@ impl DaemonEngine {
                         self.system.auth_counters.encrypts.saturating_add(1);
                 }
 
-                return vec![DaemonAction::Send {
+                vec![DaemonAction::Send {
                     destination: dgram.source,
                     bytes,
-                }];
+                }]
             }
 
             // ─── Server response → update matching peer ────────────────
             NtpMode::Server => {
                 self.system.server_counters.received =
                     self.system.server_counters.received.saturating_add(1);
-                return self.handle_server_response(pkt, dgram);
+                self.handle_server_response(pkt, dgram)
             }
 
             // ─── Symmetric passive (Mode 2) — create ephemeral peer ─────
@@ -2634,15 +2633,13 @@ impl DaemonEngine {
                     }
                 };
 
-                if restrict_flags.contains(RestrictFlags::NOTRUST) {
-                    if request_keyid.is_none() {
-                        self.system.server_counters.restricted =
-                            self.system.server_counters.restricted.saturating_add(1);
-                        actions.push(DaemonAction::Log(
-                            "NOTRUST: unauthenticated SymPassive rejected".to_string(),
-                        ));
-                        return actions;
-                    }
+                if restrict_flags.contains(RestrictFlags::NOTRUST) && request_keyid.is_none() {
+                    self.system.server_counters.restricted =
+                        self.system.server_counters.restricted.saturating_add(1);
+                    actions.push(DaemonAction::Log(
+                        "NOTRUST: unauthenticated SymPassive rejected".to_string(),
+                    ));
+                    return actions;
                 }
 
                 if let Some(kid) = request_keyid {
@@ -2691,7 +2688,7 @@ impl DaemonEngine {
                     destination: dgram.source,
                     bytes,
                 });
-                return actions;
+                actions
             }
 
             // ─── Broadcast (Mode 5) — handle with optional auth ─────────────
@@ -2748,21 +2745,21 @@ impl DaemonEngine {
                     )));
                 }
 
-                return actions;
+                actions
             }
 
             // ─── Private/ntpdc (Mode 7) — deprecated ───────────────────────
             NtpMode::Private => {
                 self.system.server_counters.rejected =
                     self.system.server_counters.rejected.saturating_add(1);
-                return vec![DaemonAction::Log(
+                vec![DaemonAction::Log(
                     "private mode packet (ntpdc) received — deprecated, dropped".to_string(),
-                )];
+                )]
             }
 
             // ─── Reserved (Mode 0) — should not occur ──────────────────────
             NtpMode::Reserved => {
-                return vec![];
+                vec![]
             }
 
             // ─── NtpControl (Mode 6) — already handled above; unreachable here ─
@@ -2805,38 +2802,34 @@ impl DaemonEngine {
                 // NOTRUST: the packet must carry a MAC verifiable against
                 // a trusted key in the key store.  A mere presence check
                 // is insufficient — we must actually verify.
-                let tail = split_packet_tail(dgram_bytes);
-                match tail {
-                    Ok((_, Some((kid, mac_val)))) => {
-                        // NOTRUST requires the key to be TRUSTED, not just loaded.
-                        if !auth.is_trusted_key(kid) {
-                            auth_counters.notfound = auth_counters.notfound.saturating_add(1);
-                            return ResponseAuthResult::Failed {
-                                reason: "NOTRUST: key ID {} is not trusted".to_string(),
-                                flash_bit: FlashBits::TEST8.bits(),
-                            };
-                        }
-                        // Look up the key and verify
-                        if let Some(key) = auth.get_key(kid) {
-                            let auth_start = dgram_bytes.len() - (4 + mac_val.len());
-                            let authenticated_data = &dgram_bytes[..auth_start];
-                            if key.verify_mac(authenticated_data, mac_val) {
-                                auth_counters.foundkey = auth_counters.foundkey.saturating_add(1);
-                                return ResponseAuthResult::Authenticated;
-                            }
-                            auth_counters.badauth = auth_counters.badauth.saturating_add(1);
-                            return ResponseAuthResult::Failed {
-                                reason: "NOTRUST: MAC verification failed".to_string(),
-                                flash_bit: FlashBits::TEST10.bits(),
-                            };
-                        }
+                if let Ok((_, Some((kid, mac_val)))) = split_packet_tail(dgram_bytes) {
+                    // NOTRUST requires the key to be TRUSTED, not just loaded.
+                    if !auth.is_trusted_key(kid) {
                         auth_counters.notfound = auth_counters.notfound.saturating_add(1);
                         return ResponseAuthResult::Failed {
-                            reason: "NOTRUST: unknown key ID in packet".to_string(),
+                            reason: "NOTRUST: key ID {} is not trusted".to_string(),
                             flash_bit: FlashBits::TEST8.bits(),
                         };
                     }
-                    _ => {}
+                    // Look up the key and verify
+                    if let Some(key) = auth.get_key(kid) {
+                        let auth_start = dgram_bytes.len() - (4 + mac_val.len());
+                        let authenticated_data = &dgram_bytes[..auth_start];
+                        if key.verify_mac(authenticated_data, mac_val) {
+                            auth_counters.foundkey = auth_counters.foundkey.saturating_add(1);
+                            return ResponseAuthResult::Authenticated;
+                        }
+                        auth_counters.badauth = auth_counters.badauth.saturating_add(1);
+                        return ResponseAuthResult::Failed {
+                            reason: "NOTRUST: MAC verification failed".to_string(),
+                            flash_bit: FlashBits::TEST10.bits(),
+                        };
+                    }
+                    auth_counters.notfound = auth_counters.notfound.saturating_add(1);
+                    return ResponseAuthResult::Failed {
+                        reason: "NOTRUST: unknown key ID in packet".to_string(),
+                        flash_bit: FlashBits::TEST8.bits(),
+                    };
                 }
                 server_counters.restricted = server_counters.restricted.saturating_add(1);
                 return ResponseAuthResult::Failed {
@@ -3098,7 +3091,7 @@ impl DaemonEngine {
         // Check authentication if a control key is configured.
         // The key ID used MUST match the configured control key.
         let configured_ckey = self.auth.get_control_key();
-        let auth_valid = configured_ckey.map_or(false, |ckey| {
+        let auth_valid = configured_ckey.is_some_and(|ckey| {
             // Verify key ID matches the configured control key
             exchange.auth_keyid == Some(ckey)
                 // Verify the configured key exists in the store
@@ -3308,9 +3301,7 @@ impl DaemonEngine {
                             if val.len() <= 4 && val.chars().all(|c| c.is_ascii_graphic()) {
                                 let mut bytes = [0u8; 4];
                                 let b = val.as_bytes();
-                                for i in 0..b.len().min(4) {
-                                    bytes[i] = b[i];
-                                }
+                                bytes[..b.len().min(4)].copy_from_slice(&b[..b.len().min(4)]);
                                 self.system.reference_id = u32::from_be_bytes(bytes);
                             } else if let Ok(v) =
                                 u32::from_str_radix(val.trim_start_matches("0x"), 16)
@@ -3380,9 +3371,7 @@ impl DaemonEngine {
                             if val.len() <= 4 && val.chars().all(|c| c.is_ascii_graphic()) {
                                 let mut bytes = [0u8; 4];
                                 let b = val.as_bytes();
-                                for i in 0..b.len().min(4) {
-                                    bytes[i] = b[i];
-                                }
+                                bytes[..b.len().min(4)].copy_from_slice(&b[..b.len().min(4)]);
                                 self.system.reference_id = u32::from_be_bytes(bytes);
                                 applied.push((key.clone(), val.clone()));
                             } else if let Ok(v) =
@@ -3431,7 +3420,7 @@ impl DaemonEngine {
             // OP_REQ_NONCE: generate and return a nonce for MRU queries
             opcodes::OP_REQ_NONCE => {
                 let nonce_bytes = self.monitor.nonce_cache.generate_nonce();
-                let nonce_str = hex::encode(&nonce_bytes);
+                let nonce_str = hex::encode(nonce_bytes);
                 format!("nonce={}", nonce_str).into_bytes()
             }
 
@@ -3641,7 +3630,7 @@ impl DaemonEngine {
                                 MruFragmentState {
                                     nonce: nonce_arr,
                                     offset: new_offset,
-                                    total_entries: total_filtered,
+                                    _total_entries: total_filtered,
                                 },
                             );
                         }
@@ -3949,6 +3938,7 @@ fn ip_to_sockaddr_storage(ip: std::net::IpAddr) -> libc::sockaddr_storage {
 }
 
 /// Create a peer from a resolved address and association options template.
+#[allow(clippy::too_many_arguments)]
 fn create_peer_from_template(
     peers: &mut PeerTable,
     next_associd: &mut u16,
@@ -5197,7 +5187,7 @@ mod tests {
         let mut packet = header.to_vec();
         packet.extend_from_slice(&body);
         // Pad to 4-byte boundary
-        while packet.len() % 4 != 0 {
+        while !packet.len().is_multiple_of(4) {
             packet.push(0);
         }
         // Append key ID and MAC
@@ -5317,7 +5307,7 @@ mod tests {
         engine.monitor.record(&sa2, now);
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -5725,7 +5715,7 @@ mod tests {
         let mut config = ConfigTree::new();
         // First disable monitor
         config.add(ConfigOption::Disable("monitor".to_string()));
-        let mut engine = DaemonEngine::new(config);
+        let engine = DaemonEngine::new(config);
         assert!(!engine.monitor_enabled);
         assert_eq!(engine.monitor.max_entries, 0);
 
@@ -5967,7 +5957,7 @@ mod tests {
         engine.monitor.record(&sa, now);
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -6027,7 +6017,7 @@ mod tests {
         }
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -6122,13 +6112,13 @@ mod tests {
         let client_key = peer_netaddr([10, 0, 0, 1], 54321);
         if let Some(state) = engine.pending_mru_fragments.get(&client_key) {
             assert!(state.offset > 0, "offset should advance past sent entries");
-            assert!(state.total_entries >= state.offset as usize);
+            assert!(state._total_entries >= state.offset as usize);
         }
 
         // Verify payload data is contiguous across fragments
         let mut assembled = Vec::new();
         for bytes in &fragment_bytes {
-            let (header, payload) = ControlMessage::decode(bytes).unwrap();
+            let (_header, payload) = ControlMessage::decode(bytes).unwrap();
             assembled.extend_from_slice(payload);
         }
         // Re-join the assembled data
@@ -6155,7 +6145,7 @@ mod tests {
         }
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
 
         // ── First request ─────────────────────────────────────────────
         let body1 = format!("nonce={}", nonce_str);
@@ -6266,7 +6256,7 @@ mod tests {
         // No entries recorded
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -6328,7 +6318,7 @@ mod tests {
         }
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -6388,7 +6378,7 @@ mod tests {
         }
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -6444,7 +6434,7 @@ mod tests {
         let mut assembled = Vec::new();
         for action in &actions {
             if let DaemonAction::Send { bytes, .. } = action {
-                let (header, payload) = ControlMessage::decode(bytes).unwrap();
+                let (_header, payload) = ControlMessage::decode(bytes).unwrap();
                 assembled.extend_from_slice(payload);
             }
         }
@@ -6483,7 +6473,7 @@ mod tests {
         engine.monitor.record(&sa2, now);
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
         let body = format!("nonce={}", nonce_str);
 
         let mut msg = ControlMessage::zeroed();
@@ -6587,7 +6577,7 @@ mod tests {
 
         // Generate a nonce
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
 
         // First use - should succeed
         let body1 = format!("nonce={}", nonce_str);
@@ -6661,7 +6651,7 @@ mod tests {
         }
 
         let nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let nonce_str = hex::encode(&nonce_bytes);
+        let nonce_str = hex::encode(nonce_bytes);
 
         // Legitimate client creates fragment state
         let body = format!("nonce={}", nonce_str);
@@ -6695,7 +6685,7 @@ mod tests {
 
         // Generate a new nonce for the spoofed query
         let new_nonce_bytes = engine.monitor.nonce_cache.generate_nonce();
-        let new_nonce_str = hex::encode(&new_nonce_bytes);
+        let new_nonce_str = hex::encode(new_nonce_bytes);
         let spoofed_offset = engine.pending_mru_fragments[&legit_source].offset;
         let spoof_body = format!("nonce={},offset={}", new_nonce_str, spoofed_offset);
 
@@ -6830,7 +6820,7 @@ mod tests {
         let mut packet = msg.encode().to_vec();
         packet.extend_from_slice(body.as_bytes());
         // Pad to 4-byte boundary
-        while packet.len() % 4 != 0 {
+        while !packet.len().is_multiple_of(4) {
             packet.push(0);
         }
 
@@ -6850,7 +6840,7 @@ mod tests {
 
         let mut packet2 = msg2.encode().to_vec();
         packet2.extend_from_slice(body.as_bytes());
-        while packet2.len() % 4 != 0 {
+        while !packet2.len().is_multiple_of(4) {
             packet2.push(0);
         }
 
@@ -6870,7 +6860,7 @@ mod tests {
 
         let mut packet3 = msg3.encode().to_vec();
         packet3.extend_from_slice(body.as_bytes());
-        while packet3.len() % 4 != 0 {
+        while !packet3.len().is_multiple_of(4) {
             packet3.push(0);
         }
 
@@ -6891,7 +6881,7 @@ mod tests {
 
         let mut packet4 = msg4.encode().to_vec();
         packet4.extend_from_slice(body.as_bytes());
-        while packet4.len() % 4 != 0 {
+        while !packet4.len().is_multiple_of(4) {
             packet4.push(0);
         }
 
@@ -7113,7 +7103,7 @@ mod tests {
         // Sign the packet with key 11 (wrong key from peer's perspective)
         let mut engine2 = DaemonEngine::new(ConfigTree::new());
         add_auth_key(&mut engine2, 11, DigestType::Md5, b"wrongkey");
-        let wrong_packet = build_authenticated_packet(&engine2, req.wire_t1, 11);
+        let _wrong_packet = build_authenticated_packet(&engine2, req.wire_t1, 11);
 
         // But we need to set the keyid in the packet to 10 (what peer expects)
         // The MAC is computed over the header, and the keyid is appended after.
@@ -7288,7 +7278,7 @@ mod tests {
             stratum: 3,
             refid: "GPS".to_string(),
         });
-        let mut engine = DaemonEngine::new(config);
+        let engine = DaemonEngine::new(config);
 
         // Create a peer and apply fudge
         let sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -7315,7 +7305,7 @@ mod tests {
             stratum: 5,
             refid: "GPS.".to_string(),
         });
-        let mut engine = DaemonEngine::new(config);
+        let engine = DaemonEngine::new(config);
 
         let sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut peer = Peer::new(sa, NtpMode::Client, NtpVersion::V4, 4, 10);
@@ -7529,7 +7519,7 @@ mod tests {
 
         // Build response signed with key 99 (valid MAC, but wrong key_id)
         // The packet has key_id=99 but peer expects key_id=10
-        let mut packet = build_authenticated_packet(&engine, req.wire_t1, 99);
+        let packet = build_authenticated_packet(&engine, req.wire_t1, 99);
 
         let dgram = ReceivedDatagram::test(
             packet,

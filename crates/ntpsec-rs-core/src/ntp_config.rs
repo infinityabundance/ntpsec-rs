@@ -333,7 +333,7 @@ pub enum InterfaceAction {
 }
 
 impl InterfaceAction {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "listen" => InterfaceAction::Listen,
             "drop" => InterfaceAction::Drop,
@@ -1302,7 +1302,7 @@ fn build_option(d: &str, args: &[String]) -> Result<ConfigOption, String> {
             if args.is_empty() {
                 return Err("interface requires an action and name".to_string());
             }
-            let action = InterfaceAction::from_str(&args[0]);
+            let action = InterfaceAction::parse_str(&args[0]);
             let name = if args.len() > 1 {
                 args[1..].join(" ")
             } else {
@@ -1787,7 +1787,7 @@ mod tests {
     fn test_parse_interface_ignore() {
         let t = parse_config("interface ignore eth2\n");
         let ifaces = t.interface_entries();
-        if let ConfigOption::Interface { name, action } = ifaces[0] {
+        if let ConfigOption::Interface { name: _, action } = ifaces[0] {
             assert_eq!(*action, InterfaceAction::Ignore);
         }
     }
@@ -1924,7 +1924,7 @@ mod tests {
         let t =
             parse_config("fudge 28 0 time1 0.001 stratum 1 refid GPS\nfudge 28 1 time2 0.005\n");
         assert_eq!(t.fudge_values.len(), 2);
-        let (t1, t2, s, rid) = t.fudge_values.get(&(28, 0)).unwrap();
+        let (t1, _t2, s, rid) = t.fudge_values.get(&(28, 0)).unwrap();
         assert!((*t1 - 0.001).abs() < 1e-9);
         assert_eq!(*s, 1);
         assert_eq!(rid, "GPS");
@@ -2028,12 +2028,21 @@ mod tests {
 
     #[test]
     fn test_interface_action_from_str() {
-        assert_eq!(InterfaceAction::from_str("listen"), InterfaceAction::Listen);
-        assert_eq!(InterfaceAction::from_str("drop"), InterfaceAction::Drop);
-        assert_eq!(InterfaceAction::from_str("ignore"), InterfaceAction::Ignore);
-        assert_eq!(InterfaceAction::from_str("none"), InterfaceAction::None);
-        assert_eq!(InterfaceAction::from_str("unknown"), InterfaceAction::None);
-        assert_eq!(InterfaceAction::from_str("LISTEN"), InterfaceAction::Listen);
+        assert_eq!(
+            InterfaceAction::parse_str("listen"),
+            InterfaceAction::Listen
+        );
+        assert_eq!(InterfaceAction::parse_str("drop"), InterfaceAction::Drop);
+        assert_eq!(
+            InterfaceAction::parse_str("ignore"),
+            InterfaceAction::Ignore
+        );
+        assert_eq!(InterfaceAction::parse_str("none"), InterfaceAction::None);
+        assert_eq!(InterfaceAction::parse_str("unknown"), InterfaceAction::None);
+        assert_eq!(
+            InterfaceAction::parse_str("LISTEN"),
+            InterfaceAction::Listen
+        );
     }
 
     // ── New directive tests ───────────────────────────────────────────────

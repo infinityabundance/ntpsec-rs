@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use crate::ntp_peer::Peer;
 use crate::ntp_proto::SystemState;
+#[cfg(test)]
 use crate::ntp_types::{NtpMode, NtpVersion};
 
 /// File generation type (matches ntpsec).
@@ -632,7 +633,7 @@ mod tests {
             reg.open(&name, &dir).unwrap();
 
             // Write to create the file
-            let sys = SystemState::new();
+            let _sys = SystemState::new();
             // Use write_stat_file_ex with no handle to create the file
             write_stat_file(&dir.join(&name), "test content").unwrap();
             assert!(dir.join(&name).exists());
@@ -719,7 +720,7 @@ mod tests {
         // We should have at most FILEGEN_MAX_BACKUP + 1 backup files
         // (name.1 through name.9)
         for i in 1..=9 {
-            let backup = dir.join(format!("backuptest.{}", i));
+            let _backup = dir.join(format!("backuptest.{}", i));
             if i as u32 <= FILEGEN_MAX_BACKUP {
                 // The backups may or may not exist depending on the exact sequence
             }

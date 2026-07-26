@@ -10,7 +10,7 @@
 // =============================================================================
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +20,7 @@ use crate::ntp_types::LeapIndicator;
 
 /// State machine states for modem dial-up
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum ModemState {
     Idle,
     Setup,
@@ -106,7 +107,7 @@ impl ModemRefclock {
     pub fn read_sample(&mut self) -> Result<Option<RefClockSample>, String> {
         const LENACTS: usize = 50;
         const LENUSNO: usize = 20;
-        const LENPTB: usize = 78;
+        const _LENPTB: usize = 78;
         const LENTYPE0: usize = 22;
         const LENTYPE2: usize = 24;
 
@@ -166,7 +167,7 @@ impl ModemRefclock {
                                         ) {
                                             let full_year =
                                                 if year < 100 { year + 2000 } else { year };
-                                            let unix_secs =
+                                            let _unix_secs =
                                                 date_to_unix(full_year, month, day, hour, min, sec);
 
                                             let receive_ts = match now.duration_since(UNIX_EPOCH) {
@@ -214,7 +215,7 @@ impl ModemRefclock {
                                     .unwrap_or_default();
                                 let current_year = 1970 + (now_sys.as_secs() / 31536000) as i32;
 
-                                let unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
+                                let _unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
 
                                 let receive_ts = match now.duration_since(UNIX_EPOCH) {
                                     Ok(d) => {
@@ -260,7 +261,7 @@ impl ModemRefclock {
                             .unwrap_or_default();
                         let current_year = 1970 + (now_sys.as_secs() / 31536000) as i32;
 
-                        let unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
+                        let _unix_secs = yday_to_unix(current_year, yday, hour, min, sec);
 
                         let receive_ts = match now.duration_since(UNIX_EPOCH) {
                             Ok(d) => {
@@ -284,7 +285,7 @@ impl ModemRefclock {
             }
 
             // Spectracom Format 2: "IQyy ddd hh:mm:ss.mmm LD"
-            if len >= LENTYPE2 && len < 30 {
+            if (LENTYPE2..30).contains(&len) {
                 let chars: Vec<char> = s.chars().collect();
                 if chars.len() >= 24 {
                     let yday_str: String = chars[6..9].iter().collect();
@@ -308,7 +309,7 @@ impl ModemRefclock {
                             1970 + (now_sys.as_secs() / 31536000) as i32
                         };
 
-                        let unix_secs = yday_to_unix(year, yday, hour, min, sec);
+                        let _unix_secs = yday_to_unix(year, yday, hour, min, sec);
 
                         let receive_ts = match now.duration_since(UNIX_EPOCH) {
                             Ok(d) => {
