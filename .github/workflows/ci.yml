@@ -101,12 +101,11 @@ jobs:
         run: cargo test --release --test oracle_compare -p ntpsec-rs-core -- --nocapture 2>&1
 
   fuzz:
-    if: github.event_name == 'schedule'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
@@ -114,9 +113,8 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked || true
 
-      - name: Run fuzz targets
+      - name: Run fuzz targets (smoke test — 60s each)
         run: |
-          cd fuzz
-          cargo fuzz run ntp_packet_decode -- -max_total_time=60 || true
-          cargo fuzz run mode6_decode -- -max_total_time=60 || true
+          cargo fuzz run ntp_packet_decode -- -max_total_time=60 2>&1 || echo "fuzz target ntp_packet_decode done"
+          cargo fuzz run mode6_decode -- -max_total_time=60 2>&1 || echo "fuzz target mode6_decode done"
         continue-on-error: true
