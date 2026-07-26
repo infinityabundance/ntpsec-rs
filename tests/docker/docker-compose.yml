@@ -34,7 +34,7 @@ services:
   ntpsec-rs:
     image: ntpsec-rs-package
     command: >
-      ntpd-rs -c /etc/ntp-rs.conf -n -I 10.100.0.20
+      ntpd-rs -c /etc/ntp-rs.conf -n -I 0.0.0.0
     volumes:
       - ./ntp-rs.conf:/etc/ntp-rs.conf:ro
     networks:
