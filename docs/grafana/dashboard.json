@@ -1,0 +1,1010 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "dashboard": {
+    "__description": "NTPsec-rs daemon monitoring dashboard. Displays system clock discipline, per-peer synchronization statistics, and health metrics for all configured NTP peers.",
+    "title": "NTPsec-rs Daemon",
+    "description": "NTPsec-rs daemon monitoring dashboard. Displays system clock discipline, per-peer synchronization statistics, and health metrics for all configured NTP peers.",
+    "tags": ["ntp", "ntpsec", "clock", "time-synchronization", "prometheus"],
+    "timezone": "browser",
+    "editable": true,
+    "graphTooltip": 1,
+    "panels": [
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+        "id": 1,
+        "panels": [],
+        "title": "System Overview",
+        "type": "row"
+      },
+      {
+        "id": 2,
+        "gridPos": { "h": 6, "w": 4, "x": 0, "y": 1 },
+        "type": "stat",
+        "title": "Stratum",
+        "description": "Current stratum of the system peer",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 1, "color": "green" },
+                { "value": 5, "color": "yellow" },
+                { "value": 16, "color": "red" }
+              ]
+            },
+            "mappings": [
+              { "type": "value", "value": "16", "text": "Unsynchronized" }
+            ],
+            "min": 0,
+            "max": 16
+          },
+          "overrides": []
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "targets": [
+          {
+            "expr": "ntp_stratum{source=\"ntpsec-rs\"}",
+            "legendFormat": "Stratum",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "gridPos": { "h": 6, "w": 4, "x": 4, "y": 1 },
+        "type": "stat",
+        "title": "Leap Indicator",
+        "description": "Leap indicator: 0=OK, 1=add leap second, 2=remove leap second, 3=alarm",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 0, "color": "green" },
+                { "value": 1, "color": "yellow" },
+                { "value": 2, "color": "yellow" },
+                { "value": 3, "color": "red" }
+              ]
+            },
+            "mappings": [
+              { "type": "value", "value": "0", "text": "No Warning" },
+              { "type": "value", "value": "1", "text": "Add Leap" },
+              { "type": "value", "value": "2", "text": "Remove Leap" },
+              { "type": "value", "value": "3", "text": "Alarm" }
+            ],
+            "min": 0,
+            "max": 3
+          },
+          "overrides": []
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "targets": [
+          {
+            "expr": "ntp_leap_indicator{source=\"ntpsec-rs\"}",
+            "legendFormat": "Leap",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "gridPos": { "h": 6, "w": 4, "x": 8, "y": 1 },
+        "type": "stat",
+        "title": "Sync Status",
+        "description": "Synchronization status based on stratum and peer count",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 0, "color": "red" },
+                { "value": 1, "color": "green" }
+              ]
+            },
+            "mappings": [
+              { "type": "value", "value": "0", "text": "Unsynchronized" },
+              { "type": "value", "value": "1", "text": "Synchronized" }
+            ],
+            "min": 0,
+            "max": 1
+          },
+          "overrides": []
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "targets": [
+          {
+            "expr": "ntp_stratum{source=\"ntpsec-rs\"} < 16 and ntp_peers_reachable{source=\"ntpsec-rs\"} > 0",
+            "legendFormat": "Sync",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "gridPos": { "h": 6, "w": 4, "x": 12, "y": 1 },
+        "type": "stat",
+        "title": "Configured Peers",
+        "description": "Number of configured peers",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "dark-red" },
+                { "value": 1, "color": "green" }
+              ]
+            },
+            "min": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "targets": [
+          {
+            "expr": "ntp_peer_count{source=\"ntpsec-rs\"}",
+            "legendFormat": "Peers",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "gridPos": { "h": 6, "w": 4, "x": 16, "y": 1 },
+        "type": "stat",
+        "title": "Reachable Peers",
+        "description": "Number of reachable peers",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "dark-red" },
+                { "value": 1, "color": "orange" },
+                { "value": 2, "color": "green" }
+              ]
+            },
+            "min": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "targets": [
+          {
+            "expr": "ntp_peers_reachable{source=\"ntpsec-rs\"}",
+            "legendFormat": "Reachable",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "gridPos": { "h": 6, "w": 4, "x": 20, "y": 1 },
+        "type": "stat",
+        "title": "Uptime",
+        "description": "Daemon uptime",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": { "mode": "none" },
+            "decimals": 0
+          },
+          "overrides": []
+        },
+        "options": {
+          "colorMode": "none",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "auto"
+        },
+        "targets": [
+          {
+            "expr": "ntp_uptime_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Uptime",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+        "id": 8,
+        "panels": [],
+        "title": "Clock Discipline",
+        "type": "row"
+      },
+      {
+        "id": 9,
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "type": "timeseries",
+        "title": "Clock Offset",
+        "description": "Clock offset per peer and system aggregate (seconds)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "linear",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 20,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            },
+            "min": null,
+            "max": null
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "System Offset" },
+              "properties": [
+                { "id": "custom.lineWidth", "value": 2 },
+                { "id": "custom.fillOpacity", "value": 30 }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "ntp_offset_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "System Offset",
+            "refId": "SysOffset"
+          },
+          {
+            "expr": "ntp_peer_offset_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "{{peer}}",
+            "refId": "PeerOffset"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "type": "timeseries",
+        "title": "Frequency",
+        "description": "Local clock frequency error (PPM)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ppm",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "linear",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 25,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "PPM",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "ntp_frequency_ppm{source=\"ntpsec-rs\"}",
+            "legendFormat": "Frequency",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+        "type": "timeseries",
+        "title": "Jitter",
+        "description": "System and per-peer jitter (seconds)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "linear",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 20,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "seconds",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "System Jitter" },
+              "properties": [
+                { "id": "custom.lineWidth", "value": 2 },
+                { "id": "custom.fillOpacity", "value": 30 }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "ntp_jitter_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "System Jitter",
+            "refId": "Sys"
+          },
+          {
+            "expr": "ntp_peer_jitter_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "{{peer}}",
+            "refId": "Peer"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+        "type": "timeseries",
+        "title": "Root Distance",
+        "description": "Root delay and root dispersion (seconds)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "linear",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 20,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "seconds",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "ntp_root_delay_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Root Delay",
+            "refId": "Delay"
+          },
+          {
+            "expr": "ntp_root_dispersion_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Root Dispersion",
+            "refId": "Dispersion"
+          }
+        ]
+      },
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+        "id": 13,
+        "panels": [],
+        "title": "Peer Statistics",
+        "type": "row"
+      },
+      {
+        "id": 14,
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+        "type": "timeseries",
+        "title": "Peer Reach",
+        "description": "Per-peer reach register (octal 0-377)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "stepBefore",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 30,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "Reach",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" },
+                { "value": 1, "color": "dark-red" },
+                { "value": 177, "color": "orange" },
+                { "value": 377, "color": "green" }
+              ]
+            },
+            "min": 0,
+            "max": 377
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "ntp_peer_reach{source=\"ntpsec-rs\"}",
+            "legendFormat": "{{peer}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 15,
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+        "type": "timeseries",
+        "title": "Poll Interval",
+        "description": "System and per-peer poll interval (seconds)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "stepAfter",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 20,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "seconds",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            },
+            "min": 0
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "System Poll" },
+              "properties": [
+                { "id": "custom.lineWidth", "value": 2 },
+                { "id": "custom.fillOpacity", "value": 30 }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "ntp_poll_interval_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "System Poll",
+            "refId": "Sys"
+          },
+          {
+            "expr": "ntp_peer_poll{source=\"ntpsec-rs\"}",
+            "legendFormat": "{{peer}}",
+            "refId": "Peer"
+          }
+        ]
+      },
+      {
+        "id": 16,
+        "gridPos": { "h": 10, "w": 24, "x": 0, "y": 33 },
+        "type": "table",
+        "title": "Peer Health",
+        "description": "Current per-peer statistics summary",
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "custom": {
+              "align": "auto",
+              "cellOptions": { "type": "auto" },
+              "inspect": false
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "Reach" },
+              "properties": [
+                {
+                  "id": "custom.cellOptions",
+                  "value": { "type": "color-background", "mode": "basic" }
+                },
+                {
+                  "id": "thresholds",
+                  "value": {
+                    "mode": "absolute",
+                    "steps": [
+                      { "value": null, "color": "red" },
+                      { "value": 1, "color": "red" },
+                      { "value": 200, "color": "orange" },
+                      { "value": 377, "color": "green" }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "Stratum" },
+              "properties": [
+                {
+                  "id": "custom.cellOptions",
+                  "value": { "type": "color-background", "mode": "basic" }
+                },
+                {
+                  "id": "thresholds",
+                  "value": {
+                    "mode": "absolute",
+                    "steps": [
+                      { "value": null, "color": "green" },
+                      { "value": 1, "color": "green" },
+                      { "value": 5, "color": "yellow" },
+                      { "value": 16, "color": "red" }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "Offset" },
+              "properties": [
+                { "id": "unit", "value": "s" },
+                { "id": "displayName", "value": "Offset (s)" },
+                { "id": "decimals", "value": 6 }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "Jitter" },
+              "properties": [
+                { "id": "unit", "value": "s" },
+                { "id": "displayName", "value": "Jitter (s)" },
+                { "id": "decimals", "value": 6 }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "Delay" },
+              "properties": [
+                { "id": "unit", "value": "s" },
+                { "id": "displayName", "value": "Delay (s)" },
+                { "id": "decimals", "value": 6 }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "Dispersion" },
+              "properties": [
+                { "id": "unit", "value": "s" },
+                { "id": "displayName", "value": "Dispersion (s)" },
+                { "id": "decimals", "value": 6 }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "Poll" },
+              "properties": [
+                { "id": "unit", "value": "s" },
+                { "id": "displayName", "value": "Poll (s)" }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "footer": { "show": false, "countRows": false },
+          "frameIndex": 0,
+          "showHeader": true,
+          "sortBy": [
+            { "displayName": "Reach", "desc": true }
+          ]
+        },
+        "transformations": [
+          {
+            "id": "groupingToMatrix",
+            "options": {
+              "columnField": "peer",
+              "rowField": "Metric",
+              "valueField": "Value",
+              "showField": "peer"
+            }
+          },
+          {
+            "id": "prepareTimeSeries",
+            "options": {
+              "multiFrame": "true",
+              "format": "wide"
+            }
+          }
+        ],
+        "targets": [
+          {
+            "expr": "ntp_peer_offset_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Offset {{peer}}",
+            "refId": "Offset",
+            "instant": true
+          },
+          {
+            "expr": "ntp_peer_jitter_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Jitter {{peer}}",
+            "refId": "Jitter",
+            "instant": true
+          },
+          {
+            "expr": "ntp_peer_delay_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Delay {{peer}}",
+            "refId": "Delay",
+            "instant": true
+          },
+          {
+            "expr": "ntp_peer_dispersion_seconds{source=\"ntpsec-rs\"}",
+            "legendFormat": "Dispersion {{peer}}",
+            "refId": "Dispersion",
+            "instant": true
+          },
+          {
+            "expr": "ntp_peer_stratum{source=\"ntpsec-rs\"}",
+            "legendFormat": "Stratum {{peer}}",
+            "refId": "Stratum",
+            "instant": true
+          },
+          {
+            "expr": "ntp_peer_reach{source=\"ntpsec-rs\"}",
+            "legendFormat": "Reach {{peer}}",
+            "refId": "Reach",
+            "instant": true
+          },
+          {
+            "expr": "ntp_peer_poll{source=\"ntpsec-rs\"}",
+            "legendFormat": "Poll {{peer}}",
+            "refId": "Poll",
+            "instant": true
+          }
+        ]
+      },
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+        "id": 17,
+        "panels": [],
+        "title": "Activity",
+        "type": "row"
+      },
+      {
+        "id": 18,
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+        "type": "timeseries",
+        "title": "Clock Adjustments",
+        "description": "Rate of clock adjustments (per second)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "cps",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "linear",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 25,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "adjustments/s",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "rate(ntp_adjustments_total{source=\"ntpsec-rs\"}[$__rate_interval])",
+            "legendFormat": "Adjustments/s",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "id": 19,
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+        "type": "timeseries",
+        "title": "Packet Rate",
+        "description": "Rate of NTP packets received and processed (requires ntp_packets_total metric)",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "pps",
+            "color": { "mode": "palette-classic" },
+            "custom": {
+              "lineInterpolation": "linear",
+              "lineStyle": { "fill": "solid" },
+              "lineWidth": 1,
+              "fillOpacity": 25,
+              "gradientMode": "none",
+              "spanNulls": true,
+              "pointSize": 0,
+              "showPoints": "never",
+              "axisPlacement": "auto",
+              "axisLabel": "packets/s",
+              "axisColorMode": "text",
+              "scaleDistribution": { "type": "linear" },
+              "hideFrom": { "tooltip": false, "viz": false, "legend": false }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": null, "color": "green" }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "calcs": ["lastNotNull", "min", "max", "mean"],
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "targets": [
+          {
+            "expr": "rate(ntp_packets_received_total{source=\"ntpsec-rs\"}[$__rate_interval])",
+            "legendFormat": "Received/s",
+            "refId": "Recv"
+          },
+          {
+            "expr": "rate(ntp_packets_processed_total{source=\"ntpsec-rs\"}[$__rate_interval])",
+            "legendFormat": "Processed/s",
+            "refId": "Proc"
+          }
+        ]
+      }
+    ],
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "15s",
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "15s", "30s", "1m", "5m", "15m", "30m"],
+      "time_options": ["5m", "15m", "1h", "6h", "24h", "7d", "30d"]
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "datasource",
+          "type": "datasource",
+          "pluginId": "prometheus",
+          "query": "prometheus",
+          "current": {},
+          "hide": 0,
+          "label": "Data Source",
+          "refresh": 1,
+          "regex": "",
+          "skipUrlSync": false
+        }
+      ]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["fuzz"]
+exclude = ["fuzz", "crates/ntpsec-rs-xdp/xdp"]
 members = [
     "crates/ntpsec-rs-core",
     "crates/ntpsec-rs-io",
@@ -21,6 +21,7 @@ members = [
     "crates/ntpsec-rs-sweep",
     "crates/ntpsec-rs-loggps",
     "crates/ntpsec-rs-logtemp",
+    "crates/ntpsec-rs-xdp",
     "xtask",
 ]
 

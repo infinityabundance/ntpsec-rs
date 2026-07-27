@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "ntpsec-xdp-ebpf"
+description = "eBPF XDP program for NTP packet hardware-timestamping"
+version = "0.3.49"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/infinityabundance/ntpsec-rs"
+homepage = "https://github.com/infinityabundance/ntpsec-rs"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.2"
+network-types = "0.0.2"
+memoffset = "0.9"
+
+[features]
+default = []
+
+# The eBPF program is compiled for the bpf target; no need for std.
+[lib]
+name = "ntpsec_xdp_ebpf"
+path = "src/ntp_timestamp.rs"
+crate-type = ["lib"]
+
+# Required by aya-ebpf
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bpf_target_arch)'] }

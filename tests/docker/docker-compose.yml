@@ -21,6 +21,8 @@ services:
         sleep 2 &&
         ntpd -c /etc/ntp-oracle.conf -n -N
       "
+    ports:
+      - "10123:123/udp"
     volumes:
       - ./ntp-oracle.conf:/etc/ntp-oracle.conf:ro
     networks:
@@ -48,6 +50,8 @@ services:
       - NET_BIND_SERVICE
     depends_on:
       - ntpsec-oracle
+    environment:
+      RUST_LOG: info
 
   # Synthetic packet generator for differential testing
   harness:
@@ -60,6 +64,27 @@ services:
     depends_on:
       - ntpsec-oracle
       - ntpsec-rs
+
+  # Differential fuzzer: sends mutated packets to both daemons and compares
+  differential-fuzz:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.harness
+    networks:
+      ntp-lab:
+        ipv4_address: 10.100.0.31
+    depends_on:
+      - ntpsec-oracle
+      - ntpsec-rs
+    environment:
+      ORACLE_HOST: "10.100.0.10"
+      RS_HOST: "10.100.0.20"
+    command: >
+      python3 /tests/differential_fuzzer.py
+        --oracle 10.100.0.10
+        --candidate 10.100.0.20
+        --iterations 100000
+        --rate-limit 0.001
 
 networks:
   ntp-lab:

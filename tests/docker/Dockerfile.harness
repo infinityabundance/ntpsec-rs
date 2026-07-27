@@ -1,4 +1,7 @@
 FROM python:3.11-slim
 WORKDIR /tests
+
 COPY tests/docker/oracle_harness.py /tests/oracle_harness.py
+COPY tests/docker/differential_fuzzer.py /tests/differential_fuzzer.py
+
 CMD ["python3", "/tests/oracle_harness.py"]

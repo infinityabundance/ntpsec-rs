@@ -40,3 +40,9 @@ name = "differential"
 path = "fuzz_targets/differential.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "differential_side_by_side"
+path = "fuzz_targets/differential_side_by_side.rs"
+test = false
+doc = false

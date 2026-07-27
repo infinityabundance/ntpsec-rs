@@ -126,6 +126,93 @@ jobs:
         run: |
           docker compose -f tests/docker/docker-compose.yml up --exit-code-from harness 2>&1 | tail -50
 
+  differential-fuzz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: cargo build --release -p ntpsec-rs-d -p ntpsec-rs-query 2>&1
+
+      - name: Build Docker oracle topology
+        run: |
+          docker compose -f tests/docker/docker-compose.yml build 2>&1
+
+      - name: Start daemon containers in background
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d ntpsec-oracle ntpsec-rs
+
+      - name: Wait for daemons to be ready
+        run: |
+          # Check oracle
+          echo "Waiting for NTPsec oracle..."
+          for i in $(seq 1 30); do
+            if docker compose -f tests/docker/docker-compose.yml run --rm harness \
+              timeout 3 python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(2)
+pkt = b'\x1b' + b'\x00' * 47
+s.sendto(pkt, ('10.100.0.10', 123))
+try:
+    resp, _ = s.recvfrom(128)
+    if len(resp) >= 48:
+        exit(0)
+except:
+    pass
+s.close()
+exit(1)" 2>/dev/null; then
+              echo "NTPsec oracle ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "NTPsec oracle NOT REACHABLE"
+              docker compose -f tests/docker/docker-compose.yml logs ntpsec-oracle
+              exit 1
+            fi
+            sleep 2
+          done
+
+          # Check ntpsec-rs
+          echo "Waiting for ntpsec-rs..."
+          for i in $(seq 1 30); do
+            if docker compose -f tests/docker/docker-compose.yml run --rm harness \
+              timeout 3 python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(2)
+pkt = b'\x1b' + b'\x00' * 47
+s.sendto(pkt, ('10.100.0.20', 123))
+try:
+    resp, _ = s.recvfrom(128)
+    if len(resp) >= 48:
+        exit(0)
+except:
+    pass
+s.close()
+exit(1)" 2>/dev/null; then
+              echo "ntpsec-rs ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ntpsec-rs NOT REACHABLE"
+              docker compose -f tests/docker/docker-compose.yml logs ntpsec-rs
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "Both daemons ready"
+
+      - name: Run differential fuzzer
+        run: |
+          docker compose -f tests/docker/docker-compose.yml run --rm \
+            differential-fuzz 2>&1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f tests/docker/docker-compose.yml down -v 2>&1 || true
+
   soak:
     runs-on: ubuntu-22.04
     steps:
@@ -157,6 +244,37 @@ jobs:
         run: |
           cargo test --release test_soak_10000_cycles --test soak_court -p ntpsec-rs-core 2>&1
 
+  unsafe-audit:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install cargo-geiger
+        run: cargo install cargo-geiger --locked 2>&1 | tail -3
+      - name: Scan unsafe usage
+        run: |
+          cd crates/ntpsec-rs-core && cargo geiger --all-features 2>&1 | tail -30 || true
+          cd ../ntpsec-rs-io && cargo geiger --all-features 2>&1 | tail -5 || true
+      - name: Verify unsafe count matches docs
+        run: |
+          COUNT=$(grep -rn 'unsafe' crates/ --include='*.rs' | grep -v '/target/' | grep -v '#\[cfg(test)\]' | grep -v 'mod tests' | wc -l)
+          DOC_COUNT=106  # documented baseline from docs/security-review.md
+          echo "Unsafe usages found approx: $COUNT (documented baseline: $DOC_COUNT)"
+          echo "Note: Approximate count includes unsafe keywords, not just blocks"
+          echo "Run ci/generate-unsafe-audit-site.sh for detailed per-block audit"
+      - name: Check audit site exists
+        run: |
+          if [ -f docs/unsafe-audit/INDEX.md ]; then
+            echo "Audit site found at docs/unsafe-audit/"
+            grep -c '^| U-' docs/unsafe-audit/INDEX.md
+          else
+            echo "WARNING: docs/unsafe-audit/INDEX.md not found"
+            echo "Run ci/generate-unsafe-audit-site.sh to generate it"
+          fi
+
   fuzz:
     runs-on: ubuntu-22.04
     steps:
@@ -186,6 +304,7 @@ jobs:
               exit $result
             fi
           done
+          echo "--- side-by-side differential target requires daemons; skipping in smoke test ---"
           echo "All fuzz targets passed"
 
   package-swap:

@@ -1,0 +1,36 @@
+[package]
+name = "ntpsec-rs-xdp"
+description = "XDP (eXpress Data Path) program for NTP packet hardware-timestamping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ntpsec-rs-xdp"
+readme = "README.md"
+categories = ["science", "network-programming", "hardware-support"]
+keywords = ["ntp", "xdp", "ebpf", "timestamping", "time-synchronization"]
+
+[dependencies]
+aya = "0.12"
+aya-log = "0.2"
+bytes = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+libc = "0.2"
+ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[features]
+default = []
+cli = ["dep:clap", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "ntpsec-rs-xdp"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[build-dependencies]
+# No special build deps — the eBPF program is built as a separate cargo crate.
+# See build.rs for the compilation orchestration.

@@ -108,6 +108,31 @@ fn write_response(stream: &mut std::net::TcpStream, status: u16, body: &str) {
     let _ = stream.flush();
 }
 
+/// Convert a sockaddr_storage to an "ip:port" string suitable for Prometheus labels.
+fn peer_addr_str(sa: &libc::sockaddr_storage) -> String {
+    unsafe {
+        match sa.ss_family as libc::c_int {
+            libc::AF_INET => {
+                let sin = &*(sa as *const _ as *const libc::sockaddr_in);
+                let octets = sin.sin_addr.s_addr.to_be_bytes();
+                let port = u16::from_be(sin.sin_port);
+                format!(
+                    "{}.{}.{}.{}:{}",
+                    octets[0], octets[1], octets[2], octets[3], port
+                )
+            }
+            libc::AF_INET6 => {
+                let sin6 = &*(sa as *const _ as *const libc::sockaddr_in6);
+                let port = u16::from_be(sin6.sin6_port);
+                // Format as [addr]:port for IPv6
+                let addr = std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr);
+                format!("[{}]:{}", addr, port)
+            }
+            _ => "0.0.0.0:0".to_string(),
+        }
+    }
+}
+
 /// Build the Prometheus-format metrics text from the daemon engine state.
 fn format_metrics(engine: &Arc<Mutex<DaemonEngine>>) -> String {
     // Extract all field values while holding the lock, then release it
@@ -125,6 +150,7 @@ fn format_metrics(engine: &Arc<Mutex<DaemonEngine>>) -> String {
         poll_seconds,
         adjustments,
         uptime,
+        peer_metrics,
     ) = {
         let guard = match engine.lock() {
             Ok(g) => g,
@@ -148,6 +174,26 @@ fn format_metrics(engine: &Arc<Mutex<DaemonEngine>>) -> String {
             ntpsec_rs_core::ntp_types::LeapIndicator::Alarm => 3,
         };
 
+        // ── Per-peer metrics snapshot ───────────────────────────────────
+        let peer_metrics: Vec<(String, u16, f64, f64, f64, f64, u8, u8, u8)> = guard
+            .peers
+            .iter()
+            .map(|p| {
+                let addr = peer_addr_str(&p.srcaddr);
+                (
+                    addr,
+                    p.associd,
+                    p.offset,
+                    p.jitter,
+                    p.delay,
+                    p.dispersion,
+                    p.stratum,
+                    p.reach.register(),
+                    p.hpoll, // poll exponent
+                )
+            })
+            .collect();
+
         (
             sys.stratum,
             sys.sys_offset,
@@ -161,9 +207,57 @@ fn format_metrics(engine: &Arc<Mutex<DaemonEngine>>) -> String {
             poll_seconds,
             lf.update_count, // adjustments_total
             sys.uptime_secs, // uptime_seconds
+            peer_metrics,
         )
     };
     // ── Lock released ──────────────────────────────────────────────────
+
+    // Build the per-peer metrics string.
+    let mut peer_out = String::new();
+    for (addr, associd, offset, jitter_val, delay, dispersion, stratum, reach, hpoll) in
+        &peer_metrics
+    {
+        let poll_secs = if *hpoll > 0 { 1u64 << hpoll } else { 0 };
+        peer_out.push_str(&format!(
+            concat!(
+                "# HELP ntp_peer_offset_seconds Per-peer clock offset\n",
+                "# TYPE ntp_peer_offset_seconds gauge\n",
+                "ntp_peer_offset_seconds{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+                "# HELP ntp_peer_jitter_seconds Per-peer jitter\n",
+                "# TYPE ntp_peer_jitter_seconds gauge\n",
+                "ntp_peer_jitter_seconds{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+                "# HELP ntp_peer_delay_seconds Per-peer network delay\n",
+                "# TYPE ntp_peer_delay_seconds gauge\n",
+                "ntp_peer_delay_seconds{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+                "# HELP ntp_peer_dispersion_seconds Per-peer dispersion\n",
+                "# TYPE ntp_peer_dispersion_seconds gauge\n",
+                "ntp_peer_dispersion_seconds{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+                "# HELP ntp_peer_stratum Per-peer stratum\n",
+                "# TYPE ntp_peer_stratum gauge\n",
+                "ntp_peer_stratum{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+                "# HELP ntp_peer_reach Per-peer reach register (octal)\n",
+                "# TYPE ntp_peer_reach gauge\n",
+                "ntp_peer_reach{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+                "# HELP ntp_peer_poll Per-peer poll interval seconds\n",
+                "# TYPE ntp_peer_poll gauge\n",
+                "ntp_peer_poll{{source=\"ntpsec-rs\",peer=\"{}\",associd=\"{}\"}} {}\n",
+                "\n",
+            ),
+            addr, associd, offset,
+            addr, associd, jitter_val,
+            addr, associd, delay,
+            addr, associd, dispersion,
+            addr, associd, stratum,
+            addr, associd, reach,
+            addr, associd, poll_secs,
+        ));
+    }
 
     // Build the output — keep the format stable for automated scraping.
     format!(
@@ -215,6 +309,7 @@ fn format_metrics(engine: &Arc<Mutex<DaemonEngine>>) -> String {
             "# HELP ntp_uptime_seconds Daemon uptime\n",
             "# TYPE ntp_uptime_seconds gauge\n",
             "ntp_uptime_seconds{{source=\"ntpsec-rs\"}} {}\n",
+            "\n",
         ),
         stratum,
         sys_offset,
@@ -228,5 +323,5 @@ fn format_metrics(engine: &Arc<Mutex<DaemonEngine>>) -> String {
         poll_seconds,
         adjustments,
         uptime,
-    )
+    ) + &peer_out
 }

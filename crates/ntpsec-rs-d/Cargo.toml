@@ -19,8 +19,13 @@ path = "src/main.rs"
 ntpsec-rs-core = { path = "../ntpsec-rs-core", version = "0.3.0" }
 ntpsec-rs-io = { path = "../ntpsec-rs-io", version = "0.3.0" }
 ntpsec-rs-metrics = { path = "../ntpsec-rs-metrics", version = "0.3.0" }
+ntpsec-rs-xdp = { path = "../ntpsec-rs-xdp", version = "0.3.0", optional = true }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 signal-hook = "0.3"
+
+[features]
+default = []
+xdp = ["dep:ntpsec-rs-xdp"]

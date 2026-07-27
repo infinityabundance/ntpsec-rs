@@ -137,6 +137,46 @@ struct Cli {
     /// Port for the Prometheus metrics HTTP endpoint (disabled if absent)
     #[arg(long)]
     metrics_port: Option<u16>,
+
+    /// Enable XDP hardware timestamping on the given network interface
+    /// (requires the "xdp" feature and Linux 5.10+ with BTF support).
+    #[cfg(feature = "xdp")]
+    #[arg(long)]
+    xdp_interface: Option<String>,
+
+    /// Use SKB mode (generic XDP) instead of native driver mode.
+    /// Useful when the NIC driver does not support native XDP.
+    #[cfg(feature = "xdp")]
+    #[arg(long)]
+    skb_mode: bool,
+}
+
+/// Find the XDP timestamp event that best matches a received packet, if any.
+///
+/// Matching is done by comparing the packet's source IP address with the XDP
+/// event's source IP. In a server context, incoming NTP requests come from
+/// clients (source = client), and the XDP event records the same source IP.
+#[cfg(feature = "xdp")]
+fn find_matching_xdp_event<'a>(
+    xdp_events: &'a [ntpsec_rs_xdp::NtpTimestampEvent],
+    packet_source: &ntpsec_rs_core::ntp_io::NetAddr,
+) -> Option<&'a ntpsec_rs_xdp::NtpTimestampEvent> {
+    // Extract the source IP bytes from the packet source address.
+    // NetAddr.addr is [u8; 16], with IPv4 stored in the first 4 bytes.
+    if packet_source.family != 4 {
+        return None; // Only match IPv4 for now
+    }
+
+    let src_ipv4: [u8; 4] = [
+        packet_source.addr[0],
+        packet_source.addr[1],
+        packet_source.addr[2],
+        packet_source.addr[3],
+    ];
+
+    // Find the first matching XDP event by source IP.
+    // In practice there should be at most one match per packet.
+    xdp_events.iter().find(|e| e.source_ip == src_ipv4)
 }
 
 /// Resolved listen addresses from CLI `-I` flags (empty = bind all).
@@ -205,6 +245,28 @@ fn main() {
     let mut engine = DaemonEngine::new(config);
     let mut clock = ntpsec_rs_io::RealSystemClock::new();
     let mut network = ntpsec_rs_io::RealNetworkIo::new();
+
+    // ──── XDP Hardware Timestamping ───────────────────────────────────
+    #[cfg(feature = "xdp")]
+    let mut xdp_collector: Option<ntpsec_rs_xdp::XdpCollector> = None;
+
+    #[cfg(feature = "xdp")]
+    if let Some(ref iface) = cli.xdp_interface {
+        match ntpsec_rs_xdp::XdpCollector::start(iface) {
+            Ok(collector) => {
+                tracing::info!("XDP hardware timestamping enabled on '{}'", iface);
+                xdp_collector = Some(collector);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to enable XDP timestamping on '{}': {}. \
+                     Falling back to software timestamps.",
+                    iface,
+                    e
+                );
+            }
+        }
+    }
 
     // Record daemon start time for uptime tracking
     engine.system.start_time = clock.now();
@@ -625,6 +687,20 @@ fn main() {
         // ── Lock released ─────────────────────────────────────────────
 
         // ── Phase 2: I/O (no lock held — metrics endpoint is responsive) ─
+
+        // 0. Poll XDP timestamp events (no lock needed)
+        #[cfg(feature = "xdp")]
+        let xdp_events: Vec<ntpsec_rs_xdp::NtpTimestampEvent> =
+            if let Some(ref mut collector) = xdp_collector {
+                let events = collector.poll();
+                if !events.is_empty() {
+                    tracing::trace!("XDP: {} timestamp events", events.len());
+                }
+                events
+            } else {
+                Vec::new()
+            };
+
         // 1a. Poll refclock file descriptors for readiness (non-blocking).
         let mut ready_refclock = false;
         for fd in &refclock_fds {
@@ -698,7 +774,46 @@ fn main() {
                             }
                             match network.recv_from(socket_idx) {
                                 Ok(dgram) => {
+                                    #[allow(unused_mut)]
+                                    let mut dgram = dgram;
                                     packets_processed += 1;
+
+                                    // Try to replace the software timestamp with an XDP
+                                    // hardware timestamp if one is available for this packet.
+                                    #[cfg(feature = "xdp")]
+                                    if dgram.timestamp_source
+                                        != ntpsec_rs_core::ntp_io::TimestampSource::UserspaceFallback
+                                        && dgram.timestamp_source
+                                            != ntpsec_rs_core::ntp_io::TimestampSource::AncillaryTruncated
+                                    {
+                                        // Prefer XDP timestamps only when the software timestamp
+                                        // is also reliable — use whichever is more precise.
+                                        if let Some(xdp_event) = find_matching_xdp_event(
+                                            &xdp_events,
+                                            &dgram.source,
+                                        ) {
+                                            let xdp_ntp_ts = ntpsec_rs_xdp::xdp_timestamp_to_ntp(
+                                                xdp_event.timestamp_ns,
+                                                ntpsec_rs_core::ntp_fp::ts_to_ntp(
+                                                    now.seconds,
+                                                    now.fraction as i64,
+                                                ),
+                                                xdp_collector
+                                                    .as_ref()
+                                                    .map(|c| c.mono_ns_at_ref())
+                                                    .unwrap_or(0),
+                                            );
+                                            tracing::trace!(
+                                                "XDP timestamp applied: {} ns (src={:?})",
+                                                xdp_event.timestamp_ns,
+                                                dgram.source,
+                                            );
+                                            dgram.rx_timestamp = xdp_ntp_ts;
+                                            dgram.timestamp_source =
+                                                ntpsec_rs_core::ntp_io::TimestampSource::KernelNanoseconds;
+                                        }
+                                    }
+
                                     let event = DaemonEvent::PacketReceived(dgram);
                                     let actions = engine.handle(event);
                                     execute_actions(&actions, &mut clock, &mut network, &mut store);

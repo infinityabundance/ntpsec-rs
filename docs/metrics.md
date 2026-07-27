@@ -31,8 +31,22 @@ curl http://localhost:9090/metrics
 | `ntp_poll_interval_seconds`     | gauge   | Current poll interval (seconds, 2^poll_exponent) |
 | `ntp_adjustments_total`         | counter | Total clock adjustments performed                |
 | `ntp_uptime_seconds`            | gauge   | Daemon uptime (seconds)                          |
+| `ntp_peer_offset_seconds`      | gauge   | Per-peer clock offset (seconds)                  |
+| `ntp_peer_jitter_seconds`      | gauge   | Per-peer jitter (seconds)                         |
+| `ntp_peer_delay_seconds`       | gauge   | Per-peer network delay (seconds)                  |
+| `ntp_peer_dispersion_seconds`  | gauge   | Per-peer dispersion (seconds)                     |
+| `ntp_peer_stratum`             | gauge   | Per-peer stratum                                  |
+| `ntp_peer_reach`               | gauge   | Per-peer reach register (octal value 0-377)       |
+| `ntp_peer_poll`                | gauge   | Per-peer poll interval (seconds, 2^poll_exponent)|
 
 All metrics carry the label `source="ntpsec-rs"`.
+
+Per-peer metrics additionally carry two labels:
+
+| Label     | Description                                           |
+|-----------|-------------------------------------------------------|
+| `peer`    | Peer address in `ip:port` or `[ipv6]:port` format    |
+| `associd` | Numeric association ID assigned by the daemon         |
 
 ## Implementation
 
