@@ -419,7 +419,8 @@ mod tests {
             },
             ref_ns,
         );
-        assert!(result.seconds >= 0);
-        assert!(result.seconds <= 5);
+        // 5 seconds XDP - 1 second ref = 4 seconds offset, plus NTP epoch (2208988800)
+        assert!(result.seconds >= 2208988800);
+        assert_eq!(result.seconds, 2208988804);
     }
 }

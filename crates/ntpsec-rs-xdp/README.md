@@ -7,7 +7,7 @@ switching, IRQ handling, and software queuing.
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │  NIC (Network Interface Controller)                             │
 │  Receives NTP packet at wire speed                              │
