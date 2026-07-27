@@ -11,6 +11,9 @@ readme = "README.md"
 categories = ["science", "simulation", "embedded", "network-programming"]
 keywords = ["ntp", "ntpsec", "time", "synchronization", "protocol"]
 
+[features]
+counting-alloc = []
+
 [dependencies]
 bitflags = "2"
 libc = "0.2"

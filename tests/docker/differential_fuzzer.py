@@ -25,6 +25,7 @@ import socket
 import struct
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -76,6 +77,8 @@ class Stats:
         self.errors: int = 0
         self.start_time: float = time.monotonic()
         self.running: bool = True
+        self.mismatch_patterns: dict = {}
+        self.divergence_over_time: list = []
 
     @property
     def divergence_rate(self) -> float:
@@ -628,9 +631,21 @@ def run_fuzzing_loop(oracle_host: str, oracle_port: int,
         try:
             pkt = generate_packet()
 
-            # Send to both daemons
-            oracle_resp = send_ntp_packet(oracle_host, oracle_port, pkt)
-            candidate_resp = send_ntp_packet(candidate_host, candidate_port, pkt)
+            # Send to both daemons in parallel (reduces wall-clock time)
+            oracle_result = []
+            candidate_result = []
+            def _send_oracle():
+                oracle_result.append(send_ntp_packet(oracle_host, oracle_port, pkt))
+            def _send_candidate():
+                candidate_result.append(send_ntp_packet(candidate_host, candidate_port, pkt))
+            ot = threading.Thread(target=_send_oracle)
+            ct = threading.Thread(target=_send_candidate)
+            ot.start()
+            ct.start()
+            ot.join()
+            ct.join()
+            oracle_resp = oracle_result[0] if oracle_result else None
+            candidate_resp = candidate_result[0] if candidate_result else None
 
             # Classify
             classification, detail, entries = compare_responses(
@@ -648,23 +663,45 @@ def run_fuzzing_loop(oracle_host: str, oracle_port: int,
             else:
                 stats.errors += 1
 
-            # Log first mismatch details for debugging
-            if classification == "MISMATCH" and stats.mismatches <= 5:
-                logger.warning(
-                    "MISMATCH #%d at pkt %d | %s",
-                    stats.mismatches, iteration, detail or "?",
-                )
+            # Track mismatch patterns
+            if classification == "MISMATCH":
                 for e in entries:
                     if not e.get("match"):
-                        logger.warning(
-                            "  %s: oracle=%s candidate=%s%s",
-                            e["field"], e["oracle"], e["candidate"],
-                            f" (tol={e['tolerance']})" if e.get("tolerance") else "",
-                        )
+                        key = e["field"]
+                        if key not in stats.mismatch_patterns:
+                            stats.mismatch_patterns[key] = {
+                                "count": 0,
+                                "oracle_vals": set(),
+                                "candidate_vals": set(),
+                                "first_pkt_hex": pkt.hex(),
+                            }
+                        stats.mismatch_patterns[key]["count"] += 1
+                        stats.mismatch_patterns[key]["oracle_vals"].add(str(e["oracle"]))
+                        stats.mismatch_patterns[key]["candidate_vals"].add(str(e["candidate"]))
+                # Log first 5 mismatches with details
+                if stats.mismatches <= 5:
+                    logger.warning(
+                        "MISMATCH #%d at pkt %d | %s",
+                        stats.mismatches, iteration, detail or "?",
+                    )
+                    for e in entries:
+                        if not e.get("match"):
+                            logger.warning(
+                                "  %s: oracle=%s candidate=%s%s",
+                                e["field"], e["oracle"], e["candidate"],
+                                f" (tol={e['tolerance']})" if e.get("tolerance") else "",
+                            )
 
             # Progress line
             if iteration > 0 and iteration % next_progress == 0:
                 logger.info(stats.progress_line())
+                stats.divergence_over_time.append({
+                    "packets": stats.total,
+                    "matches": stats.matches,
+                    "mismatches": stats.mismatches,
+                    "timeouts": stats.timeouts,
+                    "divergence_rate_pct": round(stats.divergence_rate, 4),
+                })
                 next_progress += 1000
 
             iteration += 1
@@ -698,8 +735,24 @@ def print_final_summary() -> None:
         "timeouts": snap["timeouts"],
         "errors": snap["errors"],
         "divergence_rate_pct": divergence_rate,
+        "divergence_rate_pct": divergence_rate,
         "exit_code": 1 if divergence_rate > 0 else 0,
     }
+
+    # Add mismatch pattern details
+    if stats.mismatch_patterns:
+        summary["mismatch_patterns"] = {}
+        for field, info in stats.mismatch_patterns.items():
+            summary["mismatch_patterns"][field] = {
+                "count": info["count"],
+                "oracle_values": sorted(info["oracle_vals"]),
+                "candidate_values": sorted(info["candidate_vals"]),
+                "first_pkt_hex": info["first_pkt_hex"],
+            }
+
+    # Add divergence over time
+    if stats.divergence_over_time:
+        summary["divergence_over_time"] = stats.divergence_over_time
 
     # Separator line for readability
     print()

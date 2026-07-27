@@ -254,26 +254,25 @@ exit(1)" 2>/dev/null; then
           toolchain: stable
       - name: Install cargo-geiger
         run: cargo install cargo-geiger --locked 2>&1 | tail -3
-      - name: Scan unsafe usage
+      - name: Scan unsafe usage (hard gate)
         run: |
-          cd crates/ntpsec-rs-core && cargo geiger --all-features 2>&1 | tail -30 || true
-          cd ../ntpsec-rs-io && cargo geiger --all-features 2>&1 | tail -5 || true
-      - name: Verify unsafe count matches docs
-        run: |
-          COUNT=$(grep -rn 'unsafe' crates/ --include='*.rs' | grep -v '/target/' | grep -v '#\[cfg(test)\]' | grep -v 'mod tests' | wc -l)
-          DOC_COUNT=106  # documented baseline from docs/security-review.md
-          echo "Unsafe usages found approx: $COUNT (documented baseline: $DOC_COUNT)"
-          echo "Note: Approximate count includes unsafe keywords, not just blocks"
-          echo "Run ci/generate-unsafe-audit-site.sh for detailed per-block audit"
-      - name: Check audit site exists
-        run: |
-          if [ -f docs/unsafe-audit/INDEX.md ]; then
-            echo "Audit site found at docs/unsafe-audit/"
-            grep -c '^| U-' docs/unsafe-audit/INDEX.md
-          else
-            echo "WARNING: docs/unsafe-audit/INDEX.md not found"
-            echo "Run ci/generate-unsafe-audit-site.sh to generate it"
+          cargo geiger --all-features --output-format Text 2>&1 | tee /tmp/geiger-report.txt
+          # Extract unsafe count from Geiger output
+          COUNT=$(grep -oP '(\d+) unsafe' /tmp/geiger-report.txt | head -1 | grep -oP '\d+')
+          echo "Unsafe usage count: $COUNT"
+          if [ -z "$COUNT" ] || [ "$COUNT" -gt 106 ]; then
+            echo "FAIL: Unsafe count ($COUNT) exceeds documented baseline (106)"
+            exit 1
           fi
+          echo "PASS: Unsafe count ($COUNT) within baseline (106)"
+      - name: Verify audit site exists
+        run: |
+          if [ ! -f docs/unsafe-audit/INDEX.md ]; then
+            echo "FAIL: docs/unsafe-audit/INDEX.md missing"
+            exit 1
+          fi
+          ENTRIES=$(grep -cE '^\|.*U-[0-9]{3}' docs/unsafe-audit/INDEX.md 2>/dev/null || echo 0)
+          echo "Audit entries: $ENTRIES"
 
   fuzz:
     runs-on: ubuntu-22.04

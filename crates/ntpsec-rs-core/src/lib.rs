@@ -31,6 +31,10 @@
 // The facade crate re-exports the public API.  Here we just define it.
 
 pub mod binio;
+
+// Counting allocator (only available with the `counting-alloc` feature)
+#[cfg(feature = "counting-alloc")]
+pub mod counting_alloc;
 pub mod daemon_engine;
 pub mod gpstolfp;
 pub mod ieee754io;
