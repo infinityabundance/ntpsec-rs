@@ -62,9 +62,24 @@ pub enum TimestampSource {
 }
 
 /// A received NTP datagram with kernel timestamp.
+///
+/// Uses a fixed-size internal buffer (`[u8; NTP_MAX_PACKET_SIZE]`) to avoid
+/// heap allocation on the hot packet receive path.  The `len` field tracks
+/// how many bytes of the buffer are valid.
+///
+/// ## Zero-allocation guarantee
+///
+/// `ReceivedDatagram` and all its fields (except the heap-allocated
+/// `BytesBuf` variant of `DataBuf`) are stack-allocated.  The I/O layer
+/// writes directly into the fixed buffer, eliminating the per-packet
+/// `Vec::push` that would otherwise occur.
 #[derive(Debug, Clone)]
 pub struct ReceivedDatagram {
-    pub bytes: Vec<u8>,
+    /// Fixed-size packet buffer (max NTP packet = 512 bytes).
+    /// Use the `data()` accessor or `bytes[..len]` to read valid data.
+    pub bytes: [u8; crate::ntp_types::NTP_MAX_PACKET_SIZE],
+    /// Number of valid bytes in `bytes`.
+    pub len: usize,
     pub source: NetAddr,
     pub destination: NetAddr,
     /// Receive timestamp (T4), captured at kernel level via SO_TIMESTAMPNS.
@@ -76,16 +91,38 @@ pub struct ReceivedDatagram {
 }
 
 impl ReceivedDatagram {
+    /// Return the valid packet data as a slice.
+    #[inline]
+    pub fn data(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    /// Return the valid packet data as a mutable slice.
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[..self.len]
+    }
+
     /// Create a datagram with userspace-fallback timestamp provenance.
     /// Available for tests and lab replay.
+    ///
+    /// Takes any type that implements `AsRef<[u8]>` (Vec, array reference, etc.)
+    /// to avoid heap allocation at the test boundary.  At most
+    /// `NTP_MAX_PACKET_SIZE` bytes are copied into the fixed-size buffer;
+    /// longer slices are truncated.
     pub fn test(
-        bytes: Vec<u8>,
+        bytes: impl AsRef<[u8]>,
         source: NetAddr,
         destination: NetAddr,
         rx_timestamp: NtpTs64,
     ) -> Self {
+        let bytes_slice = bytes.as_ref();
+        let len = bytes_slice.len().min(crate::ntp_types::NTP_MAX_PACKET_SIZE);
+        let mut buf = [0u8; crate::ntp_types::NTP_MAX_PACKET_SIZE];
+        buf[..len].copy_from_slice(&bytes_slice[..len]);
         Self {
-            bytes,
+            bytes: buf,
+            len,
             source,
             destination,
             rx_timestamp,

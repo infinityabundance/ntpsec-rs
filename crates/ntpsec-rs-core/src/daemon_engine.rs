@@ -1817,9 +1817,8 @@ impl DaemonEngine {
                                 self.precision,
                                 Some(&self.auth),
                             );
-                            let mut bytes = pkt.encode_header().to_vec();
-                            if let Some(m) = mac {
-                                bytes.extend_from_slice(&m);
+                            let bytes = pkt.encode_with_mac(mac.as_deref());
+                            if mac.is_some() {
                                 self.system.auth_counters.encrypts =
                                     self.system.auth_counters.encrypts.saturating_add(1);
                             }
@@ -2389,7 +2388,7 @@ impl DaemonEngine {
     fn handle_packet(&mut self, dgram: ReceivedDatagram) -> Vec<DaemonAction> {
         // 0. Extract mode from raw byte 0 BEFORE deciding which decoder to use.
         // Mode 6 control protocol uses a 12-byte header, not 48-byte NTP.
-        if dgram.bytes.is_empty() {
+        if dgram.len == 0 {
             return vec![DaemonAction::Log("empty packet".to_string())];
         }
         let mode = NtpMode::from_bits(dgram.bytes[0]);
@@ -2405,12 +2404,12 @@ impl DaemonEngine {
                     return vec![DaemonAction::Log("kod for control".to_string())];
                 }
             }
-            return self.handle_control(&dgram.bytes, dgram.source);
+            return self.handle_control(dgram.data(), dgram.source);
         }
 
         // ── Version tracking for NTP time packets ─────────────────────────
         // Version is in bits 3-5 of byte 0; mode is in bits 0-2.
-        let pkt_version = NtpVersion::from_bits((dgram.bytes[0] >> 3) & 0x07);
+        let pkt_version = NtpVersion::from_bits((dgram.bytes[0] >> 3) & 0x07); // full array accessible, len tracks valid bytes
         if pkt_version == NtpVersion::V4 || pkt_version == NtpVersion::V3 {
             self.system.server_counters.thisver =
                 self.system.server_counters.thisver.saturating_add(1);
@@ -2420,7 +2419,7 @@ impl DaemonEngine {
         }
 
         // 1. Decode 48-byte NTP header for time protocol packets
-        let pkt = match NtpPacket::decode_header(&dgram.bytes) {
+        let pkt = match NtpPacket::decode_header(dgram.data()) {
             Ok(p) => p,
             Err(e) => {
                 self.system.server_counters.rejected =
@@ -2467,7 +2466,7 @@ impl DaemonEngine {
                 let kod_pkt = build_kod_packet(&pkt, KISS_DENY);
                 return vec![DaemonAction::Send {
                     destination: dgram.source,
-                    bytes: kod_pkt.encode_header().to_vec(),
+                    bytes: kod_pkt.encode_with_mac(None),
                 }];
             }
         }
@@ -2487,7 +2486,7 @@ impl DaemonEngine {
                     let kod_pkt = build_kod_packet(&pkt, KISS_RATE);
                     return vec![DaemonAction::Send {
                         destination: dgram.source,
-                        bytes: kod_pkt.encode_header().to_vec(),
+                        bytes: kod_pkt.encode_with_mac(None),
                     }];
                 }
                 return vec![];
@@ -2495,7 +2494,7 @@ impl DaemonEngine {
         }
 
         // 4. Basic size validation
-        if dgram.bytes.len() < NTP_HEADER_SIZE {
+        if dgram.len < NTP_HEADER_SIZE {
             self.system.server_counters.badlength =
                 self.system.server_counters.badlength.saturating_add(1);
             return vec![DaemonAction::Log("packet too short".to_string())];
@@ -2512,7 +2511,7 @@ impl DaemonEngine {
                 // Verify request MAC if present
                 let request_keyid = {
                     // Parse the request tail to find auth info
-                    match split_packet_tail(&dgram.bytes) {
+                    match split_packet_tail(dgram.data()) {
                         Ok((_ext, Some((kid, _mac)))) => Some(kid),
                         _ => None,
                     }
@@ -2533,7 +2532,7 @@ impl DaemonEngine {
                 if let Some(kid) = request_keyid {
                     let auth_ok = Self::verify_packet_auth(
                         &self.auth,
-                        &dgram.bytes,
+                        dgram.data(),
                         kid,
                         &mut self.system.auth_counters,
                     );
@@ -2562,9 +2561,8 @@ impl DaemonEngine {
                     request_keyid.map(|kid| (&self.auth, kid)),
                 );
 
-                let mut bytes = resp.encode_header().to_vec();
-                if let Some(mac_bytes) = mac {
-                    bytes.extend_from_slice(&mac_bytes);
+                let bytes = resp.encode_with_mac(mac.as_deref());
+                if mac.is_some() {
                     self.system.auth_counters.encrypts =
                         self.system.auth_counters.encrypts.saturating_add(1);
                 }
@@ -2627,7 +2625,7 @@ impl DaemonEngine {
 
                 // Enforce NOTRUST: reject unauthenticated SymPassive from NOTRUST sources
                 let request_keyid = {
-                    match split_packet_tail(&dgram.bytes) {
+                    match split_packet_tail(dgram.data()) {
                         Ok((_ext, Some((kid, _mac)))) => Some(kid),
                         _ => None,
                     }
@@ -2645,7 +2643,7 @@ impl DaemonEngine {
                 if let Some(kid) = request_keyid {
                     let auth_ok = Self::verify_packet_auth(
                         &self.auth,
-                        &dgram.bytes,
+                        dgram.data(),
                         kid,
                         &mut self.system.auth_counters,
                     );
@@ -2678,9 +2676,8 @@ impl DaemonEngine {
                     self.precision,
                     request_keyid.map(|kid| (&self.auth, kid)),
                 );
-                let mut bytes = resp.encode_header().to_vec();
-                if let Some(mac_bytes) = mac {
-                    bytes.extend_from_slice(&mac_bytes);
+                let bytes = resp.encode_with_mac(mac.as_deref());
+                if mac.is_some() {
                     self.system.auth_counters.encrypts =
                         self.system.auth_counters.encrypts.saturating_add(1);
                 }
@@ -2896,9 +2893,13 @@ impl DaemonEngine {
         dgram: ReceivedDatagram,
     ) -> Vec<DaemonAction> {
         // Destructure dgram early to avoid borrow conflicts with self
+        // Note: dgram.bytes is now a fixed-size array [u8; 512]; we track
+        // the valid byte count via dgram.len.
         let dgram_bytes = dgram.bytes;
+        let dgram_len = dgram.len;
         let dgram_source = dgram.source;
         let dgram_rx = dgram.rx_timestamp;
+        let pkt_data: &[u8] = &dgram_bytes[..dgram_len];
 
         // Match against pending requests by (originate_ts, source, expected_mode)
         let req_idx = self.find_pending_request(&pkt.originate_ts, &dgram_source, pkt.mode());
@@ -2936,7 +2937,7 @@ impl DaemonEngine {
                     &mut self.system.auth_counters,
                     &mut self.system.server_counters,
                     peer,
-                    &dgram_bytes,
+                    pkt_data,
                     notrust_enforced,
                 );
 
@@ -4364,14 +4365,12 @@ mod tests {
             resp.transmit_ts =
                 ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(next_due + 1, 500_000_000));
 
-            let dgram = ReceivedDatagram {
-                bytes: resp.encode_header().to_vec(),
-                source: peer_netaddr([127, 0, 0, 1], 123),
-                destination: peer_netaddr([127, 0, 0, 1], 123),
-                rx_timestamp: ntp_fp::ts_to_ntp(next_due + 2, 0),
-                interface_index: None,
-                timestamp_source: TimestampSource::UserspaceFallback,
-            };
+            let dgram = ReceivedDatagram::test(
+                &resp.encode_header(),
+                peer_netaddr([127, 0, 0, 1], 123),
+                peer_netaddr([127, 0, 0, 1], 123),
+                ntp_fp::ts_to_ntp(next_due + 2, 0),
+            );
 
             // Consume the response — this should NOT create any new timers
             engine.handle(DaemonEvent::PacketReceived(dgram));
@@ -4464,14 +4463,12 @@ mod tests {
             NtpPacket::set_li_vn_mode(LeapIndicator::NoWarning, NtpVersion::V4, NtpMode::Client);
         req.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(2000, 0));
 
-        let dgram = ReceivedDatagram {
-            bytes: req.encode_header().to_vec(),
-            source: peer_netaddr([192, 168, 0, 1], 45678),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(2001, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram = ReceivedDatagram::test(
+            &req.encode_header(),
+            peer_netaddr([192, 168, 0, 1], 45678),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2001, 0),
+        );
 
         let actions = engine.handle(DaemonEvent::PacketReceived(dgram));
         assert!(
@@ -4514,18 +4511,16 @@ mod tests {
 
     #[test]
     fn test_replay_network() {
-        let dgram = ReceivedDatagram {
-            bytes: vec![0u8; 48],
-            source: peer_netaddr([127, 0, 0, 1], 123),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(1000, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram = ReceivedDatagram::test(
+            &[0u8; 48],
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1000, 0),
+        );
         let mut net = ReplayNetwork::new(vec![dgram.clone()]);
         assert!(net.bind("0.0.0.0:123").is_ok());
         let recv = net.recv().unwrap();
-        assert_eq!(recv.bytes, vec![0u8; 48]);
+        assert_eq!(recv.data(), &[0u8; 48]);
         assert!(net.recv().is_err());
 
         // Verify sent packet recording
@@ -4632,14 +4627,12 @@ mod tests {
         // Set root_dispersion so synch > offset difference (5ms dispersion)
         resp_b.root_dispersion = crate::ntp_proto::f64_to_ntp_short(0.005);
 
-        let dgram_b = ReceivedDatagram {
-            bytes: resp_b.encode_header().to_vec(),
-            source: peer_netaddr([10, 0, 0, 1], 123),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(2, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram_b = ReceivedDatagram::test(
+            &resp_b.encode_header(),
+            peer_netaddr([10, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
         engine.handle(DaemonEvent::PacketReceived(dgram_b));
         assert_eq!(
             engine.pending_requests.len(),
@@ -4657,14 +4650,12 @@ mod tests {
         // Same root_dispersion as peer B for consistent synch
         resp_a.root_dispersion = crate::ntp_proto::f64_to_ntp_short(0.005);
 
-        let dgram_a = ReceivedDatagram {
-            bytes: resp_a.encode_header().to_vec(),
-            source: peer_netaddr([127, 0, 0, 1], 123),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(2, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram_a = ReceivedDatagram::test(
+            &resp_a.encode_header(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
         engine.handle(DaemonEvent::PacketReceived(dgram_a));
         assert!(engine.pending_requests.is_empty(), "all requests consumed");
 
@@ -4727,14 +4718,12 @@ mod tests {
         resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
         // Source is 10.0.0.1, but we polled 192.168.1.1
-        let dgram = ReceivedDatagram {
-            bytes: resp.encode_header().to_vec(),
-            source: peer_netaddr([10, 0, 0, 1], 123),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(2, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram = ReceivedDatagram::test(
+            &resp.encode_header(),
+            peer_netaddr([10, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1, 0),
+        );
         let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
 
         // Response should be rejected — pending request still present
@@ -4765,14 +4754,12 @@ mod tests {
         resp.receive_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 0));
         resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
-        let dgram = ReceivedDatagram {
-            bytes: resp.encode_header().to_vec(),
-            source: peer_netaddr([127, 0, 0, 1], 123),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(2, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram = ReceivedDatagram::test(
+            &resp.encode_header(),
+            peer_netaddr([127, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(1, 0),
+        );
         let _actions = engine.handle(DaemonEvent::PacketReceived(dgram));
 
         // Response should be rejected — pending request still present
@@ -4843,14 +4830,12 @@ mod tests {
         resp.transmit_ts = ntp_fp::ntp_ts64_to_wire(ntp_fp::ts_to_ntp(1, 500_000_000));
 
         // Manually provide the response datagram to the engine
-        let dgram = ReceivedDatagram {
-            bytes: resp.encode_header().to_vec(),
-            source: peer_netaddr([10, 0, 0, 1], 123),
-            destination: peer_netaddr([127, 0, 0, 1], 123),
-            rx_timestamp: ntp_fp::ts_to_ntp(2, 0),
-            interface_index: None,
-            timestamp_source: TimestampSource::UserspaceFallback,
-        };
+        let dgram = ReceivedDatagram::test(
+            &resp.encode_header(),
+            peer_netaddr([10, 0, 0, 1], 123),
+            peer_netaddr([127, 0, 0, 1], 123),
+            ntp_fp::ts_to_ntp(2, 0),
+        );
 
         let resp_actions = engine.handle(DaemonEvent::PacketReceived(dgram));
         // Dispatch clock adjustments to SimulatedClock

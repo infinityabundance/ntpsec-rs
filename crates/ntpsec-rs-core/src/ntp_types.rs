@@ -421,6 +421,29 @@ impl NtpPacket {
         (li.to_bits() << 6) | (vn.to_bits() << 3) | mode.to_bits()
     }
 
+    /// Encode the 48-byte NTP header and append an optional MAC in one
+    /// pre-allocated `Vec<u8>`.  Avoids the pattern of encoding to a stack
+    /// array then calling `.to_vec()` + `extend_from_slice()`, which causes
+    /// a separate heap allocation for the header and potential re-allocation
+    /// when extending.
+    ///
+    /// ## Zero-allocation note
+    ///
+    /// The returned `Vec<u8>` is heap-allocated because MACs are variable-length
+    /// (20-24 bytes).  For the common case of no MAC, the Vec is heap-allocated
+    /// with exactly 48 bytes — a single allocation that is typically reused or
+    /// sent immediately by the I/O layer.
+    pub fn encode_with_mac(&self, mac: Option<&[u8]>) -> Vec<u8> {
+        let header = self.encode_header();
+        let mac_len = mac.map_or(0, |m| m.len());
+        let mut bytes = Vec::with_capacity(48 + mac_len);
+        bytes.extend_from_slice(&header);
+        if let Some(m) = mac {
+            bytes.extend_from_slice(m);
+        }
+        bytes
+    }
+
     /// Parse a complete NTP packet including extension fields and MAC.
     ///
     /// Returns `(header, extension_fields, mac)` where:

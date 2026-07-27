@@ -255,14 +255,16 @@ impl RealNetworkIo {
             ));
         }
         let socket = &self.sockets[socket_index];
-        let mut buf = vec![0u8; 512];
+        let mut buf = [0u8; ntpsec_rs_core::NTP_MAX_PACKET_SIZE];
 
         match recvmsg_with_timestamp(socket, &mut buf) {
             Ok(Some((n, src, kernel_ts, ts_source))) => {
                 let dest_addr = socket_getsockname(socket);
                 let source_netaddr = socketaddr_to_netaddr2(&src);
+                let len = n.min(ntpsec_rs_core::NTP_MAX_PACKET_SIZE);
                 Ok(ReceivedDatagram {
-                    bytes: buf[..n].to_vec(),
+                    bytes: buf,
+                    len,
                     source: source_netaddr,
                     destination: socketaddr_to_netaddr2(&dest_addr),
                     rx_timestamp: kernel_ts,
@@ -338,7 +340,7 @@ impl NetworkIo for RealNetworkIo {
     }
 
     fn recv(&mut self) -> Result<ReceivedDatagram, IoError> {
-        let mut buf = vec![0u8; 512];
+        let mut buf = [0u8; ntpsec_rs_core::NTP_MAX_PACKET_SIZE];
 
         for socket in &self.sockets {
             match recvmsg_with_timestamp(socket, &mut buf) {
@@ -347,9 +349,11 @@ impl NetworkIo for RealNetworkIo {
                     let dest_addr = socket_getsockname(socket);
 
                     let source_netaddr = socketaddr_to_netaddr2(&src);
+                    let len = n.min(ntpsec_rs_core::NTP_MAX_PACKET_SIZE);
 
                     return Ok(ReceivedDatagram {
-                        bytes: buf[..n].to_vec(),
+                        bytes: buf,
+                        len,
                         source: source_netaddr,
                         destination: socketaddr_to_netaddr2(&dest_addr),
                         rx_timestamp: kernel_ts,
@@ -740,8 +744,8 @@ fn test_real_loopback_kernel_timestamp() {
     }
     let after = ntp_fp::ts_to_ntp(ts_after.tv_sec, ts_after.tv_nsec);
 
-    // Packet integrity
-    assert_eq!(dgram.bytes, vec![0u8; 48]);
+    // Packet integrity — compare only the valid bytes in the fixed-size buffer
+    assert_eq!(dgram.data(), &[0u8; 48]);
     assert_eq!(dgram.source.addr[..4], [127, 0, 0, 1], "source loopback");
 
     // Timestamp provenance: on Linux with SO_TIMESTAMPNS, this must be
