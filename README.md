@@ -4,7 +4,6 @@ Run `cargo xtask check` to verify freshness; the pre-commit hook enforces it. --
 
 # ntpsec-rs
 
-[![CI](https://github.com/infinityabundance/ntpsec-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/infinityabundance/ntpsec-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ntpsec-rs-core.svg)](https://crates.io/crates/ntpsec-rs-core)
 
 `ntpsec-rs` is a **forensic Rust reconstruction of the NTPsec suite's timediscipline
